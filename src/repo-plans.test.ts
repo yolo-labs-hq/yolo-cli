@@ -116,9 +116,14 @@ describe('repo-plans — every committed plan file is canonical, schema-valid, n
       if (!result.ok) {
         assert.fail(
           `${file} failed validation:\n${formatErrors(result.errors)}\n\n` +
-            `Run \`yolo plan validate ${file}\` locally to reproduce. If the file ` +
-            `was hand-edited, run \`yolo plan import ${file}\` to canonicalize ` +
-            `(it rewrites the file in place via the substrate).`,
+            `Run \`yolo plan validate ${file}\` locally to reproduce. To fix:\n` +
+            `  - If the plan already exists in the DB, run \`yolo plan export <planId> -o ${file}\` ` +
+            `to overwrite from the canonical DB shape.\n` +
+            `  - Otherwise fix the file by hand. Canonical = schema-defined field order at every ` +
+            `level, lex-sorted keys in free-form maps (gate.config, integrationPolicy, ` +
+            `template.metadata), strings (not booleans/numbers) at every leaf of those maps, ` +
+            `LF endings, single trailing newline.\n` +
+            `(Note: \`yolo plan import\` does NOT rewrite the file — it rejects non-canonical input.)`,
         );
       }
     });
