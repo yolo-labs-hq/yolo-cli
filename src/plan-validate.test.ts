@@ -177,8 +177,8 @@ describe('plan-validate — canonical-form failures', () => {
 
   it('rejects a file whose merge-gate config keys are not lex-sorted', () => {
     const bad = FIXTURE_TEXT.replace(
-      /allowedStrategies:\n            - squash\n            - merge\n          baseBranch: main\n          blockOnConflict: true\n          requireGreenCi: true/,
-      'baseBranch: main\n          requireGreenCi: true\n          allowedStrategies:\n            - squash\n            - merge\n          blockOnConflict: true',
+      /allowedStrategies:\n            - squash\n            - merge\n          baseBranch: main\n          blockOnConflict: "true"\n          requireGreenCi: "true"/,
+      'baseBranch: main\n          requireGreenCi: "true"\n          allowedStrategies:\n            - squash\n            - merge\n          blockOnConflict: "true"',
     );
     const result = validatePlanText(bad);
     assert.equal(result.ok, false);
@@ -197,6 +197,92 @@ describe('plan-validate — canonical-form failures', () => {
     if (!result.ok) {
       assert.ok(result.errors.some((e) => e.kind === 'canonical'));
     }
+  });
+});
+
+// ─── No-coercion rule on free-form maps (Codex 8c.1 Round 1) ────────────
+//
+// js-yaml's default `load` coerces unquoted scalars to JS booleans /
+// numbers. Phase 8 design says gate.config + integrationPolicy values
+// must stay as strings (Round 4 Q6). The schema's
+// `additionalProperties: true` for those maps can't catch the drift,
+// so plan-validate's post-parse walker (`assertStringValuedFreeFormMap`)
+// is the enforcement point.
+describe('plan-validate — no-coercion rule on free-form maps', () => {
+  it('rejects an unquoted boolean in gate.config (retryFlakes: true → bool)', () => {
+    const bad = FIXTURE_TEXT.replace('retryFlakes: "true"', 'retryFlakes: true');
+    const result = validatePlanText(bad);
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      const coercionErr = result.errors.find(
+        (e) => e.kind === 'schema' && e.path?.endsWith('retryFlakes'),
+      );
+      assert.ok(coercionErr, 'expected a coercion error on retryFlakes');
+      assert.match(coercionErr!.message, /string/);
+      assert.match(coercionErr!.message, /quote/);
+      assert.match(coercionErr!.message, /boolean/);
+    }
+  });
+
+  it('rejects an unquoted number in gate.config (minPassRate: 0.95 → number)', () => {
+    const bad = FIXTURE_TEXT.replace('minPassRate: "0.95"', 'minPassRate: 0.95');
+    const result = validatePlanText(bad);
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      const coercionErr = result.errors.find(
+        (e) => e.kind === 'schema' && e.path?.endsWith('minPassRate'),
+      );
+      assert.ok(coercionErr, 'expected a coercion error on minPassRate');
+      assert.match(coercionErr!.message, /number/);
+    }
+  });
+
+  it('rejects an unquoted boolean in integrationPolicy (squashMerge: true → bool)', () => {
+    const bad = FIXTURE_TEXT.replace('squashMerge: "true"', 'squashMerge: true');
+    const result = validatePlanText(bad);
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      const coercionErr = result.errors.find(
+        (e) => e.kind === 'schema' && e.path === '.integrationPolicy.squashMerge',
+      );
+      assert.ok(coercionErr, 'expected a coercion error on integrationPolicy.squashMerge');
+    }
+  });
+
+  it('rejects a non-string item inside a string array in gate.config', () => {
+    const bad = FIXTURE_TEXT.replace(
+      'requiredSuites:\n            - unit\n            - integration\n',
+      'requiredSuites:\n            - unit\n            - 42\n',
+    );
+    const result = validatePlanText(bad);
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      const coercionErr = result.errors.find(
+        (e) => e.kind === 'schema' && e.path?.includes('requiredSuites[1]'),
+      );
+      assert.ok(coercionErr, 'expected a coercion error on requiredSuites[1]');
+    }
+  });
+
+  it('rejects a TitleCase boolean coercion (True → bool)', () => {
+    // js-yaml's CORE_SCHEMA (default for `load`) is case-insensitive
+    // for true/false. The rule must catch case variants too, since
+    // they're another silent-coercion vector for users who don't
+    // realize YAML treats them as booleans.
+    const bad = FIXTURE_TEXT.replace('retryFlakes: "true"', 'retryFlakes: True');
+    const result = validatePlanText(bad);
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.ok(
+        result.errors.some((e) => e.kind === 'schema' && e.path?.endsWith('retryFlakes')),
+        'expected a coercion error on retryFlakes (True coerced to boolean)',
+      );
+    }
+  });
+
+  it('accepts the canonical fixture (all gate.config + integrationPolicy leaves are quoted strings or string arrays)', () => {
+    const result = validatePlanText(FIXTURE_TEXT);
+    assert.equal(result.ok, true);
   });
 });
 
