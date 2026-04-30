@@ -18,6 +18,7 @@
 
 import { readSessionContext, formatContext, ContextResolutionError } from './context.js';
 import { validatePlanFile, formatErrors } from './plan-validate.js';
+import { runPlanImport, formatSuccess, exitCodeForFailure } from './plan-import.js';
 
 const PKG_VERSION = '0.1.0';
 
@@ -27,12 +28,16 @@ function printHelp(): void {
       'Usage: yolo <command> [options]',
       '',
       'Commands:',
-      '  context                   Print resolved session/workspace/API context.',
-      '  plan validate <file>      Validate a .yolo/plans/<slug>.md plan file (offline).',
-      '  --version                 Print substrate CLI version.',
-      '  --help                    Print this help.',
+      '  context                                   Print resolved session/workspace/API context.',
+      '  plan validate <file>                      Validate a .yolo/plans/<slug>.md plan file (offline).',
+      '  plan import <file> [opts]                 Import file → DB (work.create_plan / update_plan).',
+      '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
+      '    [--env <name>]                          Use .imports.<env>.json instead of the gitignored default.',
+      '    [--force]                               Override divergence (DB ahead of lockfile) or 409 on create.',
+      '  --version                                 Print substrate CLI version.',
+      '  --help                                    Print this help.',
       '',
-      'Future commands (Phase 8c.2+): plan import / export.',
+      'Future commands (Phase 8c.4+): plan export.',
       '',
       'Distinct from:',
       '  yolo-code   — the YOLO Studio coding-agent CLI.',
@@ -64,6 +69,75 @@ function runPlanValidate(args: string[]): number {
   process.stderr.write(`FAIL: ${file}\n`);
   process.stderr.write(`${formatErrors(result.errors)}\n`);
   return 1;
+}
+
+interface ParsedImportArgs {
+  ok: true;
+  filePath: string;
+  workspaceFlag?: string;
+  envFlag?: string;
+  force: boolean;
+}
+
+interface ParseError {
+  ok: false;
+  message: string;
+}
+
+function parseImportArgs(args: string[]): ParsedImportArgs | ParseError {
+  let filePath: string | undefined;
+  let workspaceFlag: string | undefined;
+  let envFlag: string | undefined;
+  let force = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--workspace') {
+      const v = args[++i];
+      if (!v) return { ok: false, message: '--workspace requires a value' };
+      workspaceFlag = v;
+    } else if (a.startsWith('--workspace=')) {
+      workspaceFlag = a.slice('--workspace='.length);
+    } else if (a === '--env') {
+      const v = args[++i];
+      if (!v) return { ok: false, message: '--env requires a value' };
+      envFlag = v;
+    } else if (a.startsWith('--env=')) {
+      envFlag = a.slice('--env='.length);
+    } else if (a === '--force') {
+      force = true;
+    } else if (a.startsWith('--')) {
+      return { ok: false, message: `unknown option: ${a}` };
+    } else if (!filePath) {
+      filePath = a;
+    } else {
+      return { ok: false, message: `unexpected positional argument: ${a}` };
+    }
+  }
+
+  if (!filePath) return { ok: false, message: 'plan import requires a file path' };
+  return { ok: true, filePath, workspaceFlag, envFlag, force };
+}
+
+async function runPlanImportCmd(args: string[]): Promise<number> {
+  const parsed = parseImportArgs(args);
+  if (!parsed.ok) {
+    process.stderr.write(`yolo: ${parsed.message}\n`);
+    process.stderr.write('Usage: yolo plan import <file> [--workspace <wsId>] [--env <name>] [--force]\n');
+    return 64;
+  }
+  const result = await runPlanImport({
+    filePath: parsed.filePath,
+    workspaceFlag: parsed.workspaceFlag,
+    envFlag: parsed.envFlag,
+    force: parsed.force,
+  });
+  if (result.ok) {
+    process.stdout.write(`${formatSuccess(result)}\n`);
+    return 0;
+  }
+  process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
+  return exitCodeForFailure(result.kind);
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -99,12 +173,15 @@ async function main(argv: string[]): Promise<number> {
     if (sub === 'validate') {
       return runPlanValidate(args.slice(2));
     }
+    if (sub === 'import') {
+      return runPlanImportCmd(args.slice(2));
+    }
     if (!sub) {
-      process.stderr.write('yolo: plan requires a subcommand (validate)\n');
+      process.stderr.write('yolo: plan requires a subcommand (validate, import)\n');
       return 64;
     }
     process.stderr.write(`yolo: unknown plan subcommand '${sub}'\n`);
-    process.stderr.write('Subcommands: validate\n');
+    process.stderr.write('Subcommands: validate, import\n');
     return 64;
   }
 
