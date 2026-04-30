@@ -18,7 +18,16 @@
 
 import { readSessionContext, formatContext, ContextResolutionError } from './context.js';
 import { validatePlanFile, formatErrors } from './plan-validate.js';
-import { runPlanImport, formatSuccess, exitCodeForFailure } from './plan-import.js';
+import {
+  runPlanImport,
+  formatSuccess as formatImportSuccess,
+  exitCodeForFailure as importExitCode,
+} from './plan-import.js';
+import {
+  runPlanExport,
+  formatSuccess as formatExportSuccess,
+  exitCodeForFailure as exportExitCode,
+} from './plan-export.js';
 
 const PKG_VERSION = '0.1.0';
 
@@ -34,10 +43,12 @@ function printHelp(): void {
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '    [--env <name>]                          Use .imports.<env>.json instead of the gitignored default.',
       '    [--force]                               Override divergence (DB ahead of lockfile) or 409 on create.',
+      '  plan export <planId> [opts]               Export DB → file (work.get_plan + canonicalize).',
+      '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
+      '    [--env <name>]                          Refresh .imports.<env>.json instead of the default.',
+      '    [-o <file>]                             Output path. Default: <plansDir>/<planId>.md.',
       '  --version                                 Print substrate CLI version.',
       '  --help                                    Print this help.',
-      '',
-      'Future commands (Phase 8c.4+): plan export.',
       '',
       'Distinct from:',
       '  yolo-code   — the YOLO Studio coding-agent CLI.',
@@ -133,11 +144,79 @@ async function runPlanImportCmd(args: string[]): Promise<number> {
     force: parsed.force,
   });
   if (result.ok) {
-    process.stdout.write(`${formatSuccess(result)}\n`);
+    process.stdout.write(`${formatImportSuccess(result)}\n`);
     return 0;
   }
   process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
-  return exitCodeForFailure(result.kind);
+  return importExitCode(result.kind);
+}
+
+interface ParsedExportArgs {
+  ok: true;
+  planId: string;
+  workspaceFlag?: string;
+  envFlag?: string;
+  outputFlag?: string;
+}
+
+function parseExportArgs(args: string[]): ParsedExportArgs | ParseError {
+  let planId: string | undefined;
+  let workspaceFlag: string | undefined;
+  let envFlag: string | undefined;
+  let outputFlag: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--workspace') {
+      const v = args[++i];
+      if (!v) return { ok: false, message: '--workspace requires a value' };
+      workspaceFlag = v;
+    } else if (a.startsWith('--workspace=')) {
+      workspaceFlag = a.slice('--workspace='.length);
+    } else if (a === '--env') {
+      const v = args[++i];
+      if (!v) return { ok: false, message: '--env requires a value' };
+      envFlag = v;
+    } else if (a.startsWith('--env=')) {
+      envFlag = a.slice('--env='.length);
+    } else if (a === '-o' || a === '--output') {
+      const v = args[++i];
+      if (!v) return { ok: false, message: '-o requires a value' };
+      outputFlag = v;
+    } else if (a.startsWith('--output=')) {
+      outputFlag = a.slice('--output='.length);
+    } else if (a.startsWith('--')) {
+      return { ok: false, message: `unknown option: ${a}` };
+    } else if (!planId) {
+      planId = a;
+    } else {
+      return { ok: false, message: `unexpected positional argument: ${a}` };
+    }
+  }
+
+  if (!planId) return { ok: false, message: 'plan export requires a planId' };
+  return { ok: true, planId, workspaceFlag, envFlag, outputFlag };
+}
+
+async function runPlanExportCmd(args: string[]): Promise<number> {
+  const parsed = parseExportArgs(args);
+  if (!parsed.ok) {
+    process.stderr.write(`yolo: ${parsed.message}\n`);
+    process.stderr.write('Usage: yolo plan export <planId> [--workspace <wsId>] [--env <name>] [-o <file>]\n');
+    return 64;
+  }
+  const result = await runPlanExport({
+    planId: parsed.planId,
+    workspaceFlag: parsed.workspaceFlag,
+    envFlag: parsed.envFlag,
+    outputFlag: parsed.outputFlag,
+  });
+  if (result.ok) {
+    process.stdout.write(`${formatExportSuccess(result)}\n`);
+    return 0;
+  }
+  process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
+  return exportExitCode(result.kind);
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -176,12 +255,15 @@ async function main(argv: string[]): Promise<number> {
     if (sub === 'import') {
       return runPlanImportCmd(args.slice(2));
     }
+    if (sub === 'export') {
+      return runPlanExportCmd(args.slice(2));
+    }
     if (!sub) {
-      process.stderr.write('yolo: plan requires a subcommand (validate, import)\n');
+      process.stderr.write('yolo: plan requires a subcommand (validate, import, export)\n');
       return 64;
     }
     process.stderr.write(`yolo: unknown plan subcommand '${sub}'\n`);
-    process.stderr.write('Subcommands: validate, import\n');
+    process.stderr.write('Subcommands: validate, import, export\n');
     return 64;
   }
 
