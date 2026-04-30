@@ -28,6 +28,12 @@ import {
   formatSuccess as formatExportSuccess,
   exitCodeForFailure as exportExitCode,
 } from './plan-export.js';
+import {
+  runPlanStateTransition,
+  formatSuccess as formatStateSuccess,
+  exitCodeForFailure as stateExitCode,
+  type OperatorTargetState,
+} from './plan-state.js';
 
 const PKG_VERSION = '0.1.0';
 
@@ -47,6 +53,10 @@ function printHelp(): void {
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '    [--env <name>]                          Refresh .imports.<env>.json instead of the default.',
       '    [-o <file>]                             Output path. Default: <plansDir>/<planId>.md.',
+      '  plan activate <planId> [opts]             Transition authoringState → active (work.update_plan).',
+      '  plan archive <planId> [opts]              Transition authoringState → archived (work.update_plan).',
+      '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
+      '    [--env <name>]                          Refresh .imports.<env>.json lockfile entry post-update.',
       '  --version                                 Print substrate CLI version.',
       '  --help                                    Print this help.',
       '',
@@ -219,6 +229,67 @@ async function runPlanExportCmd(args: string[]): Promise<number> {
   return exportExitCode(result.kind);
 }
 
+interface ParsedStateArgs {
+  ok: true;
+  planId: string;
+  workspaceFlag?: string;
+  envFlag?: string;
+}
+
+function parseStateArgs(args: string[]): ParsedStateArgs | ParseError {
+  let planId: string | undefined;
+  let workspaceFlag: string | undefined;
+  let envFlag: string | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--workspace') {
+      const v = args[++i];
+      if (!v) return { ok: false, message: '--workspace requires a value' };
+      workspaceFlag = v;
+    } else if (a.startsWith('--workspace=')) {
+      workspaceFlag = a.slice('--workspace='.length);
+    } else if (a === '--env') {
+      const v = args[++i];
+      if (!v) return { ok: false, message: '--env requires a value' };
+      envFlag = v;
+    } else if (a.startsWith('--env=')) {
+      envFlag = a.slice('--env='.length);
+    } else if (a.startsWith('--')) {
+      return { ok: false, message: `unknown option: ${a}` };
+    } else if (!planId) {
+      planId = a;
+    } else {
+      return { ok: false, message: `unexpected positional argument: ${a}` };
+    }
+  }
+
+  if (!planId) return { ok: false, message: 'requires a planId' };
+  return { ok: true, planId, workspaceFlag, envFlag };
+}
+
+async function runPlanStateCmd(verb: 'activate' | 'archive', args: string[]): Promise<number> {
+  const parsed = parseStateArgs(args);
+  if (!parsed.ok) {
+    process.stderr.write(`yolo: plan ${verb}: ${parsed.message}\n`);
+    process.stderr.write(`Usage: yolo plan ${verb} <planId> [--workspace <wsId>] [--env <name>]\n`);
+    return 64;
+  }
+  const targetState: OperatorTargetState = verb === 'activate' ? 'active' : 'archived';
+  const result = await runPlanStateTransition({
+    planId: parsed.planId,
+    targetState,
+    workspaceFlag: parsed.workspaceFlag,
+    envFlag: parsed.envFlag,
+  });
+  if (result.ok) {
+    process.stdout.write(`${formatStateSuccess(result)}\n`);
+    return 0;
+  }
+  process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
+  return stateExitCode(result.kind);
+}
+
 async function main(argv: string[]): Promise<number> {
   const [, , ...args] = argv;
   const cmd = args[0];
@@ -258,12 +329,18 @@ async function main(argv: string[]): Promise<number> {
     if (sub === 'export') {
       return runPlanExportCmd(args.slice(2));
     }
+    if (sub === 'activate') {
+      return runPlanStateCmd('activate', args.slice(2));
+    }
+    if (sub === 'archive') {
+      return runPlanStateCmd('archive', args.slice(2));
+    }
     if (!sub) {
-      process.stderr.write('yolo: plan requires a subcommand (validate, import, export)\n');
+      process.stderr.write('yolo: plan requires a subcommand (validate, import, export, activate, archive)\n');
       return 64;
     }
     process.stderr.write(`yolo: unknown plan subcommand '${sub}'\n`);
-    process.stderr.write('Subcommands: validate, import, export\n');
+    process.stderr.write('Subcommands: validate, import, export, activate, archive\n');
     return 64;
   }
 
