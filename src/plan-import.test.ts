@@ -211,6 +211,53 @@ describe('plan-import — CREATE happy path', () => {
       assert.equal(written[STUB_WS].foo.lastImportedVersion, 1);
       assert.equal(written[STUB_WS].foo.lastImportedRevision, computeRevisionHash(canonical));
       assert.equal(written[STUB_WS].foo.lastImportedAt, '2026-04-30T12:00:00.000Z');
+
+      // Codex 8c.3 R1 lock: the description sent to work.create_plan
+      // is the separator-normalized body, NOT the raw regex capture.
+      // Canonical files emit `---\n\n<body>`, so the captured body
+      // starts with `\n`; if we sent that raw, the imported DB
+      // description would begin with a phantom blank line and 8c.4
+      // export round-trips would churn.
+      const createBody = JSON.parse(calls[1]!.body!) as { description: string };
+      assert.equal(createBody.description, '# Foo plan\n\nBody description.\n');
+      assert.equal(createBody.description.startsWith('\n'), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('strips leading and trailing whitespace from the body before sending (R1 fix invariant)', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'yolo-cli-import-test-'));
+    try {
+      // Write a file whose body has multiple leading blank lines AND
+      // trailing whitespace. The validate step will reject it as
+      // non-canonical (so this isn't a valid input via the CLI), but
+      // we exercise makeFilePlan's normalization directly by routing
+      // through the canonicalizer first to produce a canonical file
+      // that nevertheless captures with a leading `\n` (which is the
+      // every-canonical-file case).
+      const { canonical } = buildPlanFile();
+      const filePath = path.join(dir, 'foo.md');
+      writeFileSync(filePath, canonical);
+
+      // Sanity check: the canonical file's regex-captured body really
+      // does start with `\n` — that's the bug surface we're locking.
+      const parsedBody = canonical.match(/^---\n[\s\S]*?\n---\n([\s\S]*)$/)![1]!;
+      assert.equal(parsedBody.startsWith('\n'), true, 'canonical files must capture with leading \\n');
+
+      const { fetch, calls } = makeFetchStub([mintRoute, createRoute('foo', 1)]);
+      const result = await runPlanImport({
+        filePath,
+        plansDir: dir,
+        fetchImpl: fetch,
+        env: STUB_ENV,
+        now: STUB_NOW,
+      });
+      assert.equal(result.ok, true);
+      const sentDescription = (JSON.parse(calls[1]!.body!) as { description: string }).description;
+      assert.equal(sentDescription.startsWith('\n'), false);
+      assert.match(sentDescription, /\n$/);
+      assert.equal(sentDescription.match(/\n+$/)![0]!.length, 1, 'exactly one trailing newline');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

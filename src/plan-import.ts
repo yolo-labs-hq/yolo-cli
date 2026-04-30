@@ -243,7 +243,7 @@ export async function runPlanImport(options: ImportOptions): Promise<ImportResul
 
   if (!existingEntry) {
     // CREATE path
-    const created = await tryCreate(requestCtx, mint.workspaceId, filePlan, body);
+    const created = await tryCreate(requestCtx, mint.workspaceId, filePlan);
     if (created.ok) {
       resultAction = 'created';
       resultVersion = created.version;
@@ -331,12 +331,17 @@ async function tryCreate(
   ctx: { commonApiUrl: string; internalApiKey: string; delegatedToken: string; fetchImpl?: FetchLike },
   workspaceId: string,
   filePlan: FilePlanShape,
-  description: string,
 ): Promise<CreateResult> {
+  // `filePlan.description` is the SEPARATOR-NORMALIZED body
+  // (`makeFilePlan` strips the leading `\n` that the regex captures
+  // along with the body). Sending it raw was the Codex 8c.3 R1 bug —
+  // canonical files emit `---\n\n<body>` so the captured `body`
+  // starts with `\n`, which would make imported descriptions begin
+  // with a phantom blank line and break round-trips.
   const body = {
     planId: filePlan.planId,
     name: filePlan.name,
-    description,
+    description: filePlan.description,
     inputs: filePlan.inputs ?? [],
     failurePolicy: filePlan.failurePolicy ?? 'pause-and-wait',
     autoRetryCap: filePlan.autoRetryCap,
@@ -448,10 +453,21 @@ function parsePlanFile(text: string): { frontmatter: Record<string, unknown>; bo
 }
 
 function makeFilePlan(frontmatter: Record<string, unknown>, body: string): FilePlanShape {
-  // Body is Plan.description (Phase 8b design). canonicalizePlanFile
-  // strips trailing whitespace and ensures a single trailing newline,
-  // so the body we pass to the DB matches the canonical file's body.
-  const description = body.replace(/\s+$/, '') + '\n';
+  // Body is Plan.description (Phase 8b design). The frontmatter→body
+  // separator (the blank line after the closing `---`) is OWNED by
+  // the canonicalizer (`canonicalizePlanFile` builds `---\n\n<body>`
+  // and strips leading `\n+` from the captured body before re-emit).
+  // Mirror that normalization here so `description` we send to
+  // `work.create_plan` / `work.update_plan` is exactly what
+  // round-tripping back through the canonicalizer would produce —
+  // otherwise an imported description gets a phantom leading blank
+  // line, and 8c.4 export round-trips churn (Codex 8c.3 R1 Medium).
+  const description =
+    body
+      .replace(/\r\n/g, '\n')    // CRLF → LF (validate already rejects CRLF; defense in depth)
+      .replace(/^\n+/, '')        // strip separator-owned leading newline(s)
+      .replace(/\s+$/, '') +      // collapse trailing whitespace…
+    '\n';                          // …and ensure exactly one trailing newline.
   return {
     planId: String(frontmatter.planId ?? ''),
     name: String(frontmatter.name ?? ''),
