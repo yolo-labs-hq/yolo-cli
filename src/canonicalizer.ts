@@ -39,10 +39,15 @@ import yaml from 'js-yaml';
 
 // ─── Schema-defined field orders ──────────────────────────────────────────
 
+// NB: no `description` at the plan level. Per the Phase 8 design
+// (`docs/_ORCHESTRATION_PHASE8_PLAN_FILES_DESIGN.md` §"body is
+// Plan.description"), the markdown body IS `Plan.description` —
+// frontmatter has no description field, by design, to avoid dual
+// sources. Step- and input-level `description` fields are unrelated
+// and remain in their respective `*_FIELD_ORDER`s below.
 const PLAN_FIELD_ORDER: ReadonlyArray<string> = [
   'planId',
   'name',
-  'description',
   'authoringState',
   'failurePolicy',
   'autoRetryCap',
