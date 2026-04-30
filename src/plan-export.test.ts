@@ -213,12 +213,13 @@ describe('plan-export — happy path', () => {
 
 // ─── -o flag override ────────────────────────────────────────────────────
 describe('plan-export — -o output flag', () => {
-  it('writes to the explicit output path when -o is set', async () => {
+  it('writes to a custom directory when -o is set with the matching basename stem', async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'yolo-cli-export-test-'));
     try {
       const dbPlan = makeStubDbPlan();
       const { fetch } = makeFetchStub([mintRoute, getRoute('foo', dbPlan)]);
-      const explicitPath = path.join(dir, 'subdir', 'custom-name.md');
+      // Same stem (foo), different directory.
+      const explicitPath = path.join(dir, 'subdir', 'foo.md');
       const result = await runPlanExport({
         planId: 'foo',
         plansDir: dir,
@@ -233,6 +234,61 @@ describe('plan-export — -o output flag', () => {
       assert.ok(existsSync(explicitPath));
       // Default path NOT created
       assert.equal(existsSync(path.join(dir, 'foo.md')), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects -o whose basename stem disagrees with planId (Codex 8c.4 R1 Medium)', async () => {
+    // The exported file must round-trip through `yolo plan import`,
+    // which enforces `frontmatter.planId === file-stem`. If -o lets
+    // you write to `custom-name.md` for plan `foo`, the resulting
+    // file becomes un-importable. Lock the cross-command contract:
+    // -o is for changing the DIRECTORY, not the filename.
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'yolo-cli-export-test-'));
+    try {
+      const { fetch, calls } = makeFetchStub([]);
+      const result = await runPlanExport({
+        planId: 'foo',
+        plansDir: dir,
+        outputFlag: path.join(dir, 'custom-name.md'),
+        fetchImpl: fetch,
+        env: STUB_ENV,
+        now: STUB_NOW,
+      });
+      assert.equal(result.ok, false);
+      if (result.ok) return;
+      assert.equal(result.kind, 'usage');
+      assert.match(result.message, /custom-name/);
+      assert.match(result.message, /foo/);
+      assert.match(result.message, /round-trips/);
+      assert.equal(exitCodeForFailure(result.kind), 64);
+      // No network calls — the rejection is upfront, before mint/get.
+      assert.equal(calls.length, 0);
+      // Nothing written.
+      assert.equal(existsSync(path.join(dir, 'custom-name.md')), false);
+      assert.equal(existsSync(path.join(dir, '.imports.json')), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts -o with a different extension as long as the stem matches (`foo.markdown` for planId `foo`)', async () => {
+    // The import side strips ANY extension (`path.extname`), so the
+    // round-trip rule is "stems match", not ".md required".
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'yolo-cli-export-test-'));
+    try {
+      const dbPlan = makeStubDbPlan();
+      const { fetch } = makeFetchStub([mintRoute, getRoute('foo', dbPlan)]);
+      const result = await runPlanExport({
+        planId: 'foo',
+        plansDir: dir,
+        outputFlag: path.join(dir, 'foo.markdown'),
+        fetchImpl: fetch,
+        env: STUB_ENV,
+        now: STUB_NOW,
+      });
+      assert.equal(result.ok, true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

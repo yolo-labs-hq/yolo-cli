@@ -125,6 +125,23 @@ export async function runPlanExport(options: ExportOptions): Promise<ExportResul
     );
   }
 
+  // 1b) -o basename stem must equal planId so the exported file
+  //     round-trips through `yolo plan import`, which enforces
+  //     `frontmatter.planId === file-stem` (plan-import.ts:172).
+  //     Otherwise `yolo plan export foo -o custom-name.md` produces
+  //     a file the import command refuses (Codex 8c.4 R1 Medium).
+  //     -o is for changing the DIRECTORY, not the filename.
+  if (options.outputFlag !== undefined) {
+    const outStem = path.basename(options.outputFlag, path.extname(options.outputFlag));
+    if (outStem !== options.planId) {
+      return fail(
+        'usage',
+        `-o basename stem '${outStem}' must equal planId '${options.planId}' so the exported file round-trips through \`yolo plan import\`. ` +
+          `Either rename the output to '${options.planId}.md' (with any directory you like) or drop -o to use the default <plansDir>/${options.planId}.md.`,
+      );
+    }
+  }
+
   // 2) Substrate context
   const sessionId = env.SESSION_ID;
   const internalApiKey = env.INTERNAL_API_KEY;
