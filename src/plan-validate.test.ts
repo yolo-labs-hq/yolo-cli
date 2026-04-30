@@ -284,6 +284,61 @@ describe('plan-validate — no-coercion rule on free-form maps', () => {
     const result = validatePlanText(FIXTURE_TEXT);
     assert.equal(result.ok, true);
   });
+
+  it('accepts nested objects/arrays inside gate.config + integrationPolicy when leaves are strings (Codex Round 2 Medium)', () => {
+    // Phase 8 + the 8b canonicalizer (`sortNestedKeys`) explicitly
+    // support recursive free-form nested maps. Round 2 surfaced that
+    // the Round 1 walker over-rejected these. Insert a `thresholds`
+    // object inside the test-result gate's config and a `custom`
+    // object inside integrationPolicy — all leaves still strings —
+    // and verify validate accepts the file. (Skips the canonical
+    // check because we're synthesizing a non-canonical test input;
+    // the assertion is just that there are no SCHEMA errors flagged
+    // by the no-coercion walker.)
+    const withNested = FIXTURE_TEXT
+      .replace(
+        'integrationPolicy:\n  baseBranch: main\n  squashMerge: "true"',
+        'integrationPolicy:\n  baseBranch: main\n  custom:\n    aNested: "alpha"\n    nested:\n      deeper: "beta"\n  squashMerge: "true"',
+      )
+      .replace(
+        '          minPassRate: "0.95"\n          requiredSuites:',
+        '          minPassRate: "0.95"\n          thresholds:\n            ratio: "0.8"\n            tags:\n              - smoke\n              - regression\n          requiredSuites:',
+      );
+    const result = validatePlanText(withNested);
+    // The file isn't byte-canonical (we inserted unsorted keys), so
+    // the canonical check fails. But the no-coercion walker must NOT
+    // flag any schema errors on the nested maps.
+    if (result.ok) return;
+    const schemaErrs = result.errors.filter((e) => e.kind === 'schema');
+    assert.deepEqual(
+      schemaErrs,
+      [],
+      `expected no schema errors, got:\n${schemaErrs.map((e) => `[${e.kind}] ${e.path ?? ''} ${e.message}`).join('\n')}`,
+    );
+  });
+
+  it('rejects a non-string leaf at depth ≥2 with the full path (nested coercion)', () => {
+    // Same shape as the positive test above, but with the deepest
+    // leaf as an unquoted number — must surface the full path.
+    const bad = FIXTURE_TEXT.replace(
+      '          minPassRate: "0.95"\n          requiredSuites:',
+      '          minPassRate: "0.95"\n          thresholds:\n            ratio: 0.8\n          requiredSuites:',
+    );
+    const result = validatePlanText(bad);
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      const coercionErr = result.errors.find(
+        (e) =>
+          e.kind === 'schema' &&
+          e.path === '.steps[1].gates[2].config.thresholds.ratio',
+      );
+      assert.ok(
+        coercionErr,
+        `expected coercion error at .steps[1].gates[2].config.thresholds.ratio, got:\n${result.errors.map((e) => `[${e.kind}] ${e.path ?? ''} ${e.message}`).join('\n')}`,
+      );
+      assert.match(coercionErr!.message, /number/);
+    }
+  });
 });
 
 // ─── formatErrors ───────────────────────────────────────────────────────

@@ -240,16 +240,26 @@ export function validatePlanFile(filePath: string): ValidationResult {
 }
 
 /**
- * Walk a free-form map (gate.config / integrationPolicy) and reject
- * any leaf that isn't a string or array-of-strings. Catches js-yaml's
- * silent coercion of unquoted scalars to native JS booleans/numbers,
- * which the JSON Schema's `additionalProperties: true` cannot. Per
- * Phase 8 Round 4 Q6 + the canonicalizer's no-coercion docstring, the
- * canonical wire format for these maps is strings (and arrays of
- * strings, e.g., `requires: [build]`).
+ * Walk a free-form map (gate.config / integrationPolicy) recursively
+ * and reject any non-string LEAF. Phase 8 + the 8b canonicalizer
+ * explicitly support nested mappings/arrays in these positions
+ * (`sortNestedKeys` recurses through them); the no-coercion contract
+ * applies only at the leaves — every terminal value must be a string,
+ * because js-yaml's default load coerces unquoted scalars to JS
+ * booleans/numbers and the JSON Schema's `additionalProperties: true`
+ * can't catch it (Codex 8c.1 Round 1 Medium).
  *
- * The error path uses dot/bracket notation matching Ajv's `dataPath`
- * style so error rendering stays consistent.
+ * Recursion rules:
+ *   - object → recurse into each property (path: `.key`).
+ *   - array → recurse into each item (path: `[i]`).
+ *   - string → OK (leaf).
+ *   - anything else (number / boolean / null / undefined) → REJECT.
+ *
+ * The top-level value (gate.config or integrationPolicy itself) MUST
+ * be a mapping; a list or scalar there is also a structural error.
+ *
+ * Error paths use dot/bracket notation matching Ajv's `dataPath` style
+ * so the rendered output stays consistent.
  */
 function assertStringValuedFreeFormMap(
   value: unknown,
@@ -266,27 +276,33 @@ function assertStringValuedFreeFormMap(
     });
     return;
   }
-  for (const [key, leaf] of Object.entries(value as Record<string, unknown>)) {
-    const leafPath = `${pathPrefix}.${key}`;
-    if (typeof leaf === 'string') continue;
-    if (Array.isArray(leaf)) {
-      for (let i = 0; i < leaf.length; i++) {
-        const item = leaf[i];
-        if (typeof item === 'string') continue;
-        errors.push({
-          kind: 'schema',
-          path: `${leafPath}[${i}]`,
-          message: `value must be a string (got ${describeJsType(item)}). YAML scalar coercion is disallowed in free-form config maps; quote the value explicitly to keep it as a string`,
-        });
-      }
-      continue;
+  walkLeaves(value, pathPrefix, errors);
+}
+
+/**
+ * Recursive helper: walk a value of any shape and report non-string
+ * leaves. Used by `assertStringValuedFreeFormMap` once we've confirmed
+ * the outer value is a mapping.
+ */
+function walkLeaves(value: unknown, pathPrefix: string, errors: ValidationError[]): void {
+  if (typeof value === 'string') return;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      walkLeaves(value[i], `${pathPrefix}[${i}]`, errors);
     }
-    errors.push({
-      kind: 'schema',
-      path: leafPath,
-      message: `value must be a string or array of strings (got ${describeJsType(leaf)}). YAML scalar coercion is disallowed in free-form config maps; quote the value explicitly to keep it as a string`,
-    });
+    return;
   }
+  if (value !== null && typeof value === 'object') {
+    for (const [key, leaf] of Object.entries(value as Record<string, unknown>)) {
+      walkLeaves(leaf, `${pathPrefix}.${key}`, errors);
+    }
+    return;
+  }
+  errors.push({
+    kind: 'schema',
+    path: pathPrefix,
+    message: `value must be a string (got ${describeJsType(value)}). YAML scalar coercion is disallowed in free-form config maps; quote the value explicitly to keep it as a string`,
+  });
 }
 
 function describeJsType(value: unknown): string {
