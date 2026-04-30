@@ -13,13 +13,18 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && node --test --test-reporter=spec dist/*.test.js",
     "clean": "rm -rf dist"
   },
   "engines": {
     "node": ">=20"
   },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  },
   "devDependencies": {
     "typescript": "^5.4.0",
-    "@types/node": "^20.0.0"
+    "@types/node": "^20.0.0",
+    "@types/js-yaml": "^4.0.9"
   }
 }
