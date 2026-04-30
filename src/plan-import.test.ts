@@ -218,9 +218,17 @@ describe('plan-import — CREATE happy path', () => {
       // starts with `\n`; if we sent that raw, the imported DB
       // description would begin with a phantom blank line and 8c.4
       // export round-trips would churn.
-      const createBody = JSON.parse(calls[1]!.body!) as { description: string };
+      const createBody = JSON.parse(calls[1]!.body!) as {
+        description: string;
+        authoringState: string;
+      };
       assert.equal(createBody.description, '# Foo plan\n\nBody description.\n');
       assert.equal(createBody.description.startsWith('\n'), false);
+      // Substrate now accepts authoringState on create_plan (the fix
+      // that surfaced from Phase 8d.2 verification — file says
+      // active, DB used to silently downgrade to draft). Lock that
+      // the import path forwards the file's value.
+      assert.equal(createBody.authoringState, 'active');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
