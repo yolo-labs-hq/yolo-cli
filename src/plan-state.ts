@@ -190,84 +190,65 @@ export async function runPlanStateTransition(options: PlanStateOptions): Promise
   const currentState = getJson.plan.authoringState;
   const baseVersion = getJson.plan.version;
 
-  // 6) No-op short-circuit. The substrate accepts same-state
-  //    transitions and bumps version — but we'd rather not churn
-  //    the DB on idempotent calls. Caller still gets a success
-  //    result so scripts can branch on `noop`.
+  // 6) No-op short-circuit OR PATCH. Either way, we end up with
+  //    a definitive (state, version) pair that the lockfile must
+  //    reflect — the substrate's view of the plan is the source
+  //    of truth for `lastImportedVersion`. Skipping the lockfile
+  //    refresh on the no-op path was the Codex R1 finding:
+  //    if the lockfile pointed at a stale version (e.g., the
+  //    plan was activated outside this CLI between two
+  //    `yolo plan activate` invocations), retry would return
+  //    success but leave the divergence to fire on the next
+  //    `yolo plan import`.
+  let finalVersion: number;
   if (currentState === options.targetState) {
-    return {
-      ok: true,
-      planId: options.planId,
-      workspaceId: mint.workspaceId,
-      fromState: currentState,
-      toState: options.targetState,
-      version: baseVersion,
-      noop: true,
-    };
-  }
-
-  // 7) PATCH with set-authoring-state mutation
-  const patchResponse = await authenticatedRequest(
-    ctx,
-    `/workspaces/${mint.workspaceId}/plans/${options.planId}`,
-    {
-      method: 'PATCH',
-      jsonBody: {
-        baseVersion,
-        mutations: [{ op: 'set-authoring-state', state: options.targetState }],
+    // No-op: substrate would accept same-state and bump version,
+    // but we'd rather not churn the DB on idempotent calls. The
+    // GET-response version is what the lockfile must align to.
+    finalVersion = baseVersion;
+  } else {
+    const patchResponse = await authenticatedRequest(
+      ctx,
+      `/workspaces/${mint.workspaceId}/plans/${options.planId}`,
+      {
+        method: 'PATCH',
+        jsonBody: {
+          baseVersion,
+          mutations: [{ op: 'set-authoring-state', state: options.targetState }],
+        },
       },
-    },
-  );
-  if (!patchResponse.ok) {
-    const text = await safeReadText(patchResponse);
-    return fail(
-      'http',
-      `work.update_plan failed: HTTP ${patchResponse.status} — ${text}`,
-      { status: patchResponse.status },
     );
-  }
-  const patchJson = (await patchResponse.json()) as { version?: number };
-  if (typeof patchJson.version !== 'number') {
-    return fail('http', 'work.update_plan response missing version field');
+    if (!patchResponse.ok) {
+      const text = await safeReadText(patchResponse);
+      return fail(
+        'http',
+        `work.update_plan failed: HTTP ${patchResponse.status} — ${text}`,
+        { status: patchResponse.status },
+      );
+    }
+    const patchJson = (await patchResponse.json()) as { version?: number };
+    if (typeof patchJson.version !== 'number') {
+      return fail('http', 'work.update_plan response missing version field');
+    }
+    finalVersion = patchJson.version;
   }
 
-  // 8) Refresh the lockfile if an entry exists. The file revision
-  //    didn't change (no file edit happened), so we keep the
-  //    revision pointer and only bump `lastImportedVersion` to
-  //    the post-update version. Without this, a subsequent
-  //    `yolo plan import` of the unchanged file would see DB at
-  //    version+1 vs. lockfile expecting baseVersion → DIVERGED.
-  //    Best-effort: a missing lockfile entry is fine (e.g., the
-  //    plan was created via curl, not import).
+  // 7) Refresh the lockfile entry (if one exists for this
+  //    workspace/plan). Same on both paths: revision pointer
+  //    stays put (the file didn't change), version + timestamp
+  //    realign to the substrate's current view. Best-effort skip
+  //    when no entry exists (e.g., plan was created via curl,
+  //    not import).
   const plansDir = options.plansDir ?? path.resolve('.yolo', 'plans');
-  let lockfilePath: string;
-  let lockfile: Lockfile;
-  try {
-    lockfilePath = resolveLockfilePath(plansDir, options.envFlag);
-    lockfile = readLockfile(lockfilePath);
-  } catch (err) {
-    if (err instanceof LockfileError) {
-      return fail('lockfile', err.message, { code: err.code });
-    }
-    return fail('lockfile', describeError(err));
-  }
-  const existing = getEntry(lockfile, mint.workspaceId, options.planId);
-  if (existing) {
-    const refreshed: LockfileEntry = {
-      lastImportedRevision: existing.lastImportedRevision,
-      lastImportedVersion: patchJson.version,
-      lastImportedAt: now(),
-    };
-    setEntry(lockfile, mint.workspaceId, options.planId, refreshed);
-    try {
-      writeLockfile(lockfilePath, lockfile);
-    } catch (err) {
-      if (err instanceof LockfileError) {
-        return fail('lockfile', err.message, { code: err.code });
-      }
-      return fail('lockfile', describeError(err));
-    }
-  }
+  const lockfileResult = refreshLockfileEntry({
+    plansDir,
+    envFlag: options.envFlag,
+    workspaceId: mint.workspaceId,
+    planId: options.planId,
+    newVersion: finalVersion,
+    now,
+  });
+  if (!lockfileResult.ok) return lockfileResult.error;
 
   return {
     ok: true,
@@ -275,9 +256,58 @@ export async function runPlanStateTransition(options: PlanStateOptions): Promise
     workspaceId: mint.workspaceId,
     fromState: currentState,
     toState: options.targetState,
-    version: patchJson.version,
-    noop: false,
+    version: finalVersion,
+    noop: currentState === options.targetState,
   };
+}
+
+interface RefreshLockfileOptions {
+  plansDir: string;
+  envFlag?: string;
+  workspaceId: string;
+  planId: string;
+  newVersion: number;
+  now: () => string;
+}
+
+interface RefreshLockfileOk { ok: true }
+interface RefreshLockfileFail { ok: false; error: PlanStateFailure }
+
+function refreshLockfileEntry(
+  opts: RefreshLockfileOptions,
+): RefreshLockfileOk | RefreshLockfileFail {
+  let lockfilePath: string;
+  let lockfile: Lockfile;
+  try {
+    lockfilePath = resolveLockfilePath(opts.plansDir, opts.envFlag);
+    lockfile = readLockfile(lockfilePath);
+  } catch (err) {
+    if (err instanceof LockfileError) {
+      return { ok: false, error: fail('lockfile', err.message, { code: err.code }) };
+    }
+    return { ok: false, error: fail('lockfile', describeError(err)) };
+  }
+  const existing = getEntry(lockfile, opts.workspaceId, opts.planId);
+  if (!existing) {
+    // Best-effort: no entry, no write. The plan was likely
+    // created via curl or a different operator's machine.
+    return { ok: true };
+  }
+  const refreshed: LockfileEntry = {
+    lastImportedRevision: existing.lastImportedRevision,
+    lastImportedVersion: opts.newVersion,
+    lastImportedAt: opts.now(),
+  };
+  setEntry(lockfile, opts.workspaceId, opts.planId, refreshed);
+  try {
+    writeLockfile(lockfilePath, lockfile);
+  } catch (err) {
+    if (err instanceof LockfileError) {
+      return { ok: false, error: fail('lockfile', err.message, { code: err.code }) };
+    }
+    return { ok: false, error: fail('lockfile', describeError(err)) };
+  }
+  return { ok: true };
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────

@@ -242,7 +242,7 @@ describe('plan-state — happy paths', () => {
 
 // ─── Same-state no-op ─────────────────────────────────────────────────────
 describe('plan-state — same-state no-op', () => {
-  it('returns success with noop=true when already in target state', async () => {
+  it('returns noop=true and SKIPS the PATCH when already in target state', async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'yolo-cli-state-test-'));
     try {
       const { fetch, calls } = makeFetchStub([mintRoute, getRoute('foo', 'active', 3)]);
@@ -261,11 +261,78 @@ describe('plan-state — same-state no-op', () => {
       assert.equal(result.toState, 'active');
       assert.equal(result.version, 3);
 
-      // Only mint + GET — no PATCH
+      // Only mint + GET — no PATCH (the no-op short-circuit point).
       const methods = calls.map((c) => c.method);
       assert.deepEqual(methods, ['POST', 'GET']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
-      // Lockfile NOT written on no-op
+  it('REALIGNS a stale lockfile entry on no-op (Codex R1 retry-safety fix)', async () => {
+    // Setup: lockfile says version=1, but DB is at version=5 with
+    // state already active (someone else activated, or an earlier
+    // `yolo plan activate` succeeded at the PATCH step but failed
+    // later — leaving the substrate updated and the lockfile
+    // stale). Without this fix, a retry would hit the no-op path,
+    // return success, and leave the lockfile pointing at v1.
+    // The next real `yolo plan import` would then see DB at v5 vs
+    // lockfile expecting v1 → DIVERGED.
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'yolo-cli-state-test-'));
+    try {
+      writeLockfile(path.join(dir, '.imports.json'), {
+        [STUB_WS]: {
+          foo: {
+            lastImportedRevision: SAMPLE_REVISION,
+            lastImportedVersion: 1,
+            lastImportedAt: '2026-04-29T00:00:00.000Z',
+          },
+        },
+      });
+
+      const { fetch, calls } = makeFetchStub([mintRoute, getRoute('foo', 'active', 5)]);
+      const result = await runPlanStateTransition({
+        planId: 'foo',
+        targetState: 'active',
+        plansDir: dir,
+        fetchImpl: fetch,
+        env: STUB_ENV,
+        now: STUB_NOW,
+      });
+
+      assert.equal(result.ok, true);
+      if (!result.ok) return;
+      assert.equal(result.noop, true);
+      assert.equal(result.version, 5);
+
+      // Still no PATCH — substrate untouched.
+      assert.deepEqual(calls.map((c) => c.method), ['POST', 'GET']);
+
+      // Lockfile realigned: revision unchanged (file didn't change),
+      // version bumped to GET response's version, timestamp refreshed.
+      const lockfile = JSON.parse(readFileSync(path.join(dir, '.imports.json'), 'utf8'));
+      assert.equal(lockfile[STUB_WS].foo.lastImportedRevision, SAMPLE_REVISION);
+      assert.equal(lockfile[STUB_WS].foo.lastImportedVersion, 5);
+      assert.equal(lockfile[STUB_WS].foo.lastImportedAt, '2026-04-30T12:00:00.000Z');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips lockfile entirely on no-op when no entry exists (best-effort)', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'yolo-cli-state-test-'));
+    try {
+      const { fetch } = makeFetchStub([mintRoute, getRoute('foo', 'active', 3)]);
+      const result = await runPlanStateTransition({
+        planId: 'foo',
+        targetState: 'active',
+        plansDir: dir,
+        fetchImpl: fetch,
+        env: STUB_ENV,
+        now: STUB_NOW,
+      });
+      assert.equal(result.ok, true);
+      // No lockfile entry existed → no write happens.
       assert.equal(existsSync(path.join(dir, '.imports.json')), false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
