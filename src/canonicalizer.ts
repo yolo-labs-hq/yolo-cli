@@ -42,6 +42,7 @@ import yaml from 'js-yaml';
 const PLAN_FIELD_ORDER: ReadonlyArray<string> = [
   'planId',
   'name',
+  'description',
   'authoringState',
   'failurePolicy',
   'autoRetryCap',

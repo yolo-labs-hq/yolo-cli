@@ -501,4 +501,15 @@ describe('gate-coverage fixture — real-file round-trip + gate-coverage proof',
     assert.equal(out.includes('\r'), false);
     assert.match(out, /[^\n]\n$/);
   });
+
+  it('committed fixture is already in canonical byte form (CI plan-file check parity)', () => {
+    // The committed file in tests/fixtures/plans/gate-coverage.md MUST
+    // be byte-identical to canonicalizePlanFile(parse(file)). 8c will
+    // run this same check across all repo plan files in CI (and reject
+    // non-canonical writes from `yolo plan import`), so the canonical
+    // fixture has to match that bar today — not just round-trip
+    // idempotently. (Codex Round 1 finding M-1.)
+    const canonical = canonicalizePlanFile(frontmatter, body);
+    assert.equal(canonical, text, 'fixture is not in canonical byte form on disk');
+  });
 });
