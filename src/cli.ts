@@ -17,6 +17,7 @@
  */
 
 import { readSessionContext, formatContext, ContextResolutionError } from './context.js';
+import { validatePlanFile, formatErrors } from './plan-validate.js';
 
 const PKG_VERSION = '0.1.0';
 
@@ -26,11 +27,12 @@ function printHelp(): void {
       'Usage: yolo <command> [options]',
       '',
       'Commands:',
-      '  context           Print resolved session/workspace/API context.',
-      '  --version         Print substrate CLI version.',
-      '  --help            Print this help.',
+      '  context                   Print resolved session/workspace/API context.',
+      '  plan validate <file>      Validate a .yolo/plans/<slug>.md plan file (offline).',
+      '  --version                 Print substrate CLI version.',
+      '  --help                    Print this help.',
       '',
-      'Future commands (Phase 8c+): plan validate / import / export.',
+      'Future commands (Phase 8c.2+): plan import / export.',
       '',
       'Distinct from:',
       '  yolo-code   — the YOLO Studio coding-agent CLI.',
@@ -38,6 +40,30 @@ function printHelp(): void {
       '',
     ].join('\n'),
   );
+}
+
+function runPlanValidate(args: string[]): number {
+  const file = args[0];
+  if (!file) {
+    process.stderr.write('yolo: plan validate requires a file path\n');
+    process.stderr.write('Usage: yolo plan validate <file>\n');
+    return 64; // EX_USAGE
+  }
+  let result;
+  try {
+    result = validatePlanFile(file);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`yolo: cannot read plan file '${file}': ${msg}\n`);
+    return 64;
+  }
+  if (result.ok) {
+    process.stdout.write(`OK: ${file} is canonical and schema-valid (planId=${result.planId}, ${result.bytes} bytes)\n`);
+    return 0;
+  }
+  process.stderr.write(`FAIL: ${file}\n`);
+  process.stderr.write(`${formatErrors(result.errors)}\n`);
+  return 1;
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -66,6 +92,20 @@ async function main(argv: string[]): Promise<number> {
       }
       throw err;
     }
+  }
+
+  if (cmd === 'plan') {
+    const sub = args[1];
+    if (sub === 'validate') {
+      return runPlanValidate(args.slice(2));
+    }
+    if (!sub) {
+      process.stderr.write('yolo: plan requires a subcommand (validate)\n');
+      return 64;
+    }
+    process.stderr.write(`yolo: unknown plan subcommand '${sub}'\n`);
+    process.stderr.write('Subcommands: validate\n');
+    return 64;
   }
 
   process.stderr.write(`yolo: unknown command '${cmd}'\n`);

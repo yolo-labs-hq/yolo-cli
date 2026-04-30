@@ -1,0 +1,146 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://yolo.studio/schemas/plan-frontmatter.json",
+  "title": "YOLO Studio Plan Frontmatter",
+  "description": "Schema for the YAML frontmatter of a `.yolo/plans/<slug>.md` file. Mirrors the WorkPlan TypeScript type in common-api/src/types/work.ts. Lossless round-trip with the canonicalizer at packages/yolo-cli/src/canonicalizer.ts.",
+  "type": "object",
+  "required": [
+    "planId",
+    "name",
+    "authoringState",
+    "failurePolicy",
+    "steps"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "planId": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$",
+      "description": "Workspace-scoped slug. Must equal the file stem (e.g., `final-launch.md` → `planId: final-launch`). Substrate-side regex enforced at /internal/work create_plan."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "description": "Human-readable Plan name. Tighter character-class rules (Unicode-aware) live in semantic validation, not in this schema (Draft-07 `pattern` runs through validators that don't all support `\\p{L}`/`\\p{N}` consistently)."
+    },
+    "authoringState": {
+      "type": "string",
+      "enum": ["draft", "active", "archived"]
+    },
+    "failurePolicy": {
+      "type": "string",
+      "enum": ["pause-and-wait", "abort-run", "proceed-on-non-blocked", "auto-retry"]
+    },
+    "autoRetryCap": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Required when failurePolicy is auto-retry; ignored otherwise."
+    },
+    "autoRetryFallback": {
+      "type": "string",
+      "enum": ["pause-and-wait", "abort-run", "proceed-on-non-blocked"],
+      "description": "Fallback when auto-retry exhausts the cap."
+    },
+    "inputs": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/PlanInputDecl" }
+    },
+    "integrationPolicy": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Free-form per-Plan integration knobs (base branch, merge strategy, etc.). Canonicalizer sorts keys lexicographically."
+    },
+    "steps": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/StepDefinition" }
+    }
+  },
+  "definitions": {
+    "PlanInputDecl": {
+      "type": "object",
+      "required": ["name", "required"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "required": { "type": "boolean" },
+        "default": { "type": "string", "description": "Default value (string-typed; substrate inputs are always string per R5)." },
+        "description": { "type": "string" }
+      }
+    },
+    "StepDefinition": {
+      "type": "object",
+      "required": ["stepId", "name", "mode", "gates"],
+      "additionalProperties": false,
+      "properties": {
+        "stepId": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "mode": {
+          "type": "string",
+          "enum": ["workstream", "test", "critic", "manual", "preview", "automation"]
+        },
+        "runner": { "type": "string" },
+        "gates": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/GateDefinition" }
+        },
+        "declaredOutputs": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/StepDeclaredOutput" }
+        },
+        "failurePolicy": {
+          "type": "string",
+          "enum": ["pause-and-wait", "abort-run", "proceed-on-non-blocked", "auto-retry"]
+        },
+        "autoRetryCap": { "type": "integer", "minimum": 0 },
+        "autoRetryFallback": {
+          "type": "string",
+          "enum": ["pause-and-wait", "abort-run", "proceed-on-non-blocked"]
+        },
+        "template": { "$ref": "#/definitions/StepTemplate" }
+      }
+    },
+    "GateDefinition": {
+      "type": "object",
+      "required": ["gateId", "type", "config"],
+      "additionalProperties": false,
+      "properties": {
+        "gateId": { "type": "string", "minLength": 1 },
+        "type": {
+          "type": "string",
+          "enum": ["dependency", "acceptance", "artifact-presence", "test-result", "approval", "critique", "merge"]
+        },
+        "config": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Free-form per-gate-type config. Canonicalizer sorts keys lexicographically. Conventional shapes: dependency.requires (string[]); artifact-presence.{name,producerStepId}; test-result.{minPassRate,requiredSuites,retryFlakes}; critique.{rubric,minScore,reviewers}; merge.{baseBranch,allowedStrategies,requireGreenCi,blockOnConflict}."
+        }
+      }
+    },
+    "StepDeclaredOutput": {
+      "type": "object",
+      "required": ["name", "artifactType"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "artifactType": { "type": "string", "minLength": 1 },
+        "required": { "type": "boolean" }
+      }
+    },
+    "StepTemplate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "todoContent": { "type": "string" },
+        "todoFile": { "type": "string" },
+        "branch": { "type": "string" },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Free-form key-value metadata (string-valued). Canonicalizer sorts keys lexicographically."
+        }
+      }
+    }
+  }
+}
