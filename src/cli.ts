@@ -785,7 +785,14 @@ function parseRunTransferArgs(args: string[]): ParsedRunTransferArgs | ParseErro
       workspaceFlag = a.slice('--workspace='.length);
     } else if (a === '--to') {
       const v = args[++i];
-      if (!v) return { ok: false, message: '--to requires an agentId value' };
+      if (!v || v.startsWith('--')) {
+        // Without the `--` guard, `--to --user-driven` and `--to --json`
+        // silently consume the next flag as the agentId, bypassing the
+        // mutex / boolean check and triggering a network round-trip with
+        // a bogus target. Use the `--to=<value>` form for values that
+        // legitimately start with `--`.
+        return { ok: false, message: '--to requires an agentId value' };
+      }
       toFlag = v;
     } else if (a.startsWith('--to=')) {
       toFlag = a.slice('--to='.length);
