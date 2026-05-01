@@ -43,6 +43,15 @@ import {
   exitCodeForFailure as listExitCode,
   type PlanAuthoringState,
 } from './plan-list.js';
+import {
+  runRunStart,
+  exitCodeForFailure as runStartExitCode,
+} from './run-start.js';
+import {
+  runRunLifecycle,
+  exitCodeForFailure as runLifecycleExitCode,
+  type RunLifecycleVerb,
+} from './run-lifecycle.js';
 
 const PKG_VERSION = '0.1.0';
 
@@ -89,6 +98,16 @@ function printHelp(): void {
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '    [--state <draft|active|archived>]       Server-side authoringState filter.',
       '    [--json]                                Pretty-print raw JSON instead of the table.',
+      '  run start <planId> [opts]                 Bootstrap a Plan Run (work.start_run).',
+      '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
+      '    [--inputs <json>]                       JSON object of Plan inputs. Default: {}.',
+      '    [--json]                                Emit the response as JSON.',
+      '  run pause <runId> [opts]                  Pause a running Plan Run (work.pause_run).',
+      '  run resume <runId> [opts]                 Resume a paused Plan Run (work.resume_run).',
+      '  run cancel <runId> [opts]                 Cancel a Plan Run (work.cancel_run).',
+      '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
+      '    [--reason <text>]                       Optional reason (pause/cancel only). ≤1024 chars.',
+      '    [--json]                                Emit the response as JSON.',
       '  --version                                 Print substrate CLI version.',
       '  --help                                    Print this help.',
       '',
@@ -455,6 +474,153 @@ async function runPlanListCmd(args: string[]): Promise<number> {
   return listExitCode(result.kind);
 }
 
+interface ParsedRunStartArgs {
+  ok: true;
+  planId: string;
+  workspaceFlag?: string;
+  inputs?: Record<string, unknown>;
+  jsonOutput: boolean;
+}
+
+function parseRunStartArgs(args: string[]): ParsedRunStartArgs | ParseError {
+  let planId: string | undefined;
+  let workspaceFlag: string | undefined;
+  let inputs: Record<string, unknown> | undefined;
+  let jsonOutput = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--workspace') {
+      const v = args[++i];
+      if (!v) return { ok: false, message: '--workspace requires a value' };
+      workspaceFlag = v;
+    } else if (a.startsWith('--workspace=')) {
+      workspaceFlag = a.slice('--workspace='.length);
+    } else if (a === '--inputs') {
+      const v = args[++i];
+      if (!v) return { ok: false, message: '--inputs requires a JSON object value' };
+      const parsed = parseInputsJson(v);
+      if (!parsed.ok) return parsed;
+      inputs = parsed.value;
+    } else if (a.startsWith('--inputs=')) {
+      const parsed = parseInputsJson(a.slice('--inputs='.length));
+      if (!parsed.ok) return parsed;
+      inputs = parsed.value;
+    } else if (a === '--json') {
+      jsonOutput = true;
+    } else if (a.startsWith('--')) {
+      return { ok: false, message: `unknown option: ${a}` };
+    } else if (!planId) {
+      planId = a;
+    } else {
+      return { ok: false, message: `unexpected positional argument: ${a}` };
+    }
+  }
+
+  if (!planId) return { ok: false, message: 'run start requires a planId' };
+  return { ok: true, planId, workspaceFlag, inputs, jsonOutput };
+}
+
+function parseInputsJson(raw: string): { ok: true; value: Record<string, unknown> } | ParseError {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    return { ok: false, message: `--inputs is not valid JSON: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return { ok: false, message: '--inputs must be a JSON object (e.g. \'{"env":"prod"}\')' };
+  }
+  return { ok: true, value: parsed as Record<string, unknown> };
+}
+
+async function runRunStartCmd(args: string[]): Promise<number> {
+  const parsed = parseRunStartArgs(args);
+  if (!parsed.ok) {
+    process.stderr.write(`yolo: run start: ${parsed.message}\n`);
+    process.stderr.write('Usage: yolo run start <planId> [--workspace <wsId>] [--inputs <json>] [--json]\n');
+    return 64;
+  }
+  const result = await runRunStart({
+    planId: parsed.planId,
+    workspaceFlag: parsed.workspaceFlag,
+    inputs: parsed.inputs,
+    outputFormat: parsed.jsonOutput ? 'json' : 'summary',
+  });
+  if (result.ok) {
+    process.stdout.write(`${result.output}\n`);
+    return 0;
+  }
+  process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
+  return runStartExitCode(result.kind);
+}
+
+interface ParsedRunLifecycleArgs {
+  ok: true;
+  planRunId: string;
+  workspaceFlag?: string;
+  reason?: string;
+  jsonOutput: boolean;
+}
+
+function parseRunLifecycleArgs(args: string[]): ParsedRunLifecycleArgs | ParseError {
+  let planRunId: string | undefined;
+  let workspaceFlag: string | undefined;
+  let reason: string | undefined;
+  let jsonOutput = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--workspace') {
+      const v = args[++i];
+      if (!v) return { ok: false, message: '--workspace requires a value' };
+      workspaceFlag = v;
+    } else if (a.startsWith('--workspace=')) {
+      workspaceFlag = a.slice('--workspace='.length);
+    } else if (a === '--reason') {
+      const v = args[++i];
+      if (v === undefined) return { ok: false, message: '--reason requires a value' };
+      reason = v;
+    } else if (a.startsWith('--reason=')) {
+      reason = a.slice('--reason='.length);
+    } else if (a === '--json') {
+      jsonOutput = true;
+    } else if (a.startsWith('--')) {
+      return { ok: false, message: `unknown option: ${a}` };
+    } else if (!planRunId) {
+      planRunId = a;
+    } else {
+      return { ok: false, message: `unexpected positional argument: ${a}` };
+    }
+  }
+
+  if (!planRunId) return { ok: false, message: 'run <verb> requires a planRunId' };
+  return { ok: true, planRunId, workspaceFlag, reason, jsonOutput };
+}
+
+async function runRunLifecycleCmd(verb: RunLifecycleVerb, args: string[]): Promise<number> {
+  const parsed = parseRunLifecycleArgs(args);
+  if (!parsed.ok) {
+    process.stderr.write(`yolo: run ${verb}: ${parsed.message}\n`);
+    const reasonHint = verb === 'resume' ? '' : ' [--reason <text>]';
+    process.stderr.write(`Usage: yolo run ${verb} <planRunId> [--workspace <wsId>]${reasonHint} [--json]\n`);
+    return 64;
+  }
+  const result = await runRunLifecycle({
+    verb,
+    planRunId: parsed.planRunId,
+    workspaceFlag: parsed.workspaceFlag,
+    reason: parsed.reason,
+    outputFormat: parsed.jsonOutput ? 'json' : 'summary',
+  });
+  if (result.ok) {
+    process.stdout.write(`${result.output}\n`);
+    return 0;
+  }
+  process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
+  return runLifecycleExitCode(result.kind);
+}
+
 async function main(argv: string[]): Promise<number> {
   const [, , ...args] = argv;
   const cmd = args[0];
@@ -512,6 +678,23 @@ async function main(argv: string[]): Promise<number> {
     }
     process.stderr.write(`yolo: unknown plan subcommand '${sub}'\n`);
     process.stderr.write('Subcommands: validate, import, export, activate, archive, get, list\n');
+    return 64;
+  }
+
+  if (cmd === 'run') {
+    const sub = args[1];
+    if (sub === 'start') {
+      return runRunStartCmd(args.slice(2));
+    }
+    if (sub === 'pause' || sub === 'resume' || sub === 'cancel') {
+      return runRunLifecycleCmd(sub, args.slice(2));
+    }
+    if (!sub) {
+      process.stderr.write('yolo: run requires a subcommand (start, pause, resume, cancel)\n');
+      return 64;
+    }
+    process.stderr.write(`yolo: unknown run subcommand '${sub}'\n`);
+    process.stderr.write('Subcommands: start, pause, resume, cancel\n');
     return 64;
   }
 

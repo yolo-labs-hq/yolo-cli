@@ -25,9 +25,18 @@
  * globally — `engines: ">=20"` is pinned in package.json.
  *
  * Substrate-CLI v1 scopes (capped per agents.json `substrate-cli`):
- *   work.create_plan, work.update_plan, work.get_plan, work.list_plans
- * No `work.start_run` — running Plans requires a different call site
- * (the agent CLI / dispatcher does that).
+ *   - Plan authoring: work.create_plan, work.update_plan,
+ *     work.get_plan, work.list_plans
+ *   - Run lifecycle:  work.start_run, work.pause_run,
+ *     work.resume_run, work.cancel_run
+ *
+ * Run-lifecycle implication: `work.start_run` binds the calling agent
+ * as the Run's Operator (route handler, Phase 4/6 R4). So a Run started
+ * via `yolo run start` has `operatorAgentId === 'substrate-cli'`, and
+ * only the substrate CLI can pause/resume/cancel it via MCP. Runs
+ * started by another agent (claude, codex, …) return 403 NOT_AUTHORIZED
+ * if the substrate CLI tries to transition them — those go through the
+ * webapp's user-token surface or via `transfer_run_operator`.
  */
 
 export const SUBSTRATE_CLI_AGENT_ID = 'substrate-cli';
@@ -39,7 +48,16 @@ export const SUBSTRATE_CLI_PLAN_SCOPES = [
   'work.list_plans',
 ] as const;
 
-export type SubstrateCliScope = (typeof SUBSTRATE_CLI_PLAN_SCOPES)[number];
+export const SUBSTRATE_CLI_RUN_SCOPES = [
+  'work.start_run',
+  'work.pause_run',
+  'work.resume_run',
+  'work.cancel_run',
+] as const;
+
+export type SubstrateCliPlanScope = (typeof SUBSTRATE_CLI_PLAN_SCOPES)[number];
+export type SubstrateCliRunScope = (typeof SUBSTRATE_CLI_RUN_SCOPES)[number];
+export type SubstrateCliScope = SubstrateCliPlanScope | SubstrateCliRunScope;
 
 /**
  * Minimal subset of the global `fetch` shape the work client needs.

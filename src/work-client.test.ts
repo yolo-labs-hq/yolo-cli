@@ -15,6 +15,7 @@ import {
   WorkClientError,
   SUBSTRATE_CLI_AGENT_ID,
   SUBSTRATE_CLI_PLAN_SCOPES,
+  SUBSTRATE_CLI_RUN_SCOPES,
   type FetchLike,
 } from './work-client.js';
 
@@ -298,12 +299,21 @@ describe('work-client — authenticatedRequest', () => {
 
 // ─── Constants stay in sync with agents.json (substrate-cli scopes) ─────
 describe('work-client — substrate scope constants', () => {
-  it('exposes the expected v1 scopes (capped per agents.json substrate-cli)', () => {
+  it('exposes the expected v1 plan scopes (capped per agents.json substrate-cli)', () => {
     assert.deepEqual(SUBSTRATE_CLI_PLAN_SCOPES, [
       'work.create_plan',
       'work.update_plan',
       'work.get_plan',
       'work.list_plans',
+    ]);
+  });
+
+  it('exposes the expected v1 run-lifecycle scopes', () => {
+    assert.deepEqual(SUBSTRATE_CLI_RUN_SCOPES, [
+      'work.start_run',
+      'work.pause_run',
+      'work.resume_run',
+      'work.cancel_run',
     ]);
   });
 });
