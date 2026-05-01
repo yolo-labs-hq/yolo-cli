@@ -38,6 +38,11 @@ import {
   runPlanGet,
   exitCodeForFailure as getExitCode,
 } from './plan-get.js';
+import {
+  runPlanList,
+  exitCodeForFailure as listExitCode,
+  type PlanAuthoringState,
+} from './plan-list.js';
 
 const PKG_VERSION = '0.1.0';
 
@@ -64,6 +69,10 @@ function printHelp(): void {
       '  plan get <planId> [opts]                  Read a Plan from the DB (work.get_plan, no file write).',
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '    [--json]                                Pretty-print raw JSON instead of the summary.',
+      '  plan list [opts]                          List Plans in the current workspace (work.list_plans).',
+      '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
+      '    [--state <draft|active|archived>]       Server-side authoringState filter.',
+      '    [--json]                                Pretty-print raw JSON instead of the table.',
       '  --version                                 Print substrate CLI version.',
       '  --help                                    Print this help.',
       '',
@@ -352,6 +361,64 @@ async function runPlanGetCmd(args: string[]): Promise<number> {
   return getExitCode(result.kind);
 }
 
+interface ParsedListArgs {
+  ok: true;
+  workspaceFlag?: string;
+  stateFilter?: PlanAuthoringState;
+  jsonOutput: boolean;
+}
+
+function parseListArgs(args: string[]): ParsedListArgs | ParseError {
+  let workspaceFlag: string | undefined;
+  let stateFilter: PlanAuthoringState | undefined;
+  let jsonOutput = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--workspace') {
+      const v = args[++i];
+      if (!v) return { ok: false, message: '--workspace requires a value' };
+      workspaceFlag = v;
+    } else if (a.startsWith('--workspace=')) {
+      workspaceFlag = a.slice('--workspace='.length);
+    } else if (a === '--state') {
+      const v = args[++i];
+      if (!v) return { ok: false, message: '--state requires a value' };
+      stateFilter = v as PlanAuthoringState;
+    } else if (a.startsWith('--state=')) {
+      stateFilter = a.slice('--state='.length) as PlanAuthoringState;
+    } else if (a === '--json') {
+      jsonOutput = true;
+    } else if (a.startsWith('--')) {
+      return { ok: false, message: `unknown option: ${a}` };
+    } else {
+      return { ok: false, message: `unexpected positional argument: ${a}` };
+    }
+  }
+
+  return { ok: true, workspaceFlag, stateFilter, jsonOutput };
+}
+
+async function runPlanListCmd(args: string[]): Promise<number> {
+  const parsed = parseListArgs(args);
+  if (!parsed.ok) {
+    process.stderr.write(`yolo: plan list: ${parsed.message}\n`);
+    process.stderr.write('Usage: yolo plan list [--workspace <wsId>] [--state <draft|active|archived>] [--json]\n');
+    return 64;
+  }
+  const result = await runPlanList({
+    workspaceFlag: parsed.workspaceFlag,
+    stateFilter: parsed.stateFilter,
+    outputFormat: parsed.jsonOutput ? 'json' : 'summary',
+  });
+  if (result.ok) {
+    process.stdout.write(`${result.output}\n`);
+    return 0;
+  }
+  process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
+  return listExitCode(result.kind);
+}
+
 async function main(argv: string[]): Promise<number> {
   const [, , ...args] = argv;
   const cmd = args[0];
@@ -400,12 +467,15 @@ async function main(argv: string[]): Promise<number> {
     if (sub === 'get') {
       return runPlanGetCmd(args.slice(2));
     }
+    if (sub === 'list') {
+      return runPlanListCmd(args.slice(2));
+    }
     if (!sub) {
-      process.stderr.write('yolo: plan requires a subcommand (validate, import, export, activate, archive, get)\n');
+      process.stderr.write('yolo: plan requires a subcommand (validate, import, export, activate, archive, get, list)\n');
       return 64;
     }
     process.stderr.write(`yolo: unknown plan subcommand '${sub}'\n`);
-    process.stderr.write('Subcommands: validate, import, export, activate, archive, get\n');
+    process.stderr.write('Subcommands: validate, import, export, activate, archive, get, list\n');
     return 64;
   }
 
