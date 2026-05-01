@@ -16,6 +16,7 @@ import {
   SUBSTRATE_CLI_AGENT_ID,
   SUBSTRATE_CLI_PLAN_SCOPES,
   SUBSTRATE_CLI_RUN_SCOPES,
+  SUBSTRATE_CLI_ARTIFACT_SCOPES,
   type FetchLike,
 } from './work-client.js';
 
@@ -317,6 +318,13 @@ describe('work-client — substrate scope constants', () => {
       'work.resume_run',
       'work.cancel_run',
       'work.transfer_run_operator',
+    ]);
+  });
+
+  it('exposes the expected v1 artifact-read scopes', () => {
+    assert.deepEqual(SUBSTRATE_CLI_ARTIFACT_SCOPES, [
+      'work.get_artifact',
+      'work.list_artifacts',
     ]);
   });
 });

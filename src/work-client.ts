@@ -30,6 +30,7 @@
  *   - Run lifecycle:  work.start_run, work.get_run,
  *     work.list_runs, work.pause_run, work.resume_run,
  *     work.cancel_run, work.transfer_run_operator
+ *   - Artifact reads: work.get_artifact, work.list_artifacts, work.transfer_run_operator
  *
  * Run-lifecycle implication: `work.start_run` binds the calling agent
  * as the Run's Operator (route handler, Phase 4/6 R4). So a Run started
@@ -63,9 +64,18 @@ export const SUBSTRATE_CLI_RUN_SCOPES = [
   'work.transfer_run_operator',
 ] as const;
 
+export const SUBSTRATE_CLI_ARTIFACT_SCOPES = [
+  'work.get_artifact',
+  'work.list_artifacts',
+] as const;
+
 export type SubstrateCliPlanScope = (typeof SUBSTRATE_CLI_PLAN_SCOPES)[number];
 export type SubstrateCliRunScope = (typeof SUBSTRATE_CLI_RUN_SCOPES)[number];
-export type SubstrateCliScope = SubstrateCliPlanScope | SubstrateCliRunScope;
+export type SubstrateCliArtifactScope = (typeof SUBSTRATE_CLI_ARTIFACT_SCOPES)[number];
+export type SubstrateCliScope =
+  | SubstrateCliPlanScope
+  | SubstrateCliRunScope
+  | SubstrateCliArtifactScope;
 
 /**
  * Minimal subset of the global `fetch` shape the work client needs.

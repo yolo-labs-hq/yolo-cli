@@ -65,6 +65,14 @@ import {
   runRunTransfer,
   exitCodeForFailure as runTransferExitCode,
 } from './run-transfer.js';
+import {
+  runArtifactGet,
+  exitCodeForFailure as artifactGetExitCode,
+} from './artifact-get.js';
+import {
+  runArtifactList,
+  exitCodeForFailure as artifactListExitCode,
+} from './artifact-list.js';
 
 const PKG_VERSION = '0.1.0';
 
@@ -133,6 +141,16 @@ function printHelp(): void {
       '    --user-driven                           Transfer to user-driven (operatorAgentId=null). Mutex with --to.',
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '    [--json]                                Emit the response as JSON.',
+      '  artifact get <key> [opts]                 Read a workspace artifact (work.get_artifact).',
+      '    [--version <n>]                         Pin to a specific version. Default: latest.',
+      '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
+      '    [--content]                             Stdout the raw artifact body only (for piping).',
+      '    [--json]                                Pretty-print the full record as JSON.',
+      '  artifact list [opts]                      List workspace artifacts (work.list_artifacts).',
+      '    [--prefix <prefix>]                     Server-side key prefix filter.',
+      '    [--limit <n>]                           Cap result count (1-500, default 100).',
+      '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
+      '    [--json]                                Pretty-print raw JSON instead of the table.',
       '  --version                                 Print substrate CLI version.',
       '  --help                                    Print this help.',
       '',
@@ -848,6 +866,169 @@ async function runRunTransferCmd(args: string[]): Promise<number> {
   return runTransferExitCode(result.kind);
 }
 
+interface ParsedArtifactGetArgs {
+  ok: true;
+  key: string;
+  version?: number;
+  workspaceFlag?: string;
+  contentOutput: boolean;
+  jsonOutput: boolean;
+}
+
+function parseArtifactGetArgs(args: string[]): ParsedArtifactGetArgs | ParseError {
+  let key: string | undefined;
+  let version: number | undefined;
+  let workspaceFlag: string | undefined;
+  let contentOutput = false;
+  let jsonOutput = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--workspace') {
+      const v = args[++i];
+      if (!v || v.startsWith('--')) return { ok: false, message: '--workspace requires a value' };
+      workspaceFlag = v;
+    } else if (a.startsWith('--workspace=')) {
+      workspaceFlag = a.slice('--workspace='.length);
+    } else if (a === '--version') {
+      const v = args[++i];
+      if (!v || v.startsWith('--')) return { ok: false, message: '--version requires an integer value' };
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 1) {
+        return { ok: false, message: `--version must be a positive integer (got '${v}')` };
+      }
+      version = n;
+    } else if (a.startsWith('--version=')) {
+      const raw = a.slice('--version='.length);
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1) {
+        return { ok: false, message: `--version must be a positive integer (got '${raw}')` };
+      }
+      version = n;
+    } else if (a === '--content') {
+      contentOutput = true;
+    } else if (a === '--json') {
+      jsonOutput = true;
+    } else if (a.startsWith('--')) {
+      return { ok: false, message: `unknown option: ${a}` };
+    } else if (!key) {
+      key = a;
+    } else {
+      return { ok: false, message: `unexpected positional argument: ${a}` };
+    }
+  }
+
+  if (!key) return { ok: false, message: 'artifact get requires a key' };
+  if (contentOutput && jsonOutput) {
+    return { ok: false, message: '--content and --json are mutually exclusive' };
+  }
+  return { ok: true, key, version, workspaceFlag, contentOutput, jsonOutput };
+}
+
+async function runArtifactGetCmd(args: string[]): Promise<number> {
+  const parsed = parseArtifactGetArgs(args);
+  if (!parsed.ok) {
+    process.stderr.write(`yolo: artifact get: ${parsed.message}\n`);
+    process.stderr.write('Usage: yolo artifact get <key> [--version <n>] [--workspace <wsId>] [--content | --json]\n');
+    return 64;
+  }
+  const outputFormat = parsed.jsonOutput ? 'json' : parsed.contentOutput ? 'content' : 'summary';
+  const result = await runArtifactGet({
+    key: parsed.key,
+    version: parsed.version,
+    workspaceFlag: parsed.workspaceFlag,
+    outputFormat,
+  });
+  if (result.ok) {
+    // For --content, the body might be binary-ish text we don't want a trailing newline on.
+    // Stdout the content verbatim; the user can pipe it to a file.
+    if (outputFormat === 'content') {
+      process.stdout.write(result.output);
+    } else {
+      process.stdout.write(`${result.output}\n`);
+    }
+    return 0;
+  }
+  process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
+  return artifactGetExitCode(result.kind);
+}
+
+interface ParsedArtifactListArgs {
+  ok: true;
+  workspaceFlag?: string;
+  prefix?: string;
+  limit?: number;
+  jsonOutput: boolean;
+}
+
+function parseArtifactListArgs(args: string[]): ParsedArtifactListArgs | ParseError {
+  let workspaceFlag: string | undefined;
+  let prefix: string | undefined;
+  let limit: number | undefined;
+  let jsonOutput = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--workspace') {
+      const v = args[++i];
+      if (!v || v.startsWith('--')) return { ok: false, message: '--workspace requires a value' };
+      workspaceFlag = v;
+    } else if (a.startsWith('--workspace=')) {
+      workspaceFlag = a.slice('--workspace='.length);
+    } else if (a === '--prefix') {
+      const v = args[++i];
+      if (!v || v.startsWith('--')) return { ok: false, message: '--prefix requires a value' };
+      prefix = v;
+    } else if (a.startsWith('--prefix=')) {
+      prefix = a.slice('--prefix='.length);
+    } else if (a === '--limit') {
+      const v = args[++i];
+      if (!v || v.startsWith('--')) return { ok: false, message: '--limit requires an integer value' };
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 1 || n > 500) {
+        return { ok: false, message: `--limit must be an integer between 1 and 500 (got '${v}')` };
+      }
+      limit = n;
+    } else if (a.startsWith('--limit=')) {
+      const raw = a.slice('--limit='.length);
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1 || n > 500) {
+        return { ok: false, message: `--limit must be an integer between 1 and 500 (got '${raw}')` };
+      }
+      limit = n;
+    } else if (a === '--json') {
+      jsonOutput = true;
+    } else if (a.startsWith('--')) {
+      return { ok: false, message: `unknown option: ${a}` };
+    } else {
+      return { ok: false, message: `unexpected positional argument: ${a}` };
+    }
+  }
+
+  return { ok: true, workspaceFlag, prefix, limit, jsonOutput };
+}
+
+async function runArtifactListCmd(args: string[]): Promise<number> {
+  const parsed = parseArtifactListArgs(args);
+  if (!parsed.ok) {
+    process.stderr.write(`yolo: artifact list: ${parsed.message}\n`);
+    process.stderr.write('Usage: yolo artifact list [--prefix <prefix>] [--limit <n>] [--workspace <wsId>] [--json]\n');
+    return 64;
+  }
+  const result = await runArtifactList({
+    workspaceFlag: parsed.workspaceFlag,
+    prefix: parsed.prefix,
+    limit: parsed.limit,
+    outputFormat: parsed.jsonOutput ? 'json' : 'summary',
+  });
+  if (result.ok) {
+    process.stdout.write(`${result.output}\n`);
+    return 0;
+  }
+  process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
+  return artifactListExitCode(result.kind);
+}
+
 async function main(argv: string[]): Promise<number> {
   const [, , ...args] = argv;
   const cmd = args[0];
@@ -931,6 +1112,23 @@ async function main(argv: string[]): Promise<number> {
     }
     process.stderr.write(`yolo: unknown run subcommand '${sub}'\n`);
     process.stderr.write('Subcommands: start, get, list, pause, resume, cancel, transfer\n');
+    return 64;
+  }
+
+  if (cmd === 'artifact') {
+    const sub = args[1];
+    if (sub === 'get') {
+      return runArtifactGetCmd(args.slice(2));
+    }
+    if (sub === 'list') {
+      return runArtifactListCmd(args.slice(2));
+    }
+    if (!sub) {
+      process.stderr.write('yolo: artifact requires a subcommand (get, list)\n');
+      return 64;
+    }
+    process.stderr.write(`yolo: unknown artifact subcommand '${sub}'\n`);
+    process.stderr.write('Subcommands: get, list\n');
     return 64;
   }
 
