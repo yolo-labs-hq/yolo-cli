@@ -193,13 +193,13 @@ function parseImportArgs(args: string[]): ParsedImportArgs | ParseError {
     const a = args[i]!;
     if (a === '--workspace') {
       const v = args[++i];
-      if (!v) return { ok: false, message: '--workspace requires a value' };
+      if (!v || v.startsWith('--')) return { ok: false, message: '--workspace requires a value' };
       workspaceFlag = v;
     } else if (a.startsWith('--workspace=')) {
       workspaceFlag = a.slice('--workspace='.length);
     } else if (a === '--lockfile') {
       const v = args[++i];
-      if (!v) return { ok: false, message: '--lockfile requires a value' };
+      if (!v || v.startsWith('--')) return { ok: false, message: '--lockfile requires a value' };
       lockfileFlag = v;
     } else if (a.startsWith('--lockfile=')) {
       lockfileFlag = a.slice('--lockfile='.length);
@@ -261,19 +261,19 @@ function parseExportArgs(args: string[]): ParsedExportArgs | ParseError {
     const a = args[i]!;
     if (a === '--workspace') {
       const v = args[++i];
-      if (!v) return { ok: false, message: '--workspace requires a value' };
+      if (!v || v.startsWith('--')) return { ok: false, message: '--workspace requires a value' };
       workspaceFlag = v;
     } else if (a.startsWith('--workspace=')) {
       workspaceFlag = a.slice('--workspace='.length);
     } else if (a === '--lockfile') {
       const v = args[++i];
-      if (!v) return { ok: false, message: '--lockfile requires a value' };
+      if (!v || v.startsWith('--')) return { ok: false, message: '--lockfile requires a value' };
       lockfileFlag = v;
     } else if (a.startsWith('--lockfile=')) {
       lockfileFlag = a.slice('--lockfile='.length);
     } else if (a === '-o' || a === '--output') {
       const v = args[++i];
-      if (!v) return { ok: false, message: '-o requires a value' };
+      if (!v || v.startsWith('--')) return { ok: false, message: '-o requires a value' };
       outputFlag = v;
     } else if (a.startsWith('--output=')) {
       outputFlag = a.slice('--output='.length);
@@ -331,13 +331,13 @@ function parseStateArgs(args: string[]): ParsedStateArgs | ParseError {
     const a = args[i]!;
     if (a === '--workspace') {
       const v = args[++i];
-      if (!v) return { ok: false, message: '--workspace requires a value' };
+      if (!v || v.startsWith('--')) return { ok: false, message: '--workspace requires a value' };
       workspaceFlag = v;
     } else if (a.startsWith('--workspace=')) {
       workspaceFlag = a.slice('--workspace='.length);
     } else if (a === '--lockfile') {
       const v = args[++i];
-      if (!v) return { ok: false, message: '--lockfile requires a value' };
+      if (!v || v.startsWith('--')) return { ok: false, message: '--lockfile requires a value' };
       lockfileFlag = v;
     } else if (a.startsWith('--lockfile=')) {
       lockfileFlag = a.slice('--lockfile='.length);
@@ -396,7 +396,7 @@ function parseGetArgs(args: string[]): ParsedGetArgs | ParseError {
     const a = args[i]!;
     if (a === '--workspace') {
       const v = args[++i];
-      if (!v) return { ok: false, message: '--workspace requires a value' };
+      if (!v || v.startsWith('--')) return { ok: false, message: '--workspace requires a value' };
       workspaceFlag = v;
     } else if (a.startsWith('--workspace=')) {
       workspaceFlag = a.slice('--workspace='.length);
@@ -457,13 +457,13 @@ function parseListArgs(args: string[]): ParsedListArgs | ParseError {
     const a = args[i]!;
     if (a === '--workspace') {
       const v = args[++i];
-      if (!v) return { ok: false, message: '--workspace requires a value' };
+      if (!v || v.startsWith('--')) return { ok: false, message: '--workspace requires a value' };
       workspaceFlag = v;
     } else if (a.startsWith('--workspace=')) {
       workspaceFlag = a.slice('--workspace='.length);
     } else if (a === '--state') {
       const v = args[++i];
-      if (!v) return { ok: false, message: '--state requires a value' };
+      if (!v || v.startsWith('--')) return { ok: false, message: '--state requires a value' };
       stateFilter = v as PlanAuthoringState;
     } else if (a.startsWith('--state=')) {
       stateFilter = a.slice('--state='.length) as PlanAuthoringState;
@@ -517,13 +517,13 @@ function parseRunStartArgs(args: string[]): ParsedRunStartArgs | ParseError {
     const a = args[i]!;
     if (a === '--workspace') {
       const v = args[++i];
-      if (!v) return { ok: false, message: '--workspace requires a value' };
+      if (!v || v.startsWith('--')) return { ok: false, message: '--workspace requires a value' };
       workspaceFlag = v;
     } else if (a.startsWith('--workspace=')) {
       workspaceFlag = a.slice('--workspace='.length);
     } else if (a === '--inputs') {
       const v = args[++i];
-      if (!v) return { ok: false, message: '--inputs requires a JSON object value' };
+      if (!v || v.startsWith('--')) return { ok: false, message: '--inputs requires a JSON object value' };
       const parsed = parseInputsJson(v);
       if (!parsed.ok) return parsed;
       inputs = parsed.value;
@@ -598,13 +598,15 @@ function parseRunLifecycleArgs(args: string[]): ParsedRunLifecycleArgs | ParseEr
     const a = args[i]!;
     if (a === '--workspace') {
       const v = args[++i];
-      if (!v) return { ok: false, message: '--workspace requires a value' };
+      if (!v || v.startsWith('--')) return { ok: false, message: '--workspace requires a value' };
       workspaceFlag = v;
     } else if (a.startsWith('--workspace=')) {
       workspaceFlag = a.slice('--workspace='.length);
     } else if (a === '--reason') {
       const v = args[++i];
-      if (v === undefined) return { ok: false, message: '--reason requires a value' };
+      if (v === undefined || v.startsWith('--')) {
+        return { ok: false, message: '--reason requires a value' };
+      }
       reason = v;
     } else if (a.startsWith('--reason=')) {
       reason = a.slice('--reason='.length);
@@ -662,7 +664,7 @@ function parseRunGetArgs(args: string[]): ParsedRunGetArgs | ParseError {
     const a = args[i]!;
     if (a === '--workspace') {
       const v = args[++i];
-      if (!v) return { ok: false, message: '--workspace requires a value' };
+      if (!v || v.startsWith('--')) return { ok: false, message: '--workspace requires a value' };
       workspaceFlag = v;
     } else if (a.startsWith('--workspace=')) {
       workspaceFlag = a.slice('--workspace='.length);
@@ -717,13 +719,13 @@ function parseRunListArgs(args: string[]): ParsedRunListArgs | ParseError {
     const a = args[i]!;
     if (a === '--workspace') {
       const v = args[++i];
-      if (!v) return { ok: false, message: '--workspace requires a value' };
+      if (!v || v.startsWith('--')) return { ok: false, message: '--workspace requires a value' };
       workspaceFlag = v;
     } else if (a.startsWith('--workspace=')) {
       workspaceFlag = a.slice('--workspace='.length);
     } else if (a === '--state') {
       const v = args[++i];
-      if (!v) return { ok: false, message: '--state requires a value' };
+      if (!v || v.startsWith('--')) return { ok: false, message: '--state requires a value' };
       stateFilter = v as RunExecutionState;
     } else if (a.startsWith('--state=')) {
       stateFilter = a.slice('--state='.length) as RunExecutionState;
@@ -779,7 +781,7 @@ function parseRunTransferArgs(args: string[]): ParsedRunTransferArgs | ParseErro
     const a = args[i]!;
     if (a === '--workspace') {
       const v = args[++i];
-      if (!v) return { ok: false, message: '--workspace requires a value' };
+      if (!v || v.startsWith('--')) return { ok: false, message: '--workspace requires a value' };
       workspaceFlag = v;
     } else if (a.startsWith('--workspace=')) {
       workspaceFlag = a.slice('--workspace='.length);
