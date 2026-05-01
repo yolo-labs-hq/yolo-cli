@@ -83,6 +83,7 @@ function printHelp(): void {
       '    [--json]                                Emit the result as JSON.',
       '  plan get <planId> [opts]                  Read a Plan from the DB (work.get_plan, no file write).',
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
+      '    [--waves]                               Group steps by topological wave (parallel-execution view).',
       '    [--json]                                Pretty-print raw JSON instead of the summary.',
       '  plan list [opts]                          List Plans in the current workspace (work.list_plans).',
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
@@ -338,12 +339,14 @@ interface ParsedGetArgs {
   planId: string;
   workspaceFlag?: string;
   jsonOutput: boolean;
+  wavesOutput: boolean;
 }
 
 function parseGetArgs(args: string[]): ParsedGetArgs | ParseError {
   let planId: string | undefined;
   let workspaceFlag: string | undefined;
   let jsonOutput = false;
+  let wavesOutput = false;
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
@@ -355,6 +358,8 @@ function parseGetArgs(args: string[]): ParsedGetArgs | ParseError {
       workspaceFlag = a.slice('--workspace='.length);
     } else if (a === '--json') {
       jsonOutput = true;
+    } else if (a === '--waves') {
+      wavesOutput = true;
     } else if (a.startsWith('--')) {
       return { ok: false, message: `unknown option: ${a}` };
     } else if (!planId) {
@@ -365,20 +370,24 @@ function parseGetArgs(args: string[]): ParsedGetArgs | ParseError {
   }
 
   if (!planId) return { ok: false, message: 'plan get requires a planId' };
-  return { ok: true, planId, workspaceFlag, jsonOutput };
+  if (jsonOutput && wavesOutput) {
+    return { ok: false, message: '--json and --waves are mutually exclusive' };
+  }
+  return { ok: true, planId, workspaceFlag, jsonOutput, wavesOutput };
 }
 
 async function runPlanGetCmd(args: string[]): Promise<number> {
   const parsed = parseGetArgs(args);
   if (!parsed.ok) {
     process.stderr.write(`yolo: ${parsed.message}\n`);
-    process.stderr.write('Usage: yolo plan get <planId> [--workspace <wsId>] [--json]\n');
+    process.stderr.write('Usage: yolo plan get <planId> [--workspace <wsId>] [--waves | --json]\n');
     return 64;
   }
+  const outputFormat = parsed.jsonOutput ? 'json' : parsed.wavesOutput ? 'waves' : 'summary';
   const result = await runPlanGet({
     planId: parsed.planId,
     workspaceFlag: parsed.workspaceFlag,
-    outputFormat: parsed.jsonOutput ? 'json' : 'summary',
+    outputFormat,
   });
   if (result.ok) {
     process.stdout.write(`${result.output}\n`);
