@@ -316,6 +316,7 @@ describe('work-client — substrate scope constants', () => {
       'work.pause_run',
       'work.resume_run',
       'work.cancel_run',
+      'work.transfer_run_operator',
     ]);
   });
 });

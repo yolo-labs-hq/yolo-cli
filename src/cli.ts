@@ -61,6 +61,10 @@ import {
   exitCodeForFailure as runListExitCode,
   type RunExecutionState,
 } from './run-list.js';
+import {
+  runRunTransfer,
+  exitCodeForFailure as runTransferExitCode,
+} from './run-transfer.js';
 
 const PKG_VERSION = '0.1.0';
 
@@ -123,6 +127,11 @@ function printHelp(): void {
       '  run cancel <runId> [opts]                 Cancel a Plan Run (work.cancel_run).',
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '    [--reason <text>]                       Optional reason (pause/cancel only). ≤1024 chars.',
+      '    [--json]                                Emit the response as JSON.',
+      '  run transfer <runId> [opts]               Reassign the Operator (work.transfer_run_operator).',
+      '    --to <agentId>                          Target Operator (Operator-tier: claude, codex).',
+      '    --user-driven                           Transfer to user-driven (operatorAgentId=null). Mutex with --to.',
+      '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '    [--json]                                Emit the response as JSON.',
       '  --version                                 Print substrate CLI version.',
       '  --help                                    Print this help.',
@@ -750,6 +759,86 @@ async function runRunListCmd(args: string[]): Promise<number> {
   return runListExitCode(result.kind);
 }
 
+interface ParsedRunTransferArgs {
+  ok: true;
+  planRunId: string;
+  /** Resolved target. Either a non-empty agentId or null (user-driven). */
+  newOperatorAgentId: string | null;
+  workspaceFlag?: string;
+  jsonOutput: boolean;
+}
+
+function parseRunTransferArgs(args: string[]): ParsedRunTransferArgs | ParseError {
+  let planRunId: string | undefined;
+  let workspaceFlag: string | undefined;
+  let toFlag: string | undefined;
+  let userDriven = false;
+  let jsonOutput = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--workspace') {
+      const v = args[++i];
+      if (!v) return { ok: false, message: '--workspace requires a value' };
+      workspaceFlag = v;
+    } else if (a.startsWith('--workspace=')) {
+      workspaceFlag = a.slice('--workspace='.length);
+    } else if (a === '--to') {
+      const v = args[++i];
+      if (!v) return { ok: false, message: '--to requires an agentId value' };
+      toFlag = v;
+    } else if (a.startsWith('--to=')) {
+      toFlag = a.slice('--to='.length);
+    } else if (a === '--user-driven') {
+      userDriven = true;
+    } else if (a === '--json') {
+      jsonOutput = true;
+    } else if (a.startsWith('--')) {
+      return { ok: false, message: `unknown option: ${a}` };
+    } else if (!planRunId) {
+      planRunId = a;
+    } else {
+      return { ok: false, message: `unexpected positional argument: ${a}` };
+    }
+  }
+
+  if (!planRunId) return { ok: false, message: 'run transfer requires a planRunId' };
+  if (toFlag !== undefined && userDriven) {
+    return { ok: false, message: '--to and --user-driven are mutually exclusive' };
+  }
+  if (toFlag === undefined && !userDriven) {
+    return { ok: false, message: 'one of --to <agentId> or --user-driven is required' };
+  }
+  return {
+    ok: true,
+    planRunId,
+    newOperatorAgentId: userDriven ? null : (toFlag as string),
+    workspaceFlag,
+    jsonOutput,
+  };
+}
+
+async function runRunTransferCmd(args: string[]): Promise<number> {
+  const parsed = parseRunTransferArgs(args);
+  if (!parsed.ok) {
+    process.stderr.write(`yolo: run transfer: ${parsed.message}\n`);
+    process.stderr.write('Usage: yolo run transfer <planRunId> (--to <agentId> | --user-driven) [--workspace <wsId>] [--json]\n');
+    return 64;
+  }
+  const result = await runRunTransfer({
+    planRunId: parsed.planRunId,
+    newOperatorAgentId: parsed.newOperatorAgentId,
+    workspaceFlag: parsed.workspaceFlag,
+    outputFormat: parsed.jsonOutput ? 'json' : 'summary',
+  });
+  if (result.ok) {
+    process.stdout.write(`${result.output}\n`);
+    return 0;
+  }
+  process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
+  return runTransferExitCode(result.kind);
+}
+
 async function main(argv: string[]): Promise<number> {
   const [, , ...args] = argv;
   const cmd = args[0];
@@ -824,12 +913,15 @@ async function main(argv: string[]): Promise<number> {
     if (sub === 'pause' || sub === 'resume' || sub === 'cancel') {
       return runRunLifecycleCmd(sub, args.slice(2));
     }
+    if (sub === 'transfer') {
+      return runRunTransferCmd(args.slice(2));
+    }
     if (!sub) {
-      process.stderr.write('yolo: run requires a subcommand (start, get, list, pause, resume, cancel)\n');
+      process.stderr.write('yolo: run requires a subcommand (start, get, list, pause, resume, cancel, transfer)\n');
       return 64;
     }
     process.stderr.write(`yolo: unknown run subcommand '${sub}'\n`);
-    process.stderr.write('Subcommands: start, get, list, pause, resume, cancel\n');
+    process.stderr.write('Subcommands: start, get, list, pause, resume, cancel, transfer\n');
     return 64;
   }
 

@@ -29,15 +29,19 @@
  *     work.get_plan, work.list_plans
  *   - Run lifecycle:  work.start_run, work.get_run,
  *     work.list_runs, work.pause_run, work.resume_run,
- *     work.cancel_run
+ *     work.cancel_run, work.transfer_run_operator
  *
  * Run-lifecycle implication: `work.start_run` binds the calling agent
  * as the Run's Operator (route handler, Phase 4/6 R4). So a Run started
  * via `yolo run start` has `operatorAgentId === 'substrate-cli'`, and
- * only the substrate CLI can pause/resume/cancel it via MCP. Runs
- * started by another agent (claude, codex, …) return 403 NOT_AUTHORIZED
- * if the substrate CLI tries to transition them — those go through the
- * webapp's user-token surface or via `transfer_run_operator`.
+ * only the substrate CLI can pause/resume/cancel it via MCP. The
+ * natural handoff loop is `yolo run transfer <runId> --to claude` —
+ * substrate-cli is the current Operator, claude/codex is an
+ * Operator-tier target, route's R4 self-transfer path applies.
+ * Substrate-cli is NOT itself Operator-tier (per
+ * `OPERATOR_TIER_AGENT_IDS` in operator-binding.ts), so `--to
+ * substrate-cli` is rejected by the route's `isValidOperatorTarget`
+ * check.
  */
 
 export const SUBSTRATE_CLI_AGENT_ID = 'substrate-cli';
@@ -56,6 +60,7 @@ export const SUBSTRATE_CLI_RUN_SCOPES = [
   'work.pause_run',
   'work.resume_run',
   'work.cancel_run',
+  'work.transfer_run_operator',
 ] as const;
 
 export type SubstrateCliPlanScope = (typeof SUBSTRATE_CLI_PLAN_SCOPES)[number];
