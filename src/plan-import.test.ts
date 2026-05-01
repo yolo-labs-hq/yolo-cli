@@ -627,7 +627,7 @@ describe('plan-import — env / flag failures', () => {
         fetchImpl: fetch,
         env: STUB_ENV,
         now: STUB_NOW,
-        envFlag: 'staging',
+        lockfileFlag: 'staging',
       });
       assert.equal(result.ok, true);
       assert.ok(existsSync(path.join(dir, '.imports.staging.json')));

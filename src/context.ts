@@ -6,8 +6,14 @@
  * `session-required` (exit code 78 = EX_CONFIG) if `SESSION_ID` is
  * missing — outside-container invocation is out of scope for v1.
  *
- * `WORKSPACE_ID` is read for display only; the auth path derives
- * workspace from the session record at token-mint time, not from env.
+ * `WORKSPACE_ID` is read for display purposes (operators want a
+ * fast "what workspace is this" answer in `yolo context`).
+ * The authoritative workspaceId for any *write* still comes from
+ * the session record at token-mint time — that's what the CLI's
+ * `--workspace` sanity check is comparing against. So
+ * `WORKSPACE_ID` is best-effort env state, not the source of
+ * truth, but in practice the session container sets both
+ * consistently from the same source.
  */
 
 export interface SessionContext {
@@ -53,12 +59,17 @@ export function readSessionContext(): SessionContext {
 }
 
 export function formatContext(ctx: SessionContext): string {
+  // The "(unset)" branch is for the rare-but-possible case where
+  // SESSION_ID is set but WORKSPACE_ID isn't — substrate ops will
+  // still work (mint resolves workspace from the session record),
+  // they just can't be sanity-checked against ambient env.
+  const workspace = ctx.workspaceIdHint ?? '(unset — will resolve from session at mint time)';
   return [
     'yolo substrate CLI — context',
     `  sessionId          ${ctx.sessionId}`,
     `  commonApiUrl       ${ctx.commonApiUrl}`,
     `  internalApiKey     ${ctx.internalApiKeyPresent ? '(set)' : '(missing)'}`,
-    `  workspaceId hint   ${ctx.workspaceIdHint ?? '(unset; resolved from session at token mint)'}`,
+    `  workspaceId        ${workspace}`,
     '',
   ].join('\n');
 }

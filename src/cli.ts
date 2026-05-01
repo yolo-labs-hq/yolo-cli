@@ -46,6 +46,18 @@ import {
 
 const PKG_VERSION = '0.1.0';
 
+/**
+ * Serialize an orchestration result for `--json` output. Strips the
+ * internal `ok` discriminant — exit code already conveys success vs
+ * failure, and a `kind` field on failures is enough for scripts to
+ * branch on. Leaves `--summary` outputs (the human-readable
+ * single-line success messages, `FAIL [kind]: …` errors) untouched.
+ */
+function formatJsonResult(result: { ok: boolean }): string {
+  const { ok: _ok, ...payload } = result as { ok: boolean } & Record<string, unknown>;
+  return JSON.stringify(payload, null, 2);
+}
+
 function printHelp(): void {
   process.stdout.write(
     [
@@ -56,16 +68,19 @@ function printHelp(): void {
       '  plan validate <file>                      Validate a .yolo/plans/<slug>.md plan file (offline).',
       '  plan import <file> [opts]                 Import file → DB (work.create_plan / update_plan).',
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
-      '    [--env <name>]                          Use .imports.<env>.json instead of the gitignored default.',
+      '    [--lockfile <name>]                     Use .imports.<name>.json instead of the gitignored default.',
       '    [--force]                               Override divergence (DB ahead of lockfile) or 409 on create.',
+      '    [--json]                                Emit the result as JSON (for scripting).',
       '  plan export <planId> [opts]               Export DB → file (work.get_plan + canonicalize).',
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
-      '    [--env <name>]                          Refresh .imports.<env>.json instead of the default.',
+      '    [--lockfile <name>]                     Refresh .imports.<name>.json instead of the default.',
       '    [-o <file>]                             Output path. Default: <plansDir>/<planId>.md.',
+      '    [--json]                                Emit the result as JSON.',
       '  plan activate <planId> [opts]             Transition authoringState → active (work.update_plan).',
       '  plan archive <planId> [opts]              Transition authoringState → archived (work.update_plan).',
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
-      '    [--env <name>]                          Refresh .imports.<env>.json lockfile entry post-update.',
+      '    [--lockfile <name>]                     Refresh .imports.<name>.json lockfile entry post-update.',
+      '    [--json]                                Emit the result as JSON.',
       '  plan get <planId> [opts]                  Read a Plan from the DB (work.get_plan, no file write).',
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '    [--json]                                Pretty-print raw JSON instead of the summary.',
@@ -112,8 +127,9 @@ interface ParsedImportArgs {
   ok: true;
   filePath: string;
   workspaceFlag?: string;
-  envFlag?: string;
+  lockfileFlag?: string;
   force: boolean;
+  jsonOutput: boolean;
 }
 
 interface ParseError {
@@ -124,8 +140,9 @@ interface ParseError {
 function parseImportArgs(args: string[]): ParsedImportArgs | ParseError {
   let filePath: string | undefined;
   let workspaceFlag: string | undefined;
-  let envFlag: string | undefined;
+  let lockfileFlag: string | undefined;
   let force = false;
+  let jsonOutput = false;
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
@@ -135,14 +152,16 @@ function parseImportArgs(args: string[]): ParsedImportArgs | ParseError {
       workspaceFlag = v;
     } else if (a.startsWith('--workspace=')) {
       workspaceFlag = a.slice('--workspace='.length);
-    } else if (a === '--env') {
+    } else if (a === '--lockfile') {
       const v = args[++i];
-      if (!v) return { ok: false, message: '--env requires a value' };
-      envFlag = v;
-    } else if (a.startsWith('--env=')) {
-      envFlag = a.slice('--env='.length);
+      if (!v) return { ok: false, message: '--lockfile requires a value' };
+      lockfileFlag = v;
+    } else if (a.startsWith('--lockfile=')) {
+      lockfileFlag = a.slice('--lockfile='.length);
     } else if (a === '--force') {
       force = true;
+    } else if (a === '--json') {
+      jsonOutput = true;
     } else if (a.startsWith('--')) {
       return { ok: false, message: `unknown option: ${a}` };
     } else if (!filePath) {
@@ -153,27 +172,27 @@ function parseImportArgs(args: string[]): ParsedImportArgs | ParseError {
   }
 
   if (!filePath) return { ok: false, message: 'plan import requires a file path' };
-  return { ok: true, filePath, workspaceFlag, envFlag, force };
+  return { ok: true, filePath, workspaceFlag, lockfileFlag, force, jsonOutput };
 }
 
 async function runPlanImportCmd(args: string[]): Promise<number> {
   const parsed = parseImportArgs(args);
   if (!parsed.ok) {
     process.stderr.write(`yolo: ${parsed.message}\n`);
-    process.stderr.write('Usage: yolo plan import <file> [--workspace <wsId>] [--env <name>] [--force]\n');
+    process.stderr.write('Usage: yolo plan import <file> [--workspace <wsId>] [--lockfile <name>] [--force] [--json]\n');
     return 64;
   }
   const result = await runPlanImport({
     filePath: parsed.filePath,
     workspaceFlag: parsed.workspaceFlag,
-    envFlag: parsed.envFlag,
+    lockfileFlag: parsed.lockfileFlag,
     force: parsed.force,
   });
   if (result.ok) {
-    process.stdout.write(`${formatImportSuccess(result)}\n`);
+    process.stdout.write(`${parsed.jsonOutput ? formatJsonResult(result) : formatImportSuccess(result)}\n`);
     return 0;
   }
-  process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
+  process.stderr.write(parsed.jsonOutput ? `${formatJsonResult(result)}\n` : `FAIL [${result.kind}]: ${result.message}\n`);
   return importExitCode(result.kind);
 }
 
@@ -181,15 +200,17 @@ interface ParsedExportArgs {
   ok: true;
   planId: string;
   workspaceFlag?: string;
-  envFlag?: string;
+  lockfileFlag?: string;
   outputFlag?: string;
+  jsonOutput: boolean;
 }
 
 function parseExportArgs(args: string[]): ParsedExportArgs | ParseError {
   let planId: string | undefined;
   let workspaceFlag: string | undefined;
-  let envFlag: string | undefined;
+  let lockfileFlag: string | undefined;
   let outputFlag: string | undefined;
+  let jsonOutput = false;
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
@@ -199,18 +220,20 @@ function parseExportArgs(args: string[]): ParsedExportArgs | ParseError {
       workspaceFlag = v;
     } else if (a.startsWith('--workspace=')) {
       workspaceFlag = a.slice('--workspace='.length);
-    } else if (a === '--env') {
+    } else if (a === '--lockfile') {
       const v = args[++i];
-      if (!v) return { ok: false, message: '--env requires a value' };
-      envFlag = v;
-    } else if (a.startsWith('--env=')) {
-      envFlag = a.slice('--env='.length);
+      if (!v) return { ok: false, message: '--lockfile requires a value' };
+      lockfileFlag = v;
+    } else if (a.startsWith('--lockfile=')) {
+      lockfileFlag = a.slice('--lockfile='.length);
     } else if (a === '-o' || a === '--output') {
       const v = args[++i];
       if (!v) return { ok: false, message: '-o requires a value' };
       outputFlag = v;
     } else if (a.startsWith('--output=')) {
       outputFlag = a.slice('--output='.length);
+    } else if (a === '--json') {
+      jsonOutput = true;
     } else if (a.startsWith('--')) {
       return { ok: false, message: `unknown option: ${a}` };
     } else if (!planId) {
@@ -221,27 +244,27 @@ function parseExportArgs(args: string[]): ParsedExportArgs | ParseError {
   }
 
   if (!planId) return { ok: false, message: 'plan export requires a planId' };
-  return { ok: true, planId, workspaceFlag, envFlag, outputFlag };
+  return { ok: true, planId, workspaceFlag, lockfileFlag, outputFlag, jsonOutput };
 }
 
 async function runPlanExportCmd(args: string[]): Promise<number> {
   const parsed = parseExportArgs(args);
   if (!parsed.ok) {
     process.stderr.write(`yolo: ${parsed.message}\n`);
-    process.stderr.write('Usage: yolo plan export <planId> [--workspace <wsId>] [--env <name>] [-o <file>]\n');
+    process.stderr.write('Usage: yolo plan export <planId> [--workspace <wsId>] [--lockfile <name>] [-o <file>] [--json]\n');
     return 64;
   }
   const result = await runPlanExport({
     planId: parsed.planId,
     workspaceFlag: parsed.workspaceFlag,
-    envFlag: parsed.envFlag,
+    lockfileFlag: parsed.lockfileFlag,
     outputFlag: parsed.outputFlag,
   });
   if (result.ok) {
-    process.stdout.write(`${formatExportSuccess(result)}\n`);
+    process.stdout.write(`${parsed.jsonOutput ? formatJsonResult(result) : formatExportSuccess(result)}\n`);
     return 0;
   }
-  process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
+  process.stderr.write(parsed.jsonOutput ? `${formatJsonResult(result)}\n` : `FAIL [${result.kind}]: ${result.message}\n`);
   return exportExitCode(result.kind);
 }
 
@@ -249,13 +272,15 @@ interface ParsedStateArgs {
   ok: true;
   planId: string;
   workspaceFlag?: string;
-  envFlag?: string;
+  lockfileFlag?: string;
+  jsonOutput: boolean;
 }
 
 function parseStateArgs(args: string[]): ParsedStateArgs | ParseError {
   let planId: string | undefined;
   let workspaceFlag: string | undefined;
-  let envFlag: string | undefined;
+  let lockfileFlag: string | undefined;
+  let jsonOutput = false;
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
@@ -265,12 +290,14 @@ function parseStateArgs(args: string[]): ParsedStateArgs | ParseError {
       workspaceFlag = v;
     } else if (a.startsWith('--workspace=')) {
       workspaceFlag = a.slice('--workspace='.length);
-    } else if (a === '--env') {
+    } else if (a === '--lockfile') {
       const v = args[++i];
-      if (!v) return { ok: false, message: '--env requires a value' };
-      envFlag = v;
-    } else if (a.startsWith('--env=')) {
-      envFlag = a.slice('--env='.length);
+      if (!v) return { ok: false, message: '--lockfile requires a value' };
+      lockfileFlag = v;
+    } else if (a.startsWith('--lockfile=')) {
+      lockfileFlag = a.slice('--lockfile='.length);
+    } else if (a === '--json') {
+      jsonOutput = true;
     } else if (a.startsWith('--')) {
       return { ok: false, message: `unknown option: ${a}` };
     } else if (!planId) {
@@ -281,14 +308,14 @@ function parseStateArgs(args: string[]): ParsedStateArgs | ParseError {
   }
 
   if (!planId) return { ok: false, message: 'requires a planId' };
-  return { ok: true, planId, workspaceFlag, envFlag };
+  return { ok: true, planId, workspaceFlag, lockfileFlag, jsonOutput };
 }
 
 async function runPlanStateCmd(verb: 'activate' | 'archive', args: string[]): Promise<number> {
   const parsed = parseStateArgs(args);
   if (!parsed.ok) {
     process.stderr.write(`yolo: plan ${verb}: ${parsed.message}\n`);
-    process.stderr.write(`Usage: yolo plan ${verb} <planId> [--workspace <wsId>] [--env <name>]\n`);
+    process.stderr.write(`Usage: yolo plan ${verb} <planId> [--workspace <wsId>] [--lockfile <name>] [--json]\n`);
     return 64;
   }
   const targetState: OperatorTargetState = verb === 'activate' ? 'active' : 'archived';
@@ -296,13 +323,13 @@ async function runPlanStateCmd(verb: 'activate' | 'archive', args: string[]): Pr
     planId: parsed.planId,
     targetState,
     workspaceFlag: parsed.workspaceFlag,
-    envFlag: parsed.envFlag,
+    lockfileFlag: parsed.lockfileFlag,
   });
   if (result.ok) {
-    process.stdout.write(`${formatStateSuccess(result)}\n`);
+    process.stdout.write(`${parsed.jsonOutput ? formatJsonResult(result) : formatStateSuccess(result)}\n`);
     return 0;
   }
-  process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
+  process.stderr.write(parsed.jsonOutput ? `${formatJsonResult(result)}\n` : `FAIL [${result.kind}]: ${result.message}\n`);
   return stateExitCode(result.kind);
 }
 

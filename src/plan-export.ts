@@ -67,7 +67,7 @@ import {
 export interface ExportOptions {
   planId: string;
   workspaceFlag?: string;
-  envFlag?: string;
+  lockfileFlag?: string;
   /** Output path. Default: `<plansDir>/<planId>.md`. */
   outputFlag?: string;
   /**
@@ -209,7 +209,7 @@ export async function runPlanExport(options: ExportOptions): Promise<ExportResul
   let lockfilePath: string;
   let lockfile: Lockfile;
   try {
-    lockfilePath = resolveLockfilePath(plansDir, options.envFlag);
+    lockfilePath = resolveLockfilePath(plansDir, options.lockfileFlag);
     lockfile = readLockfile(lockfilePath);
   } catch (err) {
     if (err instanceof LockfileError) {

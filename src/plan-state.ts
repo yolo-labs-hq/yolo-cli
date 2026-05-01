@@ -73,7 +73,7 @@ export interface PlanStateOptions {
   planId: string;
   targetState: OperatorTargetState;
   workspaceFlag?: string;
-  envFlag?: string;
+  lockfileFlag?: string;
   /**
    * Lockfile directory. Defaults to `<cwd>/.yolo/plans/`. Tests
    * inject a tmp dir.
@@ -242,7 +242,7 @@ export async function runPlanStateTransition(options: PlanStateOptions): Promise
   const plansDir = options.plansDir ?? path.resolve('.yolo', 'plans');
   const lockfileResult = refreshLockfileEntry({
     plansDir,
-    envFlag: options.envFlag,
+    lockfileFlag: options.lockfileFlag,
     workspaceId: mint.workspaceId,
     planId: options.planId,
     newVersion: finalVersion,
@@ -263,7 +263,7 @@ export async function runPlanStateTransition(options: PlanStateOptions): Promise
 
 interface RefreshLockfileOptions {
   plansDir: string;
-  envFlag?: string;
+  lockfileFlag?: string;
   workspaceId: string;
   planId: string;
   newVersion: number;
@@ -279,7 +279,7 @@ function refreshLockfileEntry(
   let lockfilePath: string;
   let lockfile: Lockfile;
   try {
-    lockfilePath = resolveLockfilePath(opts.plansDir, opts.envFlag);
+    lockfilePath = resolveLockfilePath(opts.plansDir, opts.lockfileFlag);
     lockfile = readLockfile(lockfilePath);
   } catch (err) {
     if (err instanceof LockfileError) {

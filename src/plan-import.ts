@@ -84,7 +84,7 @@ import yaml from 'js-yaml';
 export interface ImportOptions {
   filePath: string;
   workspaceFlag?: string;
-  envFlag?: string;
+  lockfileFlag?: string;
   force?: boolean;
   /**
    * Absolute path to the directory containing the lockfile. v1 always
@@ -217,7 +217,7 @@ export async function runPlanImport(options: ImportOptions): Promise<ImportResul
   let lockfilePath: string;
   let lockfile: Lockfile;
   try {
-    lockfilePath = resolveLockfilePath(plansDir, options.envFlag);
+    lockfilePath = resolveLockfilePath(plansDir, options.lockfileFlag);
     lockfile = readLockfile(lockfilePath);
   } catch (err) {
     if (err instanceof LockfileError) {

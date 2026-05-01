@@ -305,7 +305,7 @@ describe('plan-export — --env', () => {
       const result = await runPlanExport({
         planId: 'foo',
         plansDir: dir,
-        envFlag: 'staging',
+        lockfileFlag: 'staging',
         fetchImpl: fetch,
         env: STUB_ENV,
         now: STUB_NOW,
