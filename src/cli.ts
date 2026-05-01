@@ -56,6 +56,11 @@ import {
   runRunGet,
   exitCodeForFailure as runGetExitCode,
 } from './run-get.js';
+import {
+  runRunList,
+  exitCodeForFailure as runListExitCode,
+  type RunExecutionState,
+} from './run-list.js';
 
 const PKG_VERSION = '0.1.0';
 
@@ -109,6 +114,10 @@ function printHelp(): void {
       '  run get <runId> [opts]                    Read a Plan Run (work.get_run, no mutation).',
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '    [--json]                                Pretty-print raw JSON instead of the summary.',
+      '  run list [opts]                           List Plan Runs in the current workspace (work.list_runs).',
+      '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
+      '    [--state <pending|running|paused|...>]  Server-side executionState filter.',
+      '    [--json]                                Pretty-print raw JSON instead of the table.',
       '  run pause <runId> [opts]                  Pause a running Plan Run (work.pause_run).',
       '  run resume <runId> [opts]                 Resume a paused Plan Run (work.resume_run).',
       '  run cancel <runId> [opts]                 Cancel a Plan Run (work.cancel_run).',
@@ -683,6 +692,64 @@ async function runRunGetCmd(args: string[]): Promise<number> {
   return runGetExitCode(result.kind);
 }
 
+interface ParsedRunListArgs {
+  ok: true;
+  workspaceFlag?: string;
+  stateFilter?: RunExecutionState;
+  jsonOutput: boolean;
+}
+
+function parseRunListArgs(args: string[]): ParsedRunListArgs | ParseError {
+  let workspaceFlag: string | undefined;
+  let stateFilter: RunExecutionState | undefined;
+  let jsonOutput = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--workspace') {
+      const v = args[++i];
+      if (!v) return { ok: false, message: '--workspace requires a value' };
+      workspaceFlag = v;
+    } else if (a.startsWith('--workspace=')) {
+      workspaceFlag = a.slice('--workspace='.length);
+    } else if (a === '--state') {
+      const v = args[++i];
+      if (!v) return { ok: false, message: '--state requires a value' };
+      stateFilter = v as RunExecutionState;
+    } else if (a.startsWith('--state=')) {
+      stateFilter = a.slice('--state='.length) as RunExecutionState;
+    } else if (a === '--json') {
+      jsonOutput = true;
+    } else if (a.startsWith('--')) {
+      return { ok: false, message: `unknown option: ${a}` };
+    } else {
+      return { ok: false, message: `unexpected positional argument: ${a}` };
+    }
+  }
+
+  return { ok: true, workspaceFlag, stateFilter, jsonOutput };
+}
+
+async function runRunListCmd(args: string[]): Promise<number> {
+  const parsed = parseRunListArgs(args);
+  if (!parsed.ok) {
+    process.stderr.write(`yolo: run list: ${parsed.message}\n`);
+    process.stderr.write('Usage: yolo run list [--workspace <wsId>] [--state <pending|running|paused|succeeded|failed|cancelled|superseded>] [--json]\n');
+    return 64;
+  }
+  const result = await runRunList({
+    workspaceFlag: parsed.workspaceFlag,
+    stateFilter: parsed.stateFilter,
+    outputFormat: parsed.jsonOutput ? 'json' : 'summary',
+  });
+  if (result.ok) {
+    process.stdout.write(`${result.output}\n`);
+    return 0;
+  }
+  process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
+  return runListExitCode(result.kind);
+}
+
 async function main(argv: string[]): Promise<number> {
   const [, , ...args] = argv;
   const cmd = args[0];
@@ -751,15 +818,18 @@ async function main(argv: string[]): Promise<number> {
     if (sub === 'get') {
       return runRunGetCmd(args.slice(2));
     }
+    if (sub === 'list') {
+      return runRunListCmd(args.slice(2));
+    }
     if (sub === 'pause' || sub === 'resume' || sub === 'cancel') {
       return runRunLifecycleCmd(sub, args.slice(2));
     }
     if (!sub) {
-      process.stderr.write('yolo: run requires a subcommand (start, get, pause, resume, cancel)\n');
+      process.stderr.write('yolo: run requires a subcommand (start, get, list, pause, resume, cancel)\n');
       return 64;
     }
     process.stderr.write(`yolo: unknown run subcommand '${sub}'\n`);
-    process.stderr.write('Subcommands: start, get, pause, resume, cancel\n');
+    process.stderr.write('Subcommands: start, get, list, pause, resume, cancel\n');
     return 64;
   }
 

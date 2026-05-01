@@ -312,6 +312,7 @@ describe('work-client — substrate scope constants', () => {
     assert.deepEqual(SUBSTRATE_CLI_RUN_SCOPES, [
       'work.start_run',
       'work.get_run',
+      'work.list_runs',
       'work.pause_run',
       'work.resume_run',
       'work.cancel_run',

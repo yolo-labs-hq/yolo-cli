@@ -28,7 +28,8 @@
  *   - Plan authoring: work.create_plan, work.update_plan,
  *     work.get_plan, work.list_plans
  *   - Run lifecycle:  work.start_run, work.get_run,
- *     work.pause_run, work.resume_run, work.cancel_run
+ *     work.list_runs, work.pause_run, work.resume_run,
+ *     work.cancel_run
  *
  * Run-lifecycle implication: `work.start_run` binds the calling agent
  * as the Run's Operator (route handler, Phase 4/6 R4). So a Run started
@@ -51,6 +52,7 @@ export const SUBSTRATE_CLI_PLAN_SCOPES = [
 export const SUBSTRATE_CLI_RUN_SCOPES = [
   'work.start_run',
   'work.get_run',
+  'work.list_runs',
   'work.pause_run',
   'work.resume_run',
   'work.cancel_run',
