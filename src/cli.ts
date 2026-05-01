@@ -52,6 +52,10 @@ import {
   exitCodeForFailure as runLifecycleExitCode,
   type RunLifecycleVerb,
 } from './run-lifecycle.js';
+import {
+  runRunGet,
+  exitCodeForFailure as runGetExitCode,
+} from './run-get.js';
 
 const PKG_VERSION = '0.1.0';
 
@@ -102,6 +106,9 @@ function printHelp(): void {
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '    [--inputs <json>]                       JSON object of Plan inputs. Default: {}.',
       '    [--json]                                Emit the response as JSON.',
+      '  run get <runId> [opts]                    Read a Plan Run (work.get_run, no mutation).',
+      '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
+      '    [--json]                                Pretty-print raw JSON instead of the summary.',
       '  run pause <runId> [opts]                  Pause a running Plan Run (work.pause_run).',
       '  run resume <runId> [opts]                 Resume a paused Plan Run (work.resume_run).',
       '  run cancel <runId> [opts]                 Cancel a Plan Run (work.cancel_run).',
@@ -621,6 +628,61 @@ async function runRunLifecycleCmd(verb: RunLifecycleVerb, args: string[]): Promi
   return runLifecycleExitCode(result.kind);
 }
 
+interface ParsedRunGetArgs {
+  ok: true;
+  planRunId: string;
+  workspaceFlag?: string;
+  jsonOutput: boolean;
+}
+
+function parseRunGetArgs(args: string[]): ParsedRunGetArgs | ParseError {
+  let planRunId: string | undefined;
+  let workspaceFlag: string | undefined;
+  let jsonOutput = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--workspace') {
+      const v = args[++i];
+      if (!v) return { ok: false, message: '--workspace requires a value' };
+      workspaceFlag = v;
+    } else if (a.startsWith('--workspace=')) {
+      workspaceFlag = a.slice('--workspace='.length);
+    } else if (a === '--json') {
+      jsonOutput = true;
+    } else if (a.startsWith('--')) {
+      return { ok: false, message: `unknown option: ${a}` };
+    } else if (!planRunId) {
+      planRunId = a;
+    } else {
+      return { ok: false, message: `unexpected positional argument: ${a}` };
+    }
+  }
+
+  if (!planRunId) return { ok: false, message: 'run get requires a planRunId' };
+  return { ok: true, planRunId, workspaceFlag, jsonOutput };
+}
+
+async function runRunGetCmd(args: string[]): Promise<number> {
+  const parsed = parseRunGetArgs(args);
+  if (!parsed.ok) {
+    process.stderr.write(`yolo: run get: ${parsed.message}\n`);
+    process.stderr.write('Usage: yolo run get <planRunId> [--workspace <wsId>] [--json]\n');
+    return 64;
+  }
+  const result = await runRunGet({
+    planRunId: parsed.planRunId,
+    workspaceFlag: parsed.workspaceFlag,
+    outputFormat: parsed.jsonOutput ? 'json' : 'summary',
+  });
+  if (result.ok) {
+    process.stdout.write(`${result.output}\n`);
+    return 0;
+  }
+  process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
+  return runGetExitCode(result.kind);
+}
+
 async function main(argv: string[]): Promise<number> {
   const [, , ...args] = argv;
   const cmd = args[0];
@@ -686,15 +748,18 @@ async function main(argv: string[]): Promise<number> {
     if (sub === 'start') {
       return runRunStartCmd(args.slice(2));
     }
+    if (sub === 'get') {
+      return runRunGetCmd(args.slice(2));
+    }
     if (sub === 'pause' || sub === 'resume' || sub === 'cancel') {
       return runRunLifecycleCmd(sub, args.slice(2));
     }
     if (!sub) {
-      process.stderr.write('yolo: run requires a subcommand (start, pause, resume, cancel)\n');
+      process.stderr.write('yolo: run requires a subcommand (start, get, pause, resume, cancel)\n');
       return 64;
     }
     process.stderr.write(`yolo: unknown run subcommand '${sub}'\n`);
-    process.stderr.write('Subcommands: start, pause, resume, cancel\n');
+    process.stderr.write('Subcommands: start, get, pause, resume, cancel\n');
     return 64;
   }
 
