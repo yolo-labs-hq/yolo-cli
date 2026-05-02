@@ -3,19 +3,28 @@
  *
  * The three verbs share a single runner because the routes share a
  * single transition handler on the server (common-api/src/routes/
- * work.ts:transitionRunHandler). They differ only in target state,
- * valid source states, and whether they accept a `--reason`.
+ * workspaces.ts:transitionPlanRunForUser). They differ only in
+ * target state, valid source states, and whether they accept a
+ * `--reason`.
  *
- * Auth model: pause/resume/cancel via MCP require the caller to be
- * the bound Operator (Phase 6 R4). For the substrate CLI that means
- * a Run started via `yolo run start` (substrate-cli IS the Operator)
- * works; a Run started by claude / codex / etc. returns 403
- * NOT_AUTHORIZED. That hazard is surfaced through the http-failure
- * path with the route's friendly NOT_AUTHORIZED message.
+ * Auth model: hits the user-facing route at
+ * `/v1/workspaces/:id/runs/:planRunId/{verb}` via X-Internal-Auth +
+ * X-User-Id (the substrate CLI is by definition invoked by the
+ * workspace owner — operating as them is the right default). The
+ * user route checks workspace ownership only and skips R4 operator
+ * binding, so this works regardless of which agent (if any) is
+ * bound to the run.
+ *
+ * Why not the MCP path: that path's R4 binding makes sense for
+ * agent-to-agent calls (claude pausing its own run) but produces
+ * 403 NOT_AUTHORIZED whenever the user wants to cancel a run owned
+ * by a different agent or by the webapp launcher. Forcing the user
+ * to know which side of that fence they're on is bad UX. The CLI
+ * decides automatically.
  *
  * Errors map to exit codes via the CLI wrapper:
  *   - 0  = success
- *   - 1  = http (404, 403 NOT_AUTHORIZED, 409 INVALID_STATE, 5xx)
+ *   - 1  = http (404, 409 INVALID_STATE, 5xx)
  *   - 64 = usage (bad runId, missing env trio, --workspace mismatch,
  *          reason too long pre-network, bad target verb)
  */
@@ -24,7 +33,6 @@ import {
   type FetchLike,
   SUBSTRATE_CLI_RUN_SCOPES,
   WorkClientError,
-  authenticatedRequest,
   mintSubstrateToken,
   userRouteRequest,
 } from './work-client.js';
@@ -39,13 +47,6 @@ export interface RunLifecycleOptions {
   workspaceFlag?: string;
   /** Optional reason — accepted by pause/cancel only, ignored by resume. */
   reason?: string;
-  /** When true, hit the user-facing route at
-   *  `/v1/workspaces/.../runs/.../{verb}` (auth via X-Internal-Auth +
-   *  X-User-Id) instead of the MCP delegated path. The user-facing
-   *  route checks workspace ownership but skips R4 operator-binding,
-   *  so this works for runs started by other agents (e.g. the webapp,
-   *  which sets `operatorAgentId: null`). Default is false (MCP). */
-  userDriven?: boolean;
   outputFormat?: 'json' | 'summary';
   fetchImpl?: FetchLike;
   env?: Record<string, string | undefined>;
@@ -134,27 +135,16 @@ export async function runRunLifecycle(options: RunLifecycleOptions): Promise<Run
     body.reason = options.reason;
   }
   const path = `/workspaces/${mint.workspaceId}/runs/${options.planRunId}/${options.verb}`;
-  const response = options.userDriven
-    ? await userRouteRequest(
-        {
-          commonApiUrl,
-          internalApiKey,
-          userId: mint.userId,
-          fetchImpl: options.fetchImpl,
-        },
-        path,
-        { method: 'POST', jsonBody: body },
-      )
-    : await authenticatedRequest(
-        {
-          commonApiUrl,
-          internalApiKey,
-          delegatedToken: mint.token,
-          fetchImpl: options.fetchImpl,
-        },
-        path,
-        { method: 'POST', jsonBody: body },
-      );
+  const response = await userRouteRequest(
+    {
+      commonApiUrl,
+      internalApiKey,
+      userId: mint.userId,
+      fetchImpl: options.fetchImpl,
+    },
+    path,
+    { method: 'POST', jsonBody: body },
+  );
   if (!response.ok) {
     const text = await safeReadText(response);
     return fail('http', `work.${options.verb}_run failed: HTTP ${response.status} — ${text}`, { status: response.status });

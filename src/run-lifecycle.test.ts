@@ -76,13 +76,14 @@ const mintRoute: RouteHandler = {
 function transitionRoute(
   verb: RunLifecycleVerb,
   finalState: string,
-  captured: { body?: unknown; url?: string },
+  captured: { body?: unknown; url?: string; headers?: Record<string, string> },
 ): RouteHandler {
   return {
     matches: (url, method) =>
-      method === 'POST' && url.endsWith(`/internal/work/workspaces/${STUB_WS}/runs/${RUN_ID}/${verb}`),
+      method === 'POST' && url.endsWith(`/v1/workspaces/${STUB_WS}/runs/${RUN_ID}/${verb}`),
     capture: (init) => {
       captured.url = `${verb}`;
+      captured.headers = init.headers;
       if (typeof init.body === 'string') captured.body = JSON.parse(init.body);
     },
     respond: () => ({
@@ -96,7 +97,7 @@ function transitionRoute(
 function transitionError(verb: RunLifecycleVerb, status: number, body: unknown): RouteHandler {
   return {
     matches: (url, method) =>
-      method === 'POST' && url.endsWith(`/internal/work/workspaces/${STUB_WS}/runs/${RUN_ID}/${verb}`),
+      method === 'POST' && url.endsWith(`/v1/workspaces/${STUB_WS}/runs/${RUN_ID}/${verb}`),
     respond: () => ({ ok: false, status, body }),
   };
 }
@@ -304,10 +305,10 @@ describe('run-lifecycle — failures', () => {
     assert.equal(result.kind, 'workspace_mismatch');
   });
 
-  it('returns http failure on 403 NOT_AUTHORIZED (not the bound Operator)', async () => {
+  it('returns http failure on 404 (workspace not found / not owned)', async () => {
     const fetch = makeFetchStub([
       mintRoute,
-      transitionError('pause', 403, { error: 'caller is not the bound Operator', code: 'NOT_AUTHORIZED' }),
+      transitionError('pause', 404, { error: 'workspace not found', code: 'NOT_FOUND' }),
     ]);
     const result = await runRunLifecycle({
       verb: 'pause',
@@ -318,8 +319,7 @@ describe('run-lifecycle — failures', () => {
     assert.equal(result.ok, false);
     if (result.ok) return;
     assert.equal(result.kind, 'http');
-    assert.match(result.message, /HTTP 403/);
-    assert.match(result.message, /NOT_AUTHORIZED/);
+    assert.match(result.message, /HTTP 404/);
     assert.equal(exitCodeForFailure(result.kind), 1);
   });
 
@@ -341,73 +341,28 @@ describe('run-lifecycle — failures', () => {
   });
 });
 
-// ─── --user-driven (skips MCP, hits user-facing route) ──────────────────
-describe('run-lifecycle — --user-driven', () => {
-  function userRouteMatch(verb: RunLifecycleVerb, captured: { url?: string; headers?: Record<string, string>; body?: unknown }): RouteHandler {
-    return {
-      matches: (url, method) =>
-        method === 'POST' && url.endsWith(`/v1/workspaces/${STUB_WS}/runs/${RUN_ID}/${verb}`),
-      capture: (init) => {
-        captured.url = `${verb}`;
-        captured.headers = init.headers;
-        if (typeof init.body === 'string') captured.body = JSON.parse(init.body);
-      },
-      respond: () => ({
-        ok: true,
-        status: 200,
-        body: { planRunId: RUN_ID, executionState: verb === 'pause' ? 'paused' : verb === 'resume' ? 'running' : 'cancelled' },
-      }),
-    };
-  }
-
-  it('hits /v1/workspaces/.../runs/.../cancel instead of /internal/work/...', async () => {
-    const captured: { url?: string; headers?: Record<string, string>; body?: unknown } = {};
-    const fetch = makeFetchStub([mintRoute, userRouteMatch('cancel', captured)]);
-    const result = await runRunLifecycle({
-      verb: 'cancel',
-      planRunId: RUN_ID,
-      userDriven: true,
-      reason: 'cleaning up zombie run',
-      fetchImpl: fetch,
-      env: STUB_ENV,
-    });
-    assert.equal(result.ok, true);
-    assert.equal(captured.url, 'cancel');
-    // Forwards reason in body.
-    assert.deepEqual(captured.body, { reason: 'cleaning up zombie run' });
-  });
-
-  it('sends X-Internal-Auth + X-User-Id (NOT Authorization Bearer)', async () => {
-    const captured: { url?: string; headers?: Record<string, string>; body?: unknown } = {};
-    const fetch = makeFetchStub([mintRoute, userRouteMatch('pause', captured)]);
-    await runRunLifecycle({
-      verb: 'pause',
-      planRunId: RUN_ID,
-      userDriven: true,
-      fetchImpl: fetch,
-      env: STUB_ENV,
-    });
-    assert.equal(captured.headers?.['X-Internal-Auth'], 'svc-key');
-    assert.equal(captured.headers?.['X-User-Id'], STUB_USER);
-    // Critically: NO Authorization Bearer header — that would route
-    // the request through userAuth/MCP-validation, defeating the
-    // whole point of the user-driven path.
-    assert.equal(captured.headers?.['Authorization'], undefined);
-    assert.equal(captured.headers?.['authorization'], undefined);
-  });
-
-  it('default (userDriven: false) still hits /internal/work/... with Bearer', async () => {
-    const captured: { body?: unknown; url?: string } = {};
+// ─── auth-path shape (always user-route) ─────────────────────────────────
+describe('run-lifecycle — auth path', () => {
+  it('hits /v1/workspaces/.../runs/.../cancel with X-Internal-Auth + X-User-Id', async () => {
+    const captured: { body?: unknown; url?: string; headers?: Record<string, string> } = {};
     const fetch = makeFetchStub([mintRoute, transitionRoute('cancel', 'cancelled', captured)]);
     const result = await runRunLifecycle({
       verb: 'cancel',
       planRunId: RUN_ID,
-      // userDriven omitted → MCP path
+      reason: 'cleaning up',
       fetchImpl: fetch,
       env: STUB_ENV,
     });
     assert.equal(result.ok, true);
     assert.equal(captured.url, 'cancel');
+    assert.deepEqual(captured.body, { reason: 'cleaning up' });
+    assert.equal(captured.headers?.['X-Internal-Auth'], 'svc-key');
+    assert.equal(captured.headers?.['X-User-Id'], STUB_USER);
+    // Critically: NO Authorization Bearer header — the user route
+    // shouldn't see a delegated token; it would only confuse
+    // flexibleAuth's routing logic.
+    assert.equal(captured.headers?.['Authorization'], undefined);
+    assert.equal(captured.headers?.['authorization'], undefined);
   });
 });
 
