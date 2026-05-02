@@ -74,7 +74,19 @@ import {
   exitCodeForFailure as artifactListExitCode,
 } from './artifact-list.js';
 
-const PKG_VERSION = '0.1.0';
+// Resolved at startup from the package's own package.json so the
+// `--version` output can never drift from the npm version. Touching
+// only one of the two used to silently emit stale info.
+//
+// We read the file via `createRequire` rather than `import …
+// assert/with { type: 'json' }` because our tsconfig pins module:
+// Node16, which doesn't support import attributes. The file lives
+// next to dist/cli.js in the installed package layout
+// (/opt/yolo-cli/package.json + /opt/yolo-cli/dist/cli.js), so the
+// `../package.json` relative path resolves correctly both during
+// tests (src/) and in production (dist/).
+import { createRequire } from 'module';
+const PKG_VERSION: string = (createRequire(import.meta.url)('../package.json') as { version: string }).version;
 
 /**
  * Serialize an orchestration result for `--json` output. Strips the
