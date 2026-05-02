@@ -33,7 +33,7 @@ const STUB_TOKEN_RESPONSE = {
   token: 'jwt-fake',
   expiresAt: '2026-04-30T13:00:00.000Z',
   jti: '11111111-2222-3333-4444-555555555555',
-  claims: { workspaceId: STUB_WS, agentId: 'substrate-cli', scopes: ['work.list_runs'] },
+  claims: { workspaceId: STUB_WS, userId: '507f1f77bcf86cd799439001', agentId: 'substrate-cli', scopes: ['work.list_runs'] },
 };
 
 const STUB_RUNS = [

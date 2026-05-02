@@ -26,6 +26,7 @@ import {
   WorkClientError,
   authenticatedRequest,
   mintSubstrateToken,
+  userRouteRequest,
 } from './work-client.js';
 
 // ─── Public types ─────────────────────────────────────────────────────────
@@ -38,6 +39,13 @@ export interface RunLifecycleOptions {
   workspaceFlag?: string;
   /** Optional reason — accepted by pause/cancel only, ignored by resume. */
   reason?: string;
+  /** When true, hit the user-facing route at
+   *  `/v1/workspaces/.../runs/.../{verb}` (auth via X-Internal-Auth +
+   *  X-User-Id) instead of the MCP delegated path. The user-facing
+   *  route checks workspace ownership but skips R4 operator-binding,
+   *  so this works for runs started by other agents (e.g. the webapp,
+   *  which sets `operatorAgentId: null`). Default is false (MCP). */
+  userDriven?: boolean;
   outputFormat?: 'json' | 'summary';
   fetchImpl?: FetchLike;
   env?: Record<string, string | undefined>;
@@ -121,18 +129,32 @@ export async function runRunLifecycle(options: RunLifecycleOptions): Promise<Run
     );
   }
 
-  const ctx = {
-    commonApiUrl,
-    internalApiKey,
-    delegatedToken: mint.token,
-    fetchImpl: options.fetchImpl,
-  };
   const body: { reason?: string } = {};
   if (options.reason !== undefined && options.verb !== 'resume') {
     body.reason = options.reason;
   }
   const path = `/workspaces/${mint.workspaceId}/runs/${options.planRunId}/${options.verb}`;
-  const response = await authenticatedRequest(ctx, path, { method: 'POST', jsonBody: body });
+  const response = options.userDriven
+    ? await userRouteRequest(
+        {
+          commonApiUrl,
+          internalApiKey,
+          userId: mint.userId,
+          fetchImpl: options.fetchImpl,
+        },
+        path,
+        { method: 'POST', jsonBody: body },
+      )
+    : await authenticatedRequest(
+        {
+          commonApiUrl,
+          internalApiKey,
+          delegatedToken: mint.token,
+          fetchImpl: options.fetchImpl,
+        },
+        path,
+        { method: 'POST', jsonBody: body },
+      );
   if (!response.ok) {
     const text = await safeReadText(response);
     return fail('http', `work.${options.verb}_run failed: HTTP ${response.status} — ${text}`, { status: response.status });

@@ -135,6 +135,10 @@ function printHelp(): void {
       '  run cancel <runId> [opts]                 Cancel a Plan Run (work.cancel_run).',
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '    [--reason <text>]                       Optional reason (pause/cancel only). ≤1024 chars.',
+      '    [--user-driven]                         Hit the user-facing route instead of MCP. Use this for',
+      '                                            runs started by other agents (e.g. the webapp) where the',
+      '                                            substrate-cli is NOT the bound Operator. Auth check',
+      '                                            becomes workspace-ownership; R4 binding is skipped.',
       '    [--json]                                Emit the response as JSON.',
       '  run transfer <runId> [opts]               Reassign the Operator (work.transfer_run_operator).',
       '    --to <agentId>                          Target Operator (Operator-tier: claude, codex).',
@@ -603,6 +607,7 @@ interface ParsedRunLifecycleArgs {
   planRunId: string;
   workspaceFlag?: string;
   reason?: string;
+  userDriven: boolean;
   jsonOutput: boolean;
 }
 
@@ -610,6 +615,7 @@ function parseRunLifecycleArgs(args: string[]): ParsedRunLifecycleArgs | ParseEr
   let planRunId: string | undefined;
   let workspaceFlag: string | undefined;
   let reason: string | undefined;
+  let userDriven = false;
   let jsonOutput = false;
 
   for (let i = 0; i < args.length; i++) {
@@ -628,6 +634,8 @@ function parseRunLifecycleArgs(args: string[]): ParsedRunLifecycleArgs | ParseEr
       reason = v;
     } else if (a.startsWith('--reason=')) {
       reason = a.slice('--reason='.length);
+    } else if (a === '--user-driven') {
+      userDriven = true;
     } else if (a === '--json') {
       jsonOutput = true;
     } else if (a.startsWith('--')) {
@@ -640,7 +648,7 @@ function parseRunLifecycleArgs(args: string[]): ParsedRunLifecycleArgs | ParseEr
   }
 
   if (!planRunId) return { ok: false, message: 'run <verb> requires a planRunId' };
-  return { ok: true, planRunId, workspaceFlag, reason, jsonOutput };
+  return { ok: true, planRunId, workspaceFlag, reason, userDriven, jsonOutput };
 }
 
 async function runRunLifecycleCmd(verb: RunLifecycleVerb, args: string[]): Promise<number> {
@@ -648,7 +656,7 @@ async function runRunLifecycleCmd(verb: RunLifecycleVerb, args: string[]): Promi
   if (!parsed.ok) {
     process.stderr.write(`yolo: run ${verb}: ${parsed.message}\n`);
     const reasonHint = verb === 'resume' ? '' : ' [--reason <text>]';
-    process.stderr.write(`Usage: yolo run ${verb} <planRunId> [--workspace <wsId>]${reasonHint} [--json]\n`);
+    process.stderr.write(`Usage: yolo run ${verb} <planRunId> [--workspace <wsId>]${reasonHint} [--user-driven] [--json]\n`);
     return 64;
   }
   const result = await runRunLifecycle({
@@ -656,6 +664,7 @@ async function runRunLifecycleCmd(verb: RunLifecycleVerb, args: string[]): Promi
     planRunId: parsed.planRunId,
     workspaceFlag: parsed.workspaceFlag,
     reason: parsed.reason,
+    userDriven: parsed.userDriven,
     outputFormat: parsed.jsonOutput ? 'json' : 'summary',
   });
   if (result.ok) {

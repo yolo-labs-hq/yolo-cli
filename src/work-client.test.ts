@@ -57,6 +57,7 @@ const VALID_MINT_RESPONSE = {
   jti: '11111111-2222-3333-4444-555555555555',
   claims: {
     workspaceId: '507f1f77bcf86cd799439011',
+    userId: '507f1f77bcf86cd799439001',
     agentId: 'substrate-cli',
     scopes: ['work.get_plan'],
   },
@@ -99,7 +100,7 @@ describe('work-client — mintSubstrateToken request shape', () => {
 
 // ─── mintSubstrateToken — happy path ─────────────────────────────────────
 describe('work-client — mintSubstrateToken happy path', () => {
-  it('returns token + workspaceId + jti from claims', async () => {
+  it('returns token + workspaceId + userId + jti from claims', async () => {
     const { fetch } = makeFetchStub({ jsonBody: VALID_MINT_RESPONSE });
     const result = await mintSubstrateToken({
       commonApiUrl: 'https://api.example.com',
@@ -111,7 +112,30 @@ describe('work-client — mintSubstrateToken happy path', () => {
     assert.equal(result.token, VALID_MINT_RESPONSE.token);
     assert.equal(result.expiresAt, VALID_MINT_RESPONSE.expiresAt);
     assert.equal(result.workspaceId, VALID_MINT_RESPONSE.claims.workspaceId);
+    assert.equal(result.userId, VALID_MINT_RESPONSE.claims.userId);
     assert.equal(result.jti, VALID_MINT_RESPONSE.jti);
+  });
+
+  it('throws WorkClientError on missing claims.userId', async () => {
+    const { fetch } = makeFetchStub({
+      jsonBody: {
+        token: 'jwt',
+        expiresAt: '2026-04-30T...',
+        jti: 'x',
+        claims: { workspaceId: 'ws' }, // no userId
+      },
+    });
+    await assert.rejects(
+      mintSubstrateToken({
+        commonApiUrl: 'https://api.example.com',
+        internalApiKey: 'k',
+        sessionId: 's',
+        scopes: ['work.get_plan'],
+        fetchImpl: fetch,
+      }),
+      (err: unknown) =>
+        err instanceof WorkClientError && /userId/.test(err.message),
+    );
   });
 });
 

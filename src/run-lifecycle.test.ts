@@ -34,11 +34,13 @@ const STUB_ENV = {
 const STUB_WS = '507f1f77bcf86cd799439011';
 const RUN_ID = 'pr_abc123';
 
+const STUB_USER = '507f1f77bcf86cd799439001';
+
 const STUB_TOKEN_RESPONSE = {
   token: 'jwt-fake',
   expiresAt: '2026-04-30T13:00:00.000Z',
   jti: '11111111-2222-3333-4444-555555555555',
-  claims: { workspaceId: STUB_WS, agentId: 'substrate-cli', scopes: ['work.pause_run'] },
+  claims: { workspaceId: STUB_WS, userId: STUB_USER, agentId: 'substrate-cli', scopes: ['work.pause_run'] },
 };
 
 interface RouteHandler {
@@ -336,6 +338,76 @@ describe('run-lifecycle — failures', () => {
     if (result.ok) return;
     assert.equal(result.kind, 'http');
     assert.match(result.message, /HTTP 409/);
+  });
+});
+
+// ─── --user-driven (skips MCP, hits user-facing route) ──────────────────
+describe('run-lifecycle — --user-driven', () => {
+  function userRouteMatch(verb: RunLifecycleVerb, captured: { url?: string; headers?: Record<string, string>; body?: unknown }): RouteHandler {
+    return {
+      matches: (url, method) =>
+        method === 'POST' && url.endsWith(`/v1/workspaces/${STUB_WS}/runs/${RUN_ID}/${verb}`),
+      capture: (init) => {
+        captured.url = `${verb}`;
+        captured.headers = init.headers;
+        if (typeof init.body === 'string') captured.body = JSON.parse(init.body);
+      },
+      respond: () => ({
+        ok: true,
+        status: 200,
+        body: { planRunId: RUN_ID, executionState: verb === 'pause' ? 'paused' : verb === 'resume' ? 'running' : 'cancelled' },
+      }),
+    };
+  }
+
+  it('hits /v1/workspaces/.../runs/.../cancel instead of /internal/work/...', async () => {
+    const captured: { url?: string; headers?: Record<string, string>; body?: unknown } = {};
+    const fetch = makeFetchStub([mintRoute, userRouteMatch('cancel', captured)]);
+    const result = await runRunLifecycle({
+      verb: 'cancel',
+      planRunId: RUN_ID,
+      userDriven: true,
+      reason: 'cleaning up zombie run',
+      fetchImpl: fetch,
+      env: STUB_ENV,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(captured.url, 'cancel');
+    // Forwards reason in body.
+    assert.deepEqual(captured.body, { reason: 'cleaning up zombie run' });
+  });
+
+  it('sends X-Internal-Auth + X-User-Id (NOT Authorization Bearer)', async () => {
+    const captured: { url?: string; headers?: Record<string, string>; body?: unknown } = {};
+    const fetch = makeFetchStub([mintRoute, userRouteMatch('pause', captured)]);
+    await runRunLifecycle({
+      verb: 'pause',
+      planRunId: RUN_ID,
+      userDriven: true,
+      fetchImpl: fetch,
+      env: STUB_ENV,
+    });
+    assert.equal(captured.headers?.['X-Internal-Auth'], 'svc-key');
+    assert.equal(captured.headers?.['X-User-Id'], STUB_USER);
+    // Critically: NO Authorization Bearer header — that would route
+    // the request through userAuth/MCP-validation, defeating the
+    // whole point of the user-driven path.
+    assert.equal(captured.headers?.['Authorization'], undefined);
+    assert.equal(captured.headers?.['authorization'], undefined);
+  });
+
+  it('default (userDriven: false) still hits /internal/work/... with Bearer', async () => {
+    const captured: { body?: unknown; url?: string } = {};
+    const fetch = makeFetchStub([mintRoute, transitionRoute('cancel', 'cancelled', captured)]);
+    const result = await runRunLifecycle({
+      verb: 'cancel',
+      planRunId: RUN_ID,
+      // userDriven omitted → MCP path
+      fetchImpl: fetch,
+      env: STUB_ENV,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(captured.url, 'cancel');
   });
 });
 

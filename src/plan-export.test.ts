@@ -47,6 +47,7 @@ const STUB_TOKEN_RESPONSE = {
   jti: '11111111-2222-3333-4444-555555555555',
   claims: {
     workspaceId: STUB_WS,
+    userId: '507f1f77bcf86cd799439001',
     agentId: 'substrate-cli',
     scopes: ['work.get_plan'],
   },
