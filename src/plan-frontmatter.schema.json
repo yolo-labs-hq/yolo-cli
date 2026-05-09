@@ -142,8 +142,8 @@
         },
         "agentType": {
           "type": "string",
-          "minLength": 1,
-          "description": "Item 16 follow-up — per-Step agent label (workstream-mode only). Forwarded to container-api's /lanes/:name/spawn-agent so the lane runner picks the matching adapter, AND used by the dispatcher to append the agent to the Plan Run's operators[] on Step Run spawn (addedReason 'step-spawn') so the agent fan grows to match actual execution. Must be in the substrate's container-spawnable set (claude / codex / yolo); aliases like 'yolo-code' canonicalize to 'yolo'. Unrecognized labels degrade to the container's env-default agent and skip the operators[] append (logged for observability). test / critic / preview / automation modes don't use this field."
+          "enum": ["claude", "codex", "yolo", "yolo-code"],
+          "description": "Item 16 follow-up — per-Step agent label (workstream-mode only). Forwarded to container-api's /lanes/:name/spawn-agent so the lane runner picks the matching adapter, AND used by the dispatcher to append the agent to the Plan Run's operators[] on Step Run spawn (addedReason 'step-spawn') so the agent fan grows to match actual execution. Must be in the substrate's container-spawnable set; the alias 'yolo-code' canonicalizes to 'yolo' (the canonical id token-minting expects) before persisted on the binding. test / critic / preview / automation modes don't use this field. Enum mirrors the server-side check in common-api/src/services/work/plan-validators.ts; keep them in sync."
         }
       }
     }
