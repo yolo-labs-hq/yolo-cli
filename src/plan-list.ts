@@ -10,14 +10,15 @@
  *
  * Two output modes:
  *   - default (`--summary`): one-line table per plan with planId,
- *     authoringState, version, latestRunId (or `—`), updatedAt
- *     (relative ISO date for at-a-glance recency).
+ *     state, version, latestRunId (or `—`), updatedAt (relative ISO
+ *     date for at-a-glance recency).
  *   - `--json`: pretty-printed raw `plans[]` array. For jq /
  *     scripted operator pipelines.
  *
  * Filter: `--state <draft|active|archived>` server-side filter
- * (passed as `?authoringState=` query param). Avoids client-side
- * filtering on workspaces with many plans.
+ * (passed as `?state=` query param; renamed from `authoringState`
+ * 2026-05-09, item 17). Avoids client-side filtering on workspaces
+ * with many plans.
  *
  * Exit codes:
  *   - 0  = success (zero plans is also success — empty list, not an error)
@@ -35,12 +36,12 @@ import {
 
 // ─── Public types ─────────────────────────────────────────────────────────
 
-export type PlanAuthoringState = 'draft' | 'active' | 'archived';
+export type PlanState = 'draft' | 'active' | 'archived';
 
 export interface ListOptions {
   workspaceFlag?: string;
-  /** Server-side filter on authoringState. */
-  stateFilter?: PlanAuthoringState;
+  /** Server-side filter on Plan.state. */
+  stateFilter?: PlanState;
   /**
    * 'json' = pretty-print the raw response. 'summary' = one-line
    * row per plan. Default 'summary'.
@@ -53,7 +54,7 @@ export interface ListOptions {
 export interface PlanListEntry {
   planId: string;
   name: string;
-  authoringState: PlanAuthoringState;
+  state: PlanState;
   version: number;
   latestRunId: string | null;
   updatedAt: string;
@@ -77,7 +78,7 @@ export interface ListFailure {
 
 export type ListResult = ListSuccess | ListFailure;
 
-const ALLOWED_STATES: ReadonlyArray<PlanAuthoringState> = ['draft', 'active', 'archived'];
+const ALLOWED_STATES: ReadonlyArray<PlanState> = ['draft', 'active', 'archived'];
 
 // ─── Public entry ─────────────────────────────────────────────────────────
 
@@ -127,7 +128,7 @@ export async function runPlanList(options: ListOptions): Promise<ListResult> {
     );
   }
 
-  // 5) GET /workspaces/<wsId>/plans (with optional ?authoringState=)
+  // 5) GET /workspaces/<wsId>/plans (with optional ?state=)
   const ctx = {
     commonApiUrl,
     internalApiKey,
@@ -135,7 +136,7 @@ export async function runPlanList(options: ListOptions): Promise<ListResult> {
     fetchImpl: options.fetchImpl,
   };
   const path = options.stateFilter
-    ? `/workspaces/${mint.workspaceId}/plans?authoringState=${options.stateFilter}`
+    ? `/workspaces/${mint.workspaceId}/plans?state=${options.stateFilter}`
     : `/workspaces/${mint.workspaceId}/plans`;
   const response = await authenticatedRequest(ctx, path, { method: 'GET' });
   if (!response.ok) {
@@ -170,7 +171,7 @@ export async function runPlanList(options: ListOptions): Promise<ListResult> {
 export function formatSummary(
   plans: PlanListEntry[],
   workspaceId: string,
-  stateFilter?: PlanAuthoringState,
+  stateFilter?: PlanState,
 ): string {
   const lines: string[] = [];
   const filterTag = stateFilter ? ` (filter: ${stateFilter})` : '';
@@ -193,7 +194,7 @@ export function formatSummary(
   for (const p of plans) {
     const planId = p.planId.padEnd(planIdCol);
     const name = p.name.padEnd(nameCol);
-    const state = p.authoringState.padEnd(8);
+    const state = p.state.padEnd(8);
     const version = `v${p.version}`.padEnd(7);
     const latestRun = (p.latestRunId ?? '—').padEnd(9);
     lines.push(`  ${planId}  ${name}  ${state}  ${version}  ${latestRun}  ${p.updatedAt}`);

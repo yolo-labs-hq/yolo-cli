@@ -10,7 +10,7 @@
  *
  * Round 5 stance #7 + Round 2 stance answers locked these rules:
  *   - Stable key order at the schema-defined level (planId, name,
- *     authoringState, …, steps[]). Top-level field order is fixed.
+ *     state, …, steps[]). Top-level field order is fixed.
  *   - Step-level + gate-level + input-level + declared-output-level +
  *     template-level orders are also schema-defined.
  *   - Nested arbitrary-keyed objects (gate.config,
@@ -48,7 +48,7 @@ import yaml from 'js-yaml';
 const PLAN_FIELD_ORDER: ReadonlyArray<string> = [
   'planId',
   'name',
-  'authoringState',
+  'state',
   'failurePolicy',
   'autoRetryCap',
   'autoRetryFallback',

@@ -7,7 +7,7 @@
   "required": [
     "planId",
     "name",
-    "authoringState",
+    "state",
     "failurePolicy",
     "steps"
   ],
@@ -24,7 +24,7 @@
       "maxLength": 80,
       "description": "Human-readable Plan name. Tighter character-class rules (Unicode-aware) live in semantic validation, not in this schema (Draft-07 `pattern` runs through validators that don't all support `\\p{L}`/`\\p{N}` consistently)."
     },
-    "authoringState": {
+    "state": {
       "type": "string",
       "enum": ["draft", "active", "archived"]
     },

@@ -49,7 +49,7 @@ describe('canonicalizer — top-level field order', () => {
   it('emits schema-defined fields in fixed order regardless of input order', () => {
     const scrambled = {
       steps: [],
-      authoringState: 'active',
+      state: 'active',
       planId: 'p1',
       inputs: [],
       name: 'Plan One',
@@ -59,7 +59,7 @@ describe('canonicalizer — top-level field order', () => {
     assert.deepEqual(Object.keys(ordered), [
       'planId',
       'name',
-      'authoringState',
+      'state',
       'failurePolicy',
       'inputs',
       'steps',
@@ -71,7 +71,7 @@ describe('canonicalizer — top-level field order', () => {
       planId: 'p1',
       zUnknown: 'z',
       name: 'Plan',
-      authoringState: 'active',
+      state: 'active',
       aUnknown: 'a',
       failurePolicy: 'pause-and-wait',
       mUnknown: 'm',
@@ -80,7 +80,7 @@ describe('canonicalizer — top-level field order', () => {
     assert.deepEqual(Object.keys(ordered), [
       'planId',
       'name',
-      'authoringState',
+      'state',
       'failurePolicy',
       'aUnknown',
       'mUnknown',
@@ -92,7 +92,7 @@ describe('canonicalizer — top-level field order', () => {
     const withUndef = {
       planId: 'p1',
       name: 'Plan',
-      authoringState: 'active',
+      state: 'active',
       failurePolicy: 'pause-and-wait',
       autoRetryCap: undefined,
       integrationPolicy: undefined,
@@ -109,7 +109,7 @@ describe('canonicalizer — step / gate / input / declaredOutput / template orde
     const plan = {
       planId: 'p1',
       name: 'Plan',
-      authoringState: 'active',
+      state: 'active',
       failurePolicy: 'pause-and-wait',
       steps: [
         {
@@ -138,7 +138,7 @@ describe('canonicalizer — step / gate / input / declaredOutput / template orde
     const plan = {
       planId: 'p1',
       name: 'Plan',
-      authoringState: 'active',
+      state: 'active',
       failurePolicy: 'pause-and-wait',
       steps: [
         {
@@ -162,7 +162,7 @@ describe('canonicalizer — step / gate / input / declaredOutput / template orde
     const plan = {
       planId: 'p1',
       name: 'Plan',
-      authoringState: 'active',
+      state: 'active',
       failurePolicy: 'pause-and-wait',
       inputs: [{ description: 'x', default: '1', required: true, name: 'maxRetries' }],
       steps: [],
@@ -176,7 +176,7 @@ describe('canonicalizer — step / gate / input / declaredOutput / template orde
     const plan = {
       planId: 'p1',
       name: 'Plan',
-      authoringState: 'active',
+      state: 'active',
       failurePolicy: 'pause-and-wait',
       steps: [
         {
@@ -199,7 +199,7 @@ describe('canonicalizer — step / gate / input / declaredOutput / template orde
     const plan = {
       planId: 'p1',
       name: 'Plan',
-      authoringState: 'active',
+      state: 'active',
       failurePolicy: 'pause-and-wait',
       steps: [
         {
@@ -227,7 +227,7 @@ describe('canonicalizer — recursive lexicographic sort on free-form nested map
     const plan = {
       planId: 'p1',
       name: 'Plan',
-      authoringState: 'active',
+      state: 'active',
       failurePolicy: 'pause-and-wait',
       steps: [
         {
@@ -260,7 +260,7 @@ describe('canonicalizer — recursive lexicographic sort on free-form nested map
     const plan = {
       planId: 'p1',
       name: 'Plan',
-      authoringState: 'active',
+      state: 'active',
       failurePolicy: 'pause-and-wait',
       integrationPolicy: {
         squashMerge: true,
@@ -280,7 +280,7 @@ describe('canonicalizer — recursive lexicographic sort on free-form nested map
     const plan = {
       planId: 'p1',
       name: 'Plan',
-      authoringState: 'active',
+      state: 'active',
       failurePolicy: 'pause-and-wait',
       steps: [
         {
@@ -307,7 +307,7 @@ describe('canonicalizer — YAML output shape', () => {
     const plan = {
       planId: 'p1',
       name: 'Plan',
-      authoringState: 'active',
+      state: 'active',
       failurePolicy: 'pause-and-wait',
       steps: [],
     };
@@ -320,7 +320,7 @@ describe('canonicalizer — YAML output shape', () => {
     const plan = {
       planId: 'p1',
       name: 'Plan',
-      authoringState: 'active',
+      state: 'active',
       failurePolicy: 'pause-and-wait',
       steps: [
         { stepId: 's1', name: 'S', mode: 'workstream', gates: [{ gateId: 'g1', type: 'dependency', config: { requires: ['x'] } }] },
@@ -340,7 +340,7 @@ describe('canonicalizer — YAML output shape', () => {
     const original = {
       planId: 'p1',
       name: 'Plan One',
-      authoringState: 'active',
+      state: 'active',
       failurePolicy: 'pause-and-wait',
       inputs: [{ name: 'targetEnv', required: true, description: 'staging|prod' }],
       integrationPolicy: { baseBranch: 'main', squashMerge: true },
@@ -378,7 +378,7 @@ describe('canonicalizer — YAML output shape', () => {
     const plan = {
       planId: 'p1',
       name: 'Plan',
-      authoringState: 'active',
+      state: 'active',
       failurePolicy: 'pause-and-wait',
       steps: [],
     };
@@ -395,7 +395,7 @@ describe('canonicalizePlanFile — frontmatter + body assembly', () => {
   const plan = {
     planId: 'p1',
     name: 'Plan',
-    authoringState: 'active',
+    state: 'active',
     failurePolicy: 'pause-and-wait',
     steps: [],
   };
@@ -421,7 +421,7 @@ describe('canonicalizePlanFile — frontmatter + body assembly', () => {
     const planRich = {
       planId: 'p1',
       name: 'Rich plan',
-      authoringState: 'active',
+      state: 'active',
       failurePolicy: 'pause-and-wait',
       steps: [
         {

@@ -73,7 +73,7 @@ interface GetPlanResponse {
   planId: string;
   name: string;
   description?: string | null;
-  authoringState: 'draft' | 'active' | 'archived';
+  state: 'draft' | 'active' | 'archived';
   version: number;
   inputs?: unknown[];
   failurePolicy?: string;
@@ -186,7 +186,7 @@ export async function runPlanGet(options: GetOptions): Promise<GetResult> {
 export function formatSummary(plan: GetPlanResponse, workspaceId: string): string {
   const lines: string[] = [];
   lines.push(
-    `Plan '${plan.planId}' (workspace ${workspaceId}, version ${plan.version}, ${plan.authoringState})`,
+    `Plan '${plan.planId}' (workspace ${workspaceId}, version ${plan.version}, ${plan.state})`,
   );
   if (plan.failurePolicy) lines.push(`  failurePolicy: ${plan.failurePolicy}`);
   if (typeof plan.autoRetryCap === 'number') lines.push(`  autoRetryCap: ${plan.autoRetryCap}`);
@@ -214,7 +214,7 @@ export function formatSummary(plan: GetPlanResponse, workspaceId: string): strin
 export function formatWaves(plan: GetPlanResponse, workspaceId: string): string {
   const lines: string[] = [];
   lines.push(
-    `Plan '${plan.planId}' (workspace ${workspaceId}, version ${plan.version}, ${plan.authoringState})`,
+    `Plan '${plan.planId}' (workspace ${workspaceId}, version ${plan.version}, ${plan.state})`,
   );
   if (plan.failurePolicy) lines.push(`  failurePolicy: ${plan.failurePolicy}`);
   if (typeof plan.autoRetryCap === 'number') lines.push(`  autoRetryCap: ${plan.autoRetryCap}`);

@@ -91,14 +91,14 @@ const mintRoute: RouteHandler = {
   respond: () => ({ ok: true, status: 201, body: STUB_TOKEN_RESPONSE }),
 };
 
-function getRoute(planId: string, authoringState: string, version: number): RouteHandler {
+function getRoute(planId: string, state: string, version: number): RouteHandler {
   return {
     matches: (url, method) =>
       method === 'GET' && url.endsWith(`/internal/work/workspaces/${STUB_WS}/plans/${planId}`),
     respond: () => ({
       ok: true,
       status: 200,
-      body: { plan: { planId, authoringState, version } },
+      body: { plan: { planId, state, version } },
     }),
   };
 }
@@ -115,7 +115,7 @@ function patchRoute(planId: string, version: number): RouteHandler {
   return {
     matches: (url, method) =>
       method === 'PATCH' && url.endsWith(`/internal/work/workspaces/${STUB_WS}/plans/${planId}`),
-    respond: () => ({ ok: true, status: 200, body: { planId, version, authoringState: 'active' } }),
+    respond: () => ({ ok: true, status: 200, body: { planId, version, state: 'active' } }),
   };
 }
 
@@ -129,7 +129,7 @@ function patchError(planId: string, status: number, body: unknown): RouteHandler
 
 // ─── Happy paths ─────────────────────────────────────────────────────────
 describe('plan-state — happy paths', () => {
-  it('draft → active: mints, GETs, PATCHes set-authoring-state, refreshes lockfile', async () => {
+  it('draft → active: mints, GETs, PATCHes set-state, refreshes lockfile', async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'yolo-cli-state-test-'));
     try {
       // Seed lockfile so we can verify version bump.
@@ -168,14 +168,14 @@ describe('plan-state — happy paths', () => {
       const methods = calls.map((c) => c.method);
       assert.deepEqual(methods, ['POST', 'GET', 'PATCH']);
 
-      // PATCH body shape: baseVersion + single set-authoring-state mutation
+      // PATCH body shape: baseVersion + single set-state mutation
       const patchBody = JSON.parse(calls[2]!.body!) as {
         baseVersion: number;
         mutations: Array<{ op: string; state: string }>;
       };
       assert.equal(patchBody.baseVersion, 1);
       assert.equal(patchBody.mutations.length, 1);
-      assert.deepEqual(patchBody.mutations[0], { op: 'set-authoring-state', state: 'active' });
+      assert.deepEqual(patchBody.mutations[0], { op: 'set-state', state: 'active' });
 
       // Lockfile: revision unchanged, version bumped, timestamp refreshed
       const lockfile = JSON.parse(readFileSync(path.join(dir, '.imports.json'), 'utf8'));

@@ -348,15 +348,17 @@ async function tryCreate(
     autoRetryFallback: filePlan.autoRetryFallback,
     integrationPolicy: filePlan.integrationPolicy,
     steps: filePlan.steps,
-    // Send the file's authoringState so a Plan authored as 'active'
-    // lands at 'active' instead of silently downgrading to 'draft'.
-    // Surfaced in Phase 8d.2 verification: the substrate's
-    // create_plan didn't accept authoringState until this slice
-    // (validatePlanCreateFields now normalizes it via
-    // PLAN_AUTHORING_STATES). Omitting the field keeps the
-    // substrate's draft-first default for hand-authored callers
-    // that don't supply one.
-    authoringState: filePlan.authoringState,
+    // Send the file's state so a Plan authored as 'active' lands at
+    // 'active' instead of silently downgrading to 'draft'. Surfaced
+    // in Phase 8d.2 verification: the substrate's create_plan didn't
+    // accept the field until this slice (validatePlanCreateFields now
+    // normalizes it via PLAN_STATES). Omitting the field keeps the
+    // substrate's draft-first default for hand-authored callers that
+    // don't supply one.
+    //
+    // Renamed from `authoringState` 2026-05-09 (item 17 of
+    // `docs/SUBSTRATE_IMPROVEMENTS.md`).
+    state: filePlan.state,
   };
   const response = await authenticatedRequest(ctx, `/workspaces/${workspaceId}/plans`, {
     method: 'POST',
@@ -481,7 +483,7 @@ function makeFilePlan(frontmatter: Record<string, unknown>, body: string): FileP
     planId: String(frontmatter.planId ?? ''),
     name: String(frontmatter.name ?? ''),
     description,
-    authoringState: (frontmatter.authoringState as FilePlanShape['authoringState']) ?? 'draft',
+    state: (frontmatter.state as FilePlanShape['state']) ?? 'draft',
     failurePolicy: frontmatter.failurePolicy as string | undefined,
     autoRetryCap: frontmatter.autoRetryCap as number | undefined,
     autoRetryFallback: frontmatter.autoRetryFallback as string | undefined,

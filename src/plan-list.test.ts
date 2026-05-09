@@ -97,7 +97,7 @@ function listError(status: number, body: unknown): RouteHandler {
 const SAMPLE_PLAN = {
   planId: 'foo',
   name: 'Foo plan',
-  authoringState: 'draft' as const,
+  state: 'draft' as const,
   version: 1,
   latestRunId: null,
   updatedAt: '2026-04-30T12:00:00.000Z',
@@ -110,7 +110,7 @@ describe('plan-list — happy path', () => {
       mintRoute,
       listRoute([
         SAMPLE_PLAN,
-        { ...SAMPLE_PLAN, planId: 'bar', authoringState: 'active', version: 3, latestRunId: 'run-xyz' },
+        { ...SAMPLE_PLAN, planId: 'bar', state: 'active', version: 3, latestRunId: 'run-xyz' },
       ]),
     ]);
     const result = await runPlanList({ fetchImpl: fetch, env: STUB_ENV });
@@ -140,10 +140,10 @@ describe('plan-list — happy path', () => {
     assert.equal(parsed[0].planId, 'foo');
   });
 
-  it('passes --state filter as authoringState query param', async () => {
+  it('passes --state filter as state query param', async () => {
     const { fetch, calls } = makeFetchStub([
       mintRoute,
-      listRoute([{ ...SAMPLE_PLAN, authoringState: 'active' }]),
+      listRoute([{ ...SAMPLE_PLAN, state: 'active' }]),
     ]);
     const result = await runPlanList({
       fetchImpl: fetch,
@@ -151,7 +151,7 @@ describe('plan-list — happy path', () => {
       stateFilter: 'active',
     });
     assert.equal(result.ok, true);
-    assert.match(calls[1]!.url, /\?authoringState=active$/);
+    assert.match(calls[1]!.url, /\?state=active$/);
     if (!result.ok) return;
     assert.match(result.output, /\(filter: active\)/);
   });
@@ -212,9 +212,9 @@ describe('plan-list — formatSummary', () => {
   it('renders all 3 authoring states cleanly', () => {
     const out = formatSummary(
       [
-        { ...SAMPLE_PLAN, planId: 'd', authoringState: 'draft' },
-        { ...SAMPLE_PLAN, planId: 'a', authoringState: 'active' },
-        { ...SAMPLE_PLAN, planId: 'r', authoringState: 'archived' },
+        { ...SAMPLE_PLAN, planId: 'd', state: 'draft' },
+        { ...SAMPLE_PLAN, planId: 'a', state: 'active' },
+        { ...SAMPLE_PLAN, planId: 'r', state: 'archived' },
       ],
       STUB_WS,
     );

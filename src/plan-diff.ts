@@ -12,7 +12,7 @@
  *   { op: 'add-step', step: StepDefinition }
  *   { op: 'update-step', stepId: string, fields: <full new step shape, used as patch> }
  *   { op: 'remove-step', stepId: string }
- *   { op: 'set-authoring-state', state: 'draft' | 'active' | 'archived' }
+ *   { op: 'set-state', state: 'draft' | 'active' | 'archived' }
  *
  * Re-import strategy notes:
  *   - Top-level fields: emit `set-plan-fields` with only the fields
@@ -33,9 +33,10 @@
  *     frontmatter description field). The caller passes the body as
  *     `filePlan.description`; the diff treats it as a regular
  *     top-level string field.
- *   - authoringState: emit `set-authoring-state` only if the file's
- *     state differs from the DB. Substrate-side validates the
- *     transition; this layer just produces the request.
+ *   - state: emit `set-state` only if the file's state differs from
+ *     the DB. Substrate-side validates the transition; this layer
+ *     just produces the request. (Renamed from `authoringState` /
+ *     `set-authoring-state` 2026-05-09 — item 17.)
  *
  * Input shape:
  *   - `dbPlan` = the response from `work.get_plan` (already validated
@@ -49,13 +50,13 @@ export type Mutation =
   | { op: 'add-step'; step: Record<string, unknown> }
   | { op: 'update-step'; stepId: string; fields: Record<string, unknown> }
   | { op: 'remove-step'; stepId: string }
-  | { op: 'set-authoring-state'; state: 'draft' | 'active' | 'archived' };
+  | { op: 'set-state'; state: 'draft' | 'active' | 'archived' };
 
 export interface DbPlanSnapshot {
   planId: string;
   name: string;
   description?: string | null;
-  authoringState: 'draft' | 'active' | 'archived';
+  state: 'draft' | 'active' | 'archived';
   failurePolicy?: string;
   autoRetryCap?: number;
   autoRetryFallback?: string;
@@ -69,7 +70,7 @@ export interface FilePlanShape {
   planId: string;
   name: string;
   description: string;
-  authoringState: 'draft' | 'active' | 'archived';
+  state: 'draft' | 'active' | 'archived';
   failurePolicy?: string;
   autoRetryCap?: number;
   autoRetryFallback?: string;
@@ -143,9 +144,9 @@ export function computeMutations(dbPlan: DbPlanSnapshot, filePlan: FilePlanShape
     }
   }
 
-  // 3) Authoring state (set-authoring-state)
-  if (filePlan.authoringState !== dbPlan.authoringState) {
-    mutations.push({ op: 'set-authoring-state', state: filePlan.authoringState });
+  // 3) Plan state (set-state)
+  if (filePlan.state !== dbPlan.state) {
+    mutations.push({ op: 'set-state', state: filePlan.state });
   }
 
   return mutations;

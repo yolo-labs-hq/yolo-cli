@@ -250,7 +250,7 @@ interface GetPlanResponse {
   planId: string;
   name: string;
   description?: string | null;
-  authoringState: 'draft' | 'active' | 'archived';
+  state: 'draft' | 'active' | 'archived';
   version: number;
   inputs?: unknown[];
   failurePolicy?: string;
@@ -282,7 +282,7 @@ export function dbPlanToFile(dbPlan: GetPlanResponse): { frontmatter: Record<str
   const frontmatter: Record<string, unknown> = {
     planId: dbPlan.planId,
     name: dbPlan.name,
-    authoringState: dbPlan.authoringState,
+    state: dbPlan.state,
     failurePolicy: dbPlan.failurePolicy ?? 'pause-and-wait',
     steps: dbPlan.steps,
   };

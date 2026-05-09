@@ -16,7 +16,7 @@ function makeDb(overrides: Partial<DbPlanSnapshot> = {}): DbPlanSnapshot {
     planId: 'p1',
     name: 'Plan One',
     description: 'old body\n',
-    authoringState: 'active',
+    state: 'active',
     failurePolicy: 'pause-and-wait',
     inputs: [],
     integrationPolicy: undefined,
@@ -38,7 +38,7 @@ function makeFile(overrides: Partial<FilePlanShape> = {}): FilePlanShape {
     planId: 'p1',
     name: 'Plan One',
     description: 'old body\n',
-    authoringState: 'active',
+    state: 'active',
     failurePolicy: 'pause-and-wait',
     inputs: [],
     integrationPolicy: undefined,
@@ -233,18 +233,18 @@ describe('plan-diff — steps add/update/remove', () => {
   });
 });
 
-// ─── set-authoring-state ─────────────────────────────────────────────────
-describe('plan-diff — set-authoring-state', () => {
-  it('emits set-authoring-state when state differs', () => {
-    const result = computeMutations(makeDb({ authoringState: 'draft' }), makeFile({ authoringState: 'active' }));
+// ─── set-state ─────────────────────────────────────────────────
+describe('plan-diff — set-state', () => {
+  it('emits set-state when state differs', () => {
+    const result = computeMutations(makeDb({ state: 'draft' }), makeFile({ state: 'active' }));
     assert.equal(result.length, 1);
-    assert.deepEqual(result[0], { op: 'set-authoring-state', state: 'active' });
+    assert.deepEqual(result[0], { op: 'set-state', state: 'active' });
   });
 
-  it('does not emit set-authoring-state when state matches', () => {
+  it('does not emit set-state when state matches', () => {
     const result = computeMutations(
-      makeDb({ authoringState: 'active' }),
-      makeFile({ authoringState: 'active' }),
+      makeDb({ state: 'active' }),
+      makeFile({ state: 'active' }),
     );
     assert.equal(result.length, 0);
   });
@@ -252,17 +252,17 @@ describe('plan-diff — set-authoring-state', () => {
 
 // ─── Multi-mutation emit order ───────────────────────────────────────────
 describe('plan-diff — emit order', () => {
-  it('orders mutations: set-plan-fields → step ops → set-authoring-state', () => {
-    const db = makeDb({ name: 'Old', authoringState: 'draft' });
+  it('orders mutations: set-plan-fields → step ops → set-state', () => {
+    const db = makeDb({ name: 'Old', state: 'draft' });
     const file = makeFile({
       name: 'New',
-      authoringState: 'active',
+      state: 'active',
       steps: [
         { stepId: 'build', name: 'Build', mode: 'workstream', gates: [] },
         { stepId: 'new-step', name: 'NewStep', mode: 'test', gates: [] },
       ],
     });
     const ops = computeMutations(db, file).map((m) => m.op);
-    assert.deepEqual(ops, ['set-plan-fields', 'add-step', 'set-authoring-state']);
+    assert.deepEqual(ops, ['set-plan-fields', 'add-step', 'set-state']);
   });
 });

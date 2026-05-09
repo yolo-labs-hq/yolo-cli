@@ -1,10 +1,10 @@
 /**
  * `yolo plan activate <planId>` / `yolo plan archive <planId>`.
  *
- * Out-of-band authoring-state transitions for plans already in the
- * DB. The file-driven flow can author a plan as `active` from the
- * start (Phase 8d.2 — substrate now accepts `authoringState` on
- * `work.create_plan`), but operators still need a way to:
+ * Out-of-band Plan-state transitions for plans already in the DB.
+ * The file-driven flow can author a plan as `active` from the start
+ * (Phase 8d.2 — substrate now accepts `state` on `work.create_plan`),
+ * but operators still need a way to:
  *   - flip an existing draft to active without rewriting the file
  *   - archive a plan that's done its job
  * neither of which has a clean file-level expression.
@@ -17,20 +17,23 @@
  *      `SUBSTRATE_CLI_PLAN_SCOPES`).
  *   4. Optional `--workspace` sanity-check against the minted
  *      workspaceId.
- *   5. GET the current plan to fetch (a) its current
- *      authoringState — for the "already in target state" no-op —
- *      and (b) its current `version` for the
- *      `update_plan(baseVersion, …)` CAS.
- *   6. PATCH with `{ baseVersion, mutations: [{ op:
- *      'set-authoring-state', state: <target> }] }`. The
- *      substrate's `applyMutations` enforces the transition
- *      matrix (draft→active|archived, active→archived; archived is
- *      terminal; same-state is allowed and bumps version).
+ *   5. GET the current plan to fetch (a) its current state — for the
+ *      "already in target state" no-op — and (b) its current
+ *      `version` for the `update_plan(baseVersion, …)` CAS.
+ *   6. PATCH with `{ baseVersion, mutations: [{ op: 'set-state',
+ *      state: <target> }] }`. The substrate's `applyMutations`
+ *      enforces the transition matrix (draft→active|archived,
+ *      active→archived; archived is terminal; same-state is allowed
+ *      and bumps version).
  *   7. Refresh the lockfile entry's `lastImportedVersion` to the
  *      new DB version so a subsequent `yolo plan import` is a
  *      NO_CHANGE rather than a false-positive DIVERGED. Revision
  *      is unchanged because the file didn't change — same
  *      revision pointer, new version.
+ *
+ * Field rename note: the Plan-level state field was `authoringState`
+ * before 2026-05-09 and `state` after (item 17 of
+ * `docs/SUBSTRATE_IMPROVEMENTS.md`). The substrate accepts only `state`.
  *
  * Exit codes (used by the CLI wrapper):
  *   - 0  = success (transition applied OR no-op when already in target)
@@ -84,13 +87,13 @@ export interface PlanStateOptions {
   now?: () => string;
 }
 
-export type PlanAuthoringState = 'draft' | 'active' | 'archived';
+export type PlanState = 'draft' | 'active' | 'archived';
 
 export interface PlanStateSuccess {
   ok: true;
   planId: string;
   workspaceId: string;
-  fromState: PlanAuthoringState;
+  fromState: PlanState;
   toState: OperatorTargetState;
   /** Plan version after the operation (unchanged on no-op). */
   version: number;
@@ -109,7 +112,7 @@ export type PlanStateResult = PlanStateSuccess | PlanStateFailure;
 
 interface GetPlanResponse {
   planId: string;
-  authoringState: PlanAuthoringState;
+  state: PlanState;
   version: number;
 }
 
@@ -187,7 +190,7 @@ export async function runPlanStateTransition(options: PlanStateOptions): Promise
   if (!getJson.plan) {
     return fail('http', 'work.get_plan response missing `plan` field');
   }
-  const currentState = getJson.plan.authoringState;
+  const currentState = getJson.plan.state;
   const baseVersion = getJson.plan.version;
 
   // 6) No-op short-circuit OR PATCH. Either way, we end up with
@@ -214,7 +217,7 @@ export async function runPlanStateTransition(options: PlanStateOptions): Promise
         method: 'PATCH',
         jsonBody: {
           baseVersion,
-          mutations: [{ op: 'set-authoring-state', state: options.targetState }],
+          mutations: [{ op: 'set-state', state: options.targetState }],
         },
       },
     );

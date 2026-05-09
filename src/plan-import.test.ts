@@ -96,7 +96,7 @@ function createRoute(planId: string, version = 1): RouteHandler {
   return {
     matches: (url, method) =>
       method === 'POST' && url.endsWith(`/internal/work/workspaces/${STUB_WS}/plans`),
-    respond: () => ({ ok: true, status: 200, body: { planId, version, authoringState: 'active' } }),
+    respond: () => ({ ok: true, status: 200, body: { planId, version, state: 'active' } }),
   };
 }
 
@@ -120,7 +120,7 @@ function updateRoute(planId: string, version: number): RouteHandler {
   return {
     matches: (url, method) =>
       method === 'PATCH' && url.endsWith(`/internal/work/workspaces/${STUB_WS}/plans/${planId}`),
-    respond: () => ({ ok: true, status: 200, body: { planId, version, authoringState: 'active' } }),
+    respond: () => ({ ok: true, status: 200, body: { planId, version, state: 'active' } }),
   };
 }
 
@@ -129,7 +129,7 @@ function buildPlanFile(): { frontmatter: Record<string, unknown>; body: string; 
   const frontmatter: Record<string, unknown> = {
     planId: 'foo',
     name: 'Foo plan',
-    authoringState: 'active',
+    state: 'active',
     failurePolicy: 'pause-and-wait',
     steps: [
       {
@@ -160,7 +160,7 @@ function dbSnapshotMatchingFile(version: number): Record<string, unknown> {
     planId: 'foo',
     name: 'Foo plan',
     description: '# Foo plan\n\nBody description.\n',
-    authoringState: 'active',
+    state: 'active',
     failurePolicy: 'pause-and-wait',
     inputs: [],
     integrationPolicy: undefined,
@@ -221,15 +221,15 @@ describe('plan-import — CREATE happy path', () => {
       // export round-trips would churn.
       const createBody = JSON.parse(calls[1]!.body!) as {
         description: string;
-        authoringState: string;
+        state: string;
       };
       assert.equal(createBody.description, '# Foo plan\n\nBody description.\n');
       assert.equal(createBody.description.startsWith('\n'), false);
-      // Substrate now accepts authoringState on create_plan (the fix
+      // Substrate now accepts state on create_plan (the fix
       // that surfaced from Phase 8d.2 verification — file says
       // active, DB used to silently downgrade to draft). Lock that
       // the import path forwards the file's value.
-      assert.equal(createBody.authoringState, 'active');
+      assert.equal(createBody.state, 'active');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -647,7 +647,7 @@ describe('plan-import — file/validation failures', () => {
       // Non-canonical: extra blank lines, swapped fields
       writeFileSync(
         path.join(dir, 'foo.md'),
-        '---\nname: X\nplanId: foo\nauthoringState: active\nfailurePolicy: pause-and-wait\nsteps: []\n---\n\n# x\n',
+        '---\nname: X\nplanId: foo\nstate: active\nfailurePolicy: pause-and-wait\nsteps: []\n---\n\n# x\n',
       );
       const { fetch } = makeFetchStub([]);
       const result = await runPlanImport({

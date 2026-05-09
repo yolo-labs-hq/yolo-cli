@@ -41,7 +41,7 @@ import {
 import {
   runPlanList,
   exitCodeForFailure as listExitCode,
-  type PlanAuthoringState,
+  type PlanState,
 } from './plan-list.js';
 import {
   runRunStart,
@@ -118,8 +118,8 @@ function printHelp(): void {
       '    [--lockfile <name>]                     Refresh .imports.<name>.json instead of the default.',
       '    [-o <file>]                             Output path. Default: <plansDir>/<planId>.md.',
       '    [--json]                                Emit the result as JSON.',
-      '  plan activate <planId> [opts]             Transition authoringState → active (work.update_plan).',
-      '  plan archive <planId> [opts]              Transition authoringState → archived (work.update_plan).',
+      '  plan activate <planId> [opts]             Transition Plan.state → active (work.update_plan).',
+      '  plan archive <planId> [opts]              Transition Plan.state → archived (work.update_plan).',
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '    [--lockfile <name>]                     Refresh .imports.<name>.json lockfile entry post-update.',
       '    [--json]                                Emit the result as JSON.',
@@ -129,7 +129,7 @@ function printHelp(): void {
       '    [--json]                                Pretty-print raw JSON instead of the summary.',
       '  plan list [opts]                          List Plans in the current workspace (work.list_plans).',
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
-      '    [--state <draft|active|archived>]       Server-side authoringState filter.',
+      '    [--state <draft|active|archived>]       Server-side Plan.state filter.',
       '    [--json]                                Pretty-print raw JSON instead of the table.',
       '  run start <planId> [opts]                 Bootstrap a Plan Run (work.start_run).',
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
@@ -474,13 +474,13 @@ async function runPlanGetCmd(args: string[]): Promise<number> {
 interface ParsedListArgs {
   ok: true;
   workspaceFlag?: string;
-  stateFilter?: PlanAuthoringState;
+  stateFilter?: PlanState;
   jsonOutput: boolean;
 }
 
 function parseListArgs(args: string[]): ParsedListArgs | ParseError {
   let workspaceFlag: string | undefined;
-  let stateFilter: PlanAuthoringState | undefined;
+  let stateFilter: PlanState | undefined;
   let jsonOutput = false;
 
   for (let i = 0; i < args.length; i++) {
@@ -494,9 +494,9 @@ function parseListArgs(args: string[]): ParsedListArgs | ParseError {
     } else if (a === '--state') {
       const v = args[++i];
       if (!v || v.startsWith('--')) return { ok: false, message: '--state requires a value' };
-      stateFilter = v as PlanAuthoringState;
+      stateFilter = v as PlanState;
     } else if (a.startsWith('--state=')) {
-      stateFilter = a.slice('--state='.length) as PlanAuthoringState;
+      stateFilter = a.slice('--state='.length) as PlanState;
     } else if (a === '--json') {
       jsonOutput = true;
     } else if (a.startsWith('--')) {

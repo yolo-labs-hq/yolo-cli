@@ -84,7 +84,7 @@ const STUB_PLAN = {
   planId: 'foo',
   name: 'Foo plan',
   description: '# body\n',
-  authoringState: 'active' as const,
+  state: 'active' as const,
   version: 3,
   inputs: [{ name: 'env', required: true }],
   failurePolicy: 'pause-and-wait',
@@ -111,7 +111,7 @@ describe('plan-get — happy path', () => {
     assert.match(result.output, /Plan 'foo'/);
     assert.match(result.output, new RegExp(STUB_WS));
     assert.match(result.output, /version 3/);
-    assert.match(result.output, /authoringState: active|, active\)/);
+    assert.match(result.output, /state: active|, active\)/);
     assert.match(result.output, /failurePolicy: pause-and-wait/);
     assert.match(result.output, /steps: 2/);
     assert.match(result.output, /- build \(workstream\)/);
