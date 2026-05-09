@@ -139,6 +139,11 @@
           "type": "object",
           "additionalProperties": { "type": "string" },
           "description": "Free-form key-value metadata (string-valued). Canonicalizer sorts keys lexicographically."
+        },
+        "agentType": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Item 16 follow-up — per-Step agent label (workstream-mode only). Forwarded to container-api's /lanes/:name/spawn-agent so the lane runner picks the matching adapter, AND used by the dispatcher to append the agent to the Plan Run's operators[] on Step Run spawn (addedReason 'step-spawn') so the agent fan grows to match actual execution. Must be in the substrate's container-spawnable set (claude / codex / yolo); aliases like 'yolo-code' canonicalize to 'yolo'. Unrecognized labels degrade to the container's env-default agent and skip the operators[] append (logged for observability). test / critic / preview / automation modes don't use this field."
         }
       }
     }
