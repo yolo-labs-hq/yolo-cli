@@ -5,8 +5,10 @@
  *   - happy summary + happy --json
  *   - request body shape: { newOperatorAgentId: string } and
  *     { newOperatorAgentId: null }
- *   - operatorHistoryLength rendered in summary
- *   - user-driven summary string ("user-driven (operatorAgentId=null)")
+ *   - operatorCount rendered in summary (item 16 — replaces
+ *     operatorHistoryLength which is gone now that operators[] is
+ *     itself the audit trail)
+ *   - user-driven summary string ("user-driven (primaryOperator=null)")
  *   - planRunId regex rejection (no network)
  *   - newOperatorAgentId validation: empty string, > 128 chars,
  *     non-string types
@@ -72,7 +74,7 @@ const mintRoute: RouteHandler = {
 
 function transferRoute(
   finalAgent: string | null,
-  historyLength: number,
+  operatorCount: number,
   captured: { body?: unknown } = {},
 ): RouteHandler {
   return {
@@ -88,7 +90,8 @@ function transferRoute(
       body: {
         planRunId: RUN_ID,
         operatorAgentId: finalAgent,
-        operatorHistoryLength: historyLength,
+        primaryOperator: finalAgent,
+        operatorCount,
       },
     }),
   };
@@ -105,7 +108,7 @@ function transferError(status: number, body: unknown): RouteHandler {
 
 // ─── Happy path ──────────────────────────────────────────────────────────
 describe('run-transfer — happy path', () => {
-  it('emits "OK: transferred run …" with target + historyLength', async () => {
+  it('emits "OK: transferred run …" with target + operatorCount', async () => {
     const fetch = makeFetchStub([mintRoute, transferRoute('claude', 2)]);
     const result = await runRunTransfer({
       planRunId: RUN_ID,
@@ -115,7 +118,7 @@ describe('run-transfer — happy path', () => {
     });
     assert.equal(result.ok, true);
     if (!result.ok) return;
-    assert.match(result.output, /^OK: transferred run pr_abc123 to claude \(operatorHistoryLength=2\)$/);
+    assert.match(result.output, /^OK: transferred run pr_abc123 primary to claude \(operatorCount=2\)$/);
   });
 
   it('sends { newOperatorAgentId: <agentId> } body when targeting an agent', async () => {
@@ -152,7 +155,7 @@ describe('run-transfer — happy path', () => {
     });
     assert.equal(result.ok, true);
     if (!result.ok) return;
-    assert.match(result.output, /to user-driven \(operatorAgentId=null\)/);
+    assert.match(result.output, /to user-driven \(primaryOperator=null\)/);
   });
 
   it('emits raw JSON when format is "json"', async () => {
@@ -169,21 +172,21 @@ describe('run-transfer — happy path', () => {
     const parsed = JSON.parse(result.output);
     assert.equal(parsed.planRunId, RUN_ID);
     assert.equal(parsed.operatorAgentId, 'codex');
-    assert.equal(parsed.operatorHistoryLength, 4);
+    assert.equal(parsed.operatorCount, 4);
   });
 });
 
 // ─── formatSummary pure renderer ─────────────────────────────────────────
 describe('run-transfer — formatSummary pure renderer', () => {
   it('renders agent target', () => {
-    const out = formatSummary({ planRunId: 'r1', operatorAgentId: 'claude', operatorHistoryLength: 1 });
+    const out = formatSummary({ planRunId: 'r1', operatorAgentId: 'claude', operatorCount: 1 });
     assert.match(out, /to claude/);
-    assert.match(out, /operatorHistoryLength=1/);
+    assert.match(out, /operatorCount=1/);
   });
 
   it('renders user-driven target with explicit null annotation', () => {
-    const out = formatSummary({ planRunId: 'r1', operatorAgentId: null, operatorHistoryLength: 5 });
-    assert.match(out, /to user-driven \(operatorAgentId=null\)/);
+    const out = formatSummary({ planRunId: 'r1', operatorAgentId: null, operatorCount: 5 });
+    assert.match(out, /to user-driven \(primaryOperator=null\)/);
   });
 });
 

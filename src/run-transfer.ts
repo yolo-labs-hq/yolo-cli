@@ -65,8 +65,14 @@ export type RunTransferResult = RunTransferSuccess | RunTransferFailure;
 
 interface TransferResponse {
   planRunId: string;
+  // Item 16 — `operatorAgentId` mirrors `primaryOperator` for
+  // backwards-compat single-operator readers. `operatorCount`
+  // replaces the legacy `operatorHistoryLength` field (since
+  // operators[] is the audit trail itself, not a per-binding
+  // linked list).
   operatorAgentId: string | null;
-  operatorHistoryLength: number;
+  primaryOperator?: string | null;
+  operatorCount?: number;
 }
 
 // ─── Public entry ─────────────────────────────────────────────────────────
@@ -164,9 +170,12 @@ export async function runRunTransfer(options: RunTransferOptions): Promise<RunTr
 
 export function formatSummary(response: TransferResponse): string {
   const target = response.operatorAgentId === null
-    ? 'user-driven (operatorAgentId=null)'
+    ? 'user-driven (primaryOperator=null)'
     : response.operatorAgentId;
-  return `OK: transferred run ${response.planRunId} to ${target} (operatorHistoryLength=${response.operatorHistoryLength})`;
+  // operatorCount surfaces the size of the additive operators[];
+  // the legacy operatorHistoryLength was removed in item 16.
+  const count = response.operatorCount ?? 0;
+  return `OK: transferred run ${response.planRunId} primary to ${target} (operatorCount=${count})`;
 }
 
 function formatJson(response: TransferResponse): string {
