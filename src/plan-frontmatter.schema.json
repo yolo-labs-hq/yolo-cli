@@ -144,6 +144,17 @@
           "type": "string",
           "enum": ["claude", "codex", "yolo", "yolo-code"],
           "description": "Item 16 follow-up — per-Step agent label (workstream-mode only). Forwarded to container-api's /lanes/:name/spawn-agent so the lane runner picks the matching adapter, AND used by the dispatcher to append the agent to the Plan Run's operators[] on Step Run spawn (addedReason 'step-spawn') so the agent fan grows to match actual execution. Must be in the substrate's container-spawnable set; the alias 'yolo-code' canonicalizes to 'yolo' (the canonical id token-minting expects) before persisted on the binding. test / critic / preview / automation modes don't use this field. Enum mirrors the server-side check in common-api/src/services/work/plan-validators.ts; keep them in sync."
+        },
+        "uiBehavior": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "keepFullSizeOnTerminal": {
+              "type": "boolean",
+              "description": "SUBSTRATE_IMPROVEMENTS #31 addendum (2026-05-11) — keep this Step's tile at full chrome on the Run desktop after the Step Run reaches terminal success / skip / cancelled. Use sparingly: workstream / critic / test / automation Steps whose generated artifact (rendered dashboard, demo page, etc.) the operator wants to keep looking at after the agent finishes. Default false / undefined. Preview-mode and manual-mode Steps are exempt from compact-on-terminal regardless of this field — those modes' tiles always stay full."
+            }
+          },
+          "description": "Plan-author UI hints. Currently the only field is `keepFullSizeOnTerminal`; future hints land here as additional properties (each closed-schema)."
         }
       }
     }
