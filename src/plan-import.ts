@@ -78,6 +78,7 @@ import {
   mintSubstrateToken,
 } from './work-client.js';
 import yaml from 'js-yaml';
+import { planDagUrl } from './webapp-url.js';
 
 // ─── Public types ─────────────────────────────────────────────────────────
 
@@ -530,16 +531,25 @@ export function exitCodeForFailure(kind: ImportFailure['kind']): number {
 }
 
 /**
- * Render an `ImportSuccess` as a single-line CLI summary. Caller
- * appends `\n` if needed.
+ * Render an `ImportSuccess` as a CLI summary. The first line is the
+ * existing one-liner; if a webapp URL can be derived from the env, a
+ * second line prints the Plan-DAG link so operators can click straight
+ * through to the visual topology view. Caller appends `\n` if needed.
  */
-export function formatSuccess(result: ImportSuccess): string {
-  switch (result.action) {
-    case 'created':
-      return `OK: created plan '${result.planId}' in workspace ${result.workspaceId} at version ${result.version} (revision ${result.revision.slice(0, 14)}…)`;
-    case 'updated':
-      return `OK: updated plan '${result.planId}' in workspace ${result.workspaceId} to version ${result.version} (revision ${result.revision.slice(0, 14)}…)`;
-    case 'no-change':
-      return `OK: plan '${result.planId}' already at file revision (workspace ${result.workspaceId}, version ${result.version})`;
-  }
+export function formatSuccess(
+  result: ImportSuccess,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const headline = (() => {
+    switch (result.action) {
+      case 'created':
+        return `OK: created plan '${result.planId}' in workspace ${result.workspaceId} at version ${result.version} (revision ${result.revision.slice(0, 14)}…)`;
+      case 'updated':
+        return `OK: updated plan '${result.planId}' in workspace ${result.workspaceId} to version ${result.version} (revision ${result.revision.slice(0, 14)}…)`;
+      case 'no-change':
+        return `OK: plan '${result.planId}' already at file revision (workspace ${result.workspaceId}, version ${result.version})`;
+    }
+  })();
+  const dagUrl = planDagUrl(env, result.workspaceId, result.planId);
+  return dagUrl ? `${headline}\n  view: ${dagUrl}` : headline;
 }

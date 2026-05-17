@@ -32,6 +32,7 @@ import {
   authenticatedRequest,
   mintSubstrateToken,
 } from './work-client.js';
+import { planDagUrl } from './webapp-url.js';
 
 // ─── Public types ─────────────────────────────────────────────────────────
 
@@ -163,8 +164,8 @@ export async function runPlanGet(options: GetOptions): Promise<GetResult> {
 
   let output: string;
   if (format === 'json') output = formatJson(json.plan);
-  else if (format === 'waves') output = formatWaves(json.plan, mint.workspaceId);
-  else output = formatSummary(json.plan, mint.workspaceId);
+  else if (format === 'waves') output = formatWaves(json.plan, mint.workspaceId, env);
+  else output = formatSummary(json.plan, mint.workspaceId, env);
 
   return {
     ok: true,
@@ -183,11 +184,17 @@ export async function runPlanGet(options: GetOptions): Promise<GetResult> {
  * `config.stepId` per dependency gate, per gate-readiness.ts:180);
  * one row per step lists ALL its dependency-gate stepIds.
  */
-export function formatSummary(plan: GetPlanResponse, workspaceId: string): string {
+export function formatSummary(
+  plan: GetPlanResponse,
+  workspaceId: string,
+  env: Record<string, string | undefined> = process.env,
+): string {
   const lines: string[] = [];
   lines.push(
     `Plan '${plan.planId}' (workspace ${workspaceId}, version ${plan.version}, ${plan.state})`,
   );
+  const dagUrl = planDagUrl(env, workspaceId, plan.planId);
+  if (dagUrl) lines.push(`  view: ${dagUrl}`);
   if (plan.failurePolicy) lines.push(`  failurePolicy: ${plan.failurePolicy}`);
   if (typeof plan.autoRetryCap === 'number') lines.push(`  autoRetryCap: ${plan.autoRetryCap}`);
   const inputCount = Array.isArray(plan.inputs) ? plan.inputs.length : 0;
@@ -211,11 +218,17 @@ export function formatSummary(plan: GetPlanResponse, workspaceId: string): strin
  * unknown predecessor stepIds collapse to wave 1, cycles short-circuit
  * to wave 1 for the visiting node (so we never recurse forever).
  */
-export function formatWaves(plan: GetPlanResponse, workspaceId: string): string {
+export function formatWaves(
+  plan: GetPlanResponse,
+  workspaceId: string,
+  env: Record<string, string | undefined> = process.env,
+): string {
   const lines: string[] = [];
   lines.push(
     `Plan '${plan.planId}' (workspace ${workspaceId}, version ${plan.version}, ${plan.state})`,
   );
+  const dagUrl = planDagUrl(env, workspaceId, plan.planId);
+  if (dagUrl) lines.push(`  view: ${dagUrl}`);
   if (plan.failurePolicy) lines.push(`  failurePolicy: ${plan.failurePolicy}`);
   if (typeof plan.autoRetryCap === 'number') lines.push(`  autoRetryCap: ${plan.autoRetryCap}`);
   const inputCount = Array.isArray(plan.inputs) ? plan.inputs.length : 0;
