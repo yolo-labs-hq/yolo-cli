@@ -39,6 +39,10 @@ import {
   exitCodeForFailure as getExitCode,
 } from './plan-get.js';
 import {
+  runPlanOpen,
+  exitCodeForFailure as openExitCode,
+} from './plan-open.js';
+import {
   runPlanList,
   exitCodeForFailure as listExitCode,
   type PlanState,
@@ -131,6 +135,9 @@ function printHelp(): void {
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '    [--state <draft|active|archived>]       Server-side Plan.state filter.',
       '    [--json]                                Pretty-print raw JSON instead of the table.',
+      '  plan open <planId> [opts]                 Print the Plan-DAG URL for the given Plan (no Run).',
+      '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
+      '    [--json]                                Emit {planId, workspaceId, url} as JSON.',
       '  run start <planId> [opts]                 Bootstrap a Plan Run (work.start_run).',
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '    [--inputs <json>]                       JSON object of Plan inputs. Default: {}.',
@@ -527,6 +534,65 @@ async function runPlanListCmd(args: string[]): Promise<number> {
   }
   process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
   return listExitCode(result.kind);
+}
+
+interface ParsedOpenArgs {
+  ok: true;
+  planId: string;
+  workspaceFlag?: string;
+  jsonOutput: boolean;
+}
+
+function parseOpenArgs(args: string[]): ParsedOpenArgs | ParseError {
+  let planId: string | undefined;
+  let workspaceFlag: string | undefined;
+  let jsonOutput = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--workspace') {
+      const v = args[++i];
+      if (!v || v.startsWith('--')) return { ok: false, message: '--workspace requires a value' };
+      workspaceFlag = v;
+    } else if (a.startsWith('--workspace=')) {
+      workspaceFlag = a.slice('--workspace='.length);
+    } else if (a === '--json') {
+      jsonOutput = true;
+    } else if (a.startsWith('--')) {
+      return { ok: false, message: `unknown option: ${a}` };
+    } else if (!planId) {
+      planId = a;
+    } else {
+      return { ok: false, message: `unexpected positional argument: ${a}` };
+    }
+  }
+
+  if (!planId) return { ok: false, message: 'plan open requires a planId' };
+  return { ok: true, planId, workspaceFlag, jsonOutput };
+}
+
+async function runPlanOpenCmd(args: string[]): Promise<number> {
+  const parsed = parseOpenArgs(args);
+  if (!parsed.ok) {
+    process.stderr.write(`yolo: plan open: ${parsed.message}\n`);
+    process.stderr.write('Usage: yolo plan open <planId> [--workspace <wsId>] [--json]\n');
+    return 64;
+  }
+  const result = await runPlanOpen({
+    planId: parsed.planId,
+    workspaceFlag: parsed.workspaceFlag,
+    outputFormat: parsed.jsonOutput ? 'json' : 'text',
+  });
+  if (result.ok) {
+    if (parsed.jsonOutput) {
+      process.stdout.write(`${formatJsonResult(result)}\n`);
+    } else {
+      process.stdout.write(`${result.output}\n`);
+    }
+    return 0;
+  }
+  process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
+  return openExitCode(result.kind);
 }
 
 interface ParsedRunStartArgs {
@@ -1092,12 +1158,15 @@ async function main(argv: string[]): Promise<number> {
     if (sub === 'list') {
       return runPlanListCmd(args.slice(2));
     }
+    if (sub === 'open') {
+      return runPlanOpenCmd(args.slice(2));
+    }
     if (!sub) {
-      process.stderr.write('yolo: plan requires a subcommand (validate, import, export, activate, archive, get, list)\n');
+      process.stderr.write('yolo: plan requires a subcommand (validate, import, export, activate, archive, get, list, open)\n');
       return 64;
     }
     process.stderr.write(`yolo: unknown plan subcommand '${sub}'\n`);
-    process.stderr.write('Subcommands: validate, import, export, activate, archive, get, list\n');
+    process.stderr.write('Subcommands: validate, import, export, activate, archive, get, list, open\n');
     return 64;
   }
 
