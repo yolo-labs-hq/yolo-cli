@@ -32,6 +32,7 @@ import {
   authenticatedRequest,
   mintSubstrateToken,
 } from './work-client.js';
+import { resolveSubstrateContext } from './auth-context.js';
 import { planDagUrl } from './webapp-url.js';
 
 // ─── Public types ─────────────────────────────────────────────────────────
@@ -109,18 +110,16 @@ export async function runPlanGet(options: GetOptions): Promise<GetResult> {
   }
 
   // 2) Substrate context
-  const sessionId = env.SESSION_ID;
-  const internalApiKey = env.INTERNAL_API_KEY;
-  const commonApiUrl = env.YOLO_COMMON_API_URL || env.YOLO_API_URL;
-  if (!sessionId) return fail('auth', 'SESSION_ID env var is required (substrate CLI is container-only in v1)');
-  if (!internalApiKey) return fail('auth', 'INTERNAL_API_KEY env var is required');
-  if (!commonApiUrl) return fail('auth', 'YOLO_COMMON_API_URL (or YOLO_API_URL) env var is required');
+  const auth = resolveSubstrateContext(env);
+  if (!auth.ok) return fail('auth', auth.message);
+  const { sessionId, commonApiUrl, userToken, internalApiKey } = auth.context;
 
   // 3) Mint token
   let mint;
   try {
     mint = await mintSubstrateToken({
       commonApiUrl,
+      userToken,
       internalApiKey,
       sessionId,
       scopes: SUBSTRATE_CLI_PLAN_SCOPES,

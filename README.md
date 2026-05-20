@@ -24,16 +24,26 @@ external-login flow is planned but out of scope for Phase 8.
 
 ## Auth contract
 
-Reads the Round 5 env trio:
+Requires:
 
 - `SESSION_ID` (load-bearing — workspace derives from the session record)
-- `YOLO_COMMON_API_URL`
-- `INTERNAL_API_KEY`
+- `YOLO_COMMON_API_URL` (or `YOLO_API_URL`)
+- A credential — resolved by precedence (AUTH_AND_ONBOARDING Slice 0):
+  1. `~/.config/yolo/token` — the rotated **user access JWT**, rewritten
+     every ~10 min by container-api's token-refresh service. Preferred;
+     reading the file (not the env var) avoids the stale-shell problem.
+  2. `YOLO_API_TOKEN` env — the pod-injected user JWT (≤24h).
+  3. `INTERNAL_API_KEY` env — service master-key fallback, kept for
+     lane-runner / service callers. **No longer required in user shells**
+     and intentionally excluded from the sandbox env.
 
-The CLI mints a short-lived delegated MCP token via the existing
-session-bound endpoint (`POST /internal/mcp/tokens`) with
-`agentId: 'substrate-cli'` and a capped scope set, then calls
-`/internal/work/*` REST routes. Implementation in Phase 8c.
+The CLI mints a short-lived delegated MCP token via the session-bound
+endpoint (`POST /internal/mcp/tokens`) with `agentId: 'substrate-cli'`
+and a capped scope set, authenticating with the user JWT
+(`Authorization: Bearer`) when available, falling back to
+`X-Internal-Auth` otherwise. It then calls `/internal/work/*` REST
+routes with the delegated bearer (which is the capability — the
+service header is no longer required by `requireMcpAuth`).
 
 ## Local build
 

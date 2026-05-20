@@ -96,6 +96,70 @@ describe('work-client — mintSubstrateToken request shape', () => {
     });
     assert.equal(calls[0]!.url, 'https://api.example.com/internal/mcp/tokens');
   });
+
+  // Slice 0 — credential precedence
+  it('prefers the user JWT (Authorization: Bearer) over the internal key', async () => {
+    const { fetch, calls } = makeFetchStub({ jsonBody: VALID_MINT_RESPONSE });
+    await mintSubstrateToken({
+      commonApiUrl: 'https://api.example.com',
+      userToken: 'user-jwt-abc',
+      internalApiKey: 'svc-key-xyz',
+      sessionId: 's',
+      scopes: SUBSTRATE_CLI_PLAN_SCOPES,
+      fetchImpl: fetch,
+    });
+    assert.equal(calls[0]!.headers['Authorization'], 'Bearer user-jwt-abc');
+    assert.equal(calls[0]!.headers['X-Internal-Auth'], undefined);
+  });
+
+  it('falls back to X-Internal-Auth when no user token is present', async () => {
+    const { fetch, calls } = makeFetchStub({ jsonBody: VALID_MINT_RESPONSE });
+    await mintSubstrateToken({
+      commonApiUrl: 'https://api.example.com',
+      internalApiKey: 'svc-key-xyz',
+      sessionId: 's',
+      scopes: SUBSTRATE_CLI_PLAN_SCOPES,
+      fetchImpl: fetch,
+    });
+    assert.equal(calls[0]!.headers['X-Internal-Auth'], 'svc-key-xyz');
+    assert.equal(calls[0]!.headers['Authorization'], undefined);
+  });
+
+  it('throws when neither credential is available', async () => {
+    const { fetch } = makeFetchStub({ jsonBody: VALID_MINT_RESPONSE });
+    await assert.rejects(
+      () => mintSubstrateToken({
+        commonApiUrl: 'https://api.example.com',
+        sessionId: 's',
+        scopes: SUBSTRATE_CLI_PLAN_SCOPES,
+        fetchImpl: fetch,
+      }),
+      (err: unknown) => err instanceof WorkClientError && /no credential/.test(err.message),
+    );
+  });
+});
+
+// ─── authenticatedRequest — Slice 0 header behavior ──────────────────────
+describe('work-client — authenticatedRequest Slice 0', () => {
+  it('omits X-Internal-Auth when no internalApiKey is provided (bearer-only)', async () => {
+    const { fetch, calls } = makeFetchStub({ jsonBody: {} });
+    await authenticatedRequest(
+      { commonApiUrl: 'https://api.example.com', delegatedToken: 'deleg-jwt', fetchImpl: fetch },
+      '/workspaces/ws-1/plans/plan-1',
+    );
+    assert.equal(calls[0]!.headers['Authorization'], 'Bearer deleg-jwt');
+    assert.equal(calls[0]!.headers['X-Internal-Auth'], undefined);
+  });
+
+  it('still sends X-Internal-Auth when provided (backwards-compat)', async () => {
+    const { fetch, calls } = makeFetchStub({ jsonBody: {} });
+    await authenticatedRequest(
+      { commonApiUrl: 'https://api.example.com', internalApiKey: 'svc-key', delegatedToken: 'deleg-jwt', fetchImpl: fetch },
+      '/workspaces/ws-1/plans/plan-1',
+    );
+    assert.equal(calls[0]!.headers['X-Internal-Auth'], 'svc-key');
+    assert.equal(calls[0]!.headers['Authorization'], 'Bearer deleg-jwt');
+  });
 });
 
 // ─── mintSubstrateToken — happy path ─────────────────────────────────────

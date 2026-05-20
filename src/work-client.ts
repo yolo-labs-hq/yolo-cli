@@ -95,11 +95,34 @@ export type FetchLike = (input: string, init?: {
 
 export interface MintTokenOptions {
   commonApiUrl: string;
-  internalApiKey: string;
+  /**
+   * Preferred credential: the user's access JWT. When present, the mint
+   * request authenticates with `Authorization: Bearer <userToken>` and
+   * common-api enforces that the JWT's userId owns the session
+   * (AUTH_AND_ONBOARDING Slice 0). Falls back to `internalApiKey` when
+   * absent (service callers / transition).
+   */
+  userToken?: string;
+  /** Service master-key fallback. Optional once a userToken is available. */
+  internalApiKey?: string;
   sessionId: string;
   scopes: ReadonlyArray<string>;
   /** Test-injectable fetch. Defaults to `globalThis.fetch`. */
   fetchImpl?: FetchLike;
+}
+
+/**
+ * Build the auth header for a mint request: prefer the user JWT, fall
+ * back to the service key. Returns null when neither is present.
+ */
+function mintAuthHeaders(opts: { userToken?: string; internalApiKey?: string }): Record<string, string> | null {
+  if (opts.userToken) {
+    return { Authorization: `Bearer ${opts.userToken}` };
+  }
+  if (opts.internalApiKey) {
+    return { 'X-Internal-Auth': opts.internalApiKey };
+  }
+  return null;
 }
 
 export interface MintTokenResult {
@@ -142,12 +165,16 @@ export async function mintSubstrateToken(options: MintTokenOptions): Promise<Min
   if (!fetchImpl) {
     throw new WorkClientError('fetch is not available; substrate CLI requires Node 20+', 0, 'INTERNAL');
   }
+  const authHeaders = mintAuthHeaders(options);
+  if (!authHeaders) {
+    throw new WorkClientError('no credential available to mint a substrate token (need userToken or internalApiKey)', 0, 'INTERNAL');
+  }
   const url = `${stripTrailingSlash(options.commonApiUrl)}/internal/mcp/tokens`;
   const response = await fetchImpl(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'X-Internal-Auth': options.internalApiKey,
+      ...authHeaders,
     },
     body: JSON.stringify({
       sessionId: options.sessionId,
@@ -206,7 +233,13 @@ export async function mintSubstrateToken(options: MintTokenOptions): Promise<Min
 
 export interface AuthenticatedRequestOptions {
   commonApiUrl: string;
-  internalApiKey: string;
+  /**
+   * Optional service master key. When present it's sent as
+   * `X-Internal-Auth` for backwards-compat; the delegated bearer below
+   * is the actual capability (requireMcpAuth no longer requires the
+   * header post-Slice-0), so calls work header-less too.
+   */
+  internalApiKey?: string;
   /** Delegated bearer from `mintSubstrateToken`. */
   delegatedToken: string;
   /** Test-injectable fetch. Defaults to `globalThis.fetch`. */
@@ -240,7 +273,7 @@ export async function authenticatedRequest(
   const url = `${stripTrailingSlash(options.commonApiUrl)}/internal/work${workPath}`;
   const headers: Record<string, string> = {
     ...(init.headers ?? {}),
-    'X-Internal-Auth': options.internalApiKey,
+    ...(options.internalApiKey ? { 'X-Internal-Auth': options.internalApiKey } : {}),
     Authorization: `Bearer ${options.delegatedToken}`,
   };
   const fetchInit: { method?: string; headers: Record<string, string>; body?: string } = {
@@ -270,7 +303,15 @@ export async function authenticatedRequest(
  */
 export interface UserRouteRequestOptions {
   commonApiUrl: string;
-  internalApiKey: string;
+  /**
+   * Preferred: the user's own access JWT. `flexibleAuth` falls through
+   * to `userAuth` for a plain bearer, so the JWT IS the user identity —
+   * no `X-Internal-Auth` + `X-User-Id` impersonation needed. Falls back
+   * to the internal-key path when no userToken is available.
+   */
+  userToken?: string;
+  /** Service master-key fallback (paired with `userId`). */
+  internalApiKey?: string;
   userId: string;
   fetchImpl?: FetchLike;
 }
@@ -284,11 +325,15 @@ export async function userRouteRequest(
   if (!fetchImpl) {
     throw new WorkClientError('fetch is not available; substrate CLI requires Node 20+', 0, 'INTERNAL');
   }
+  const authHeaders: Record<string, string> = options.userToken
+    ? { Authorization: `Bearer ${options.userToken}` }
+    : options.internalApiKey
+      ? { 'X-Internal-Auth': options.internalApiKey, 'X-User-Id': options.userId }
+      : (() => { throw new WorkClientError('no credential available for user-route request', 0, 'INTERNAL'); })();
   const url = `${stripTrailingSlash(options.commonApiUrl)}/v1${routePath}`;
   const headers: Record<string, string> = {
     ...(init.headers ?? {}),
-    'X-Internal-Auth': options.internalApiKey,
-    'X-User-Id': options.userId,
+    ...authHeaders,
   };
   const fetchInit: { method?: string; headers: Record<string, string>; body?: string } = {
     method: init.method ?? 'GET',
