@@ -63,7 +63,16 @@ export function resolveSubstrateContext(
     };
   }
 
-  return { ok: true, context: { sessionId, commonApiUrl, userToken, internalApiKey } };
+  // When a user token wins, it is the SOLE credential — do not also carry
+  // INTERNAL_API_KEY. Otherwise authenticatedRequest would send
+  // X-Internal-Auth alongside the bearer, and requireMcpAuth rejects a
+  // present-but-wrong service key BEFORE checking the JWT — so a stale or
+  // wrong INTERNAL_API_KEY in the shell would mint fine (via the JWT) then
+  // 401 every subsequent work call. (codex P2)
+  if (userToken) {
+    return { ok: true, context: { sessionId, commonApiUrl, userToken } };
+  }
+  return { ok: true, context: { sessionId, commonApiUrl, internalApiKey } };
 }
 
 export function resolveUserToken(

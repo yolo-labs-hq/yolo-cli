@@ -55,6 +55,18 @@ describe('resolveSubstrateContext', () => {
     }
   });
 
+  it('drops INTERNAL_API_KEY when a user token also exists (codex P2)', () => {
+    // Both present → user token wins as the SOLE credential so the CLI
+    // never forwards a (possibly stale) service key on work calls.
+    const env = { ...BASE_ENV, HOME: '/home/yolo', INTERNAL_API_KEY: 'stale-svc-key' };
+    const res = resolveSubstrateContext(env, fileStub({ '/home/yolo/.config/yolo/token': 'file-token' }));
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      assert.equal(res.context.userToken, 'file-token');
+      assert.equal(res.context.internalApiKey, undefined);
+    }
+  });
+
   it('resolves with only the internal key (service-caller fallback)', () => {
     const env = { ...BASE_ENV, INTERNAL_API_KEY: 'svc-key' };
     const res = resolveSubstrateContext(env, fileStub({}));
