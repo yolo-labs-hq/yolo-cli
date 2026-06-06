@@ -78,7 +78,7 @@
         "description": { "type": "string" },
         "mode": {
           "type": "string",
-          "enum": ["workstream", "test", "critic", "manual", "preview", "automation"]
+          "enum": ["workstream", "test", "critic", "manual", "preview", "automation", "decision"]
         },
         "runner": { "type": "string" },
         "gates": {
@@ -109,7 +109,7 @@
         "gateId": { "type": "string", "minLength": 1 },
         "type": {
           "type": "string",
-          "enum": ["dependency", "dependency-failed", "acceptance", "artifact-presence", "test-result", "approval", "critique", "merge"]
+          "enum": ["dependency", "dependency-failed", "dependency-any-of", "acceptance", "artifact-presence", "test-result", "approval", "critique", "merge"]
         },
         "config": {
           "type": "object",
@@ -142,8 +142,30 @@
         },
         "agentType": {
           "type": "string",
-          "enum": ["claude", "codex", "yolo", "yolo-code"],
+          "enum": ["claude", "codex", "opencode-yolo", "yolo", "yolo-code"],
           "description": "Item 16 follow-up — per-Step agent label (workstream-mode only). Forwarded to container-api's /lanes/:name/spawn-agent so the lane runner picks the matching adapter, AND used by the dispatcher to append the agent to the Plan Run's operators[] on Step Run spawn (addedReason 'step-spawn') so the agent fan grows to match actual execution. Must be in the substrate's container-spawnable set; the alias 'yolo-code' canonicalizes to 'yolo' (the canonical id token-minting expects) before persisted on the binding. test / critic / preview / automation modes don't use this field. Enum mirrors the server-side check in common-api/src/services/work/plan-validators.ts; keep them in sync."
+        },
+        "decision": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["prompt"],
+          "properties": {
+            "prompt": { "type": "string", "minLength": 1, "maxLength": 2000 },
+            "options": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["id", "label"],
+                "properties": {
+                  "id": { "type": "string", "minLength": 1 },
+                  "label": { "type": "string", "minLength": 1 },
+                  "description": { "type": "string" }
+                }
+              }
+            }
+          },
+          "description": "Decision-mode config (mode: 'decision'). A human-in-the-loop choice gate: the Run PAUSES (pauseReasonStructured.kind 'awaiting-decision') and the operator resolves via work.resolve_decision, which records the choice, completes the Step, and resumes the Run. Requires `prompt`; `options` are author-supplied or, when omitted, derived from the Step's dependency / dependency-any-of candidate gates (the bake-off 'operator picks the winner' shape). Only valid on mode='decision' Steps. Mirrors the server-side check in common-api/src/services/work/plan-validators.ts."
         },
         "uiBehavior": {
           "type": "object",
