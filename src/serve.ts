@@ -122,6 +122,16 @@ export function resolveRequestPath(root: string, urlPath: string): string | null
 }
 
 export function createServeHandler(opts: ServeOptions): http.RequestListener {
+  // The real (symlink-resolved) served root, computed once. Per-request
+  // realpath checks confirm targets stay within THIS. Falls back to the
+  // lexical dir if the root itself can't be realpath'd (shouldn't happen —
+  // runServeCmd verified it's a directory first).
+  let realRoot = opts.dir;
+  try {
+    realRoot = fs.realpathSync(opts.dir);
+  } catch {
+    /* keep lexical opts.dir */
+  }
   return (req, res) => {
     const send = (status: number, body: string | Buffer, contentType: string) => {
       res.writeHead(status, {
@@ -138,9 +148,14 @@ export function createServeHandler(opts: ServeOptions): http.RequestListener {
     }
 
     const serveFile = (filePath: string) => {
-      fs.readFile(filePath, (err, data) => {
-        if (err) {
-          // SPA fallback: serve the root index.html for unmatched routes.
+      // Resolve symlinks and RE-CHECK containment: the lexical guard in
+      // resolveRequestPath can't catch a symlink INSIDE root that points
+      // outside it. realpath the target and confirm its real path is still
+      // within realRoot before reading — blocks symlink escapes while still
+      // allowing symlinks that stay inside the served tree.
+      fs.realpath(filePath, (rpErr, realPath) => {
+        if (rpErr) {
+          // Missing / broken-symlink → SPA fallback to root index.html, else 404.
           if (opts.spa) {
             const indexPath = path.join(opts.dir, 'index.html');
             if (filePath !== indexPath) {
@@ -151,7 +166,17 @@ export function createServeHandler(opts: ServeOptions): http.RequestListener {
           send(404, 'Not Found', 'text/plain; charset=utf-8');
           return;
         }
-        send(200, data, MIME[path.extname(filePath).toLowerCase()] ?? 'application/octet-stream');
+        if (realPath !== realRoot && !realPath.startsWith(realRoot + path.sep)) {
+          send(403, 'Forbidden', 'text/plain; charset=utf-8'); // symlink escaped root
+          return;
+        }
+        fs.readFile(realPath, (err, data) => {
+          if (err) {
+            send(404, 'Not Found', 'text/plain; charset=utf-8');
+            return;
+          }
+          send(200, data, MIME[path.extname(realPath).toLowerCase()] ?? 'application/octet-stream');
+        });
       });
     };
 

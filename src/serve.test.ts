@@ -100,3 +100,55 @@ describe('resolveRequestPath (traversal guard)', () => {
     assert.equal(resolveRequestPath(root, '/../site-secret/x'), null);
   });
 });
+
+import * as http from 'node:http';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import { createServeHandler } from './serve.js';
+
+describe('createServeHandler — symlink escape guard (integration)', () => {
+  function req(server: http.Server, urlPath: string): Promise<{ status: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      const addr = server.address();
+      const port = typeof addr === 'object' && addr ? addr.port : 0;
+      http.get({ host: '127.0.0.1', port, path: urlPath }, (res) => {
+        let body = '';
+        res.on('data', (c) => (body += c));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+      }).on('error', reject);
+    });
+  }
+
+  it('serves in-root files but 403s a symlink escaping root', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'yolo-serve-'));
+    const root = path.join(base, 'root');
+    const secretDir = path.join(base, 'secret');
+    fs.mkdirSync(root);
+    fs.mkdirSync(secretDir);
+    fs.writeFileSync(path.join(root, 'index.html'), '<h1>ok</h1>');
+    fs.writeFileSync(path.join(secretDir, 'passwd'), 'TOPSECRET');
+    // Symlink INSIDE root pointing OUTSIDE it — the lexical guard can't catch this.
+    try {
+      fs.symlinkSync(path.join(secretDir, 'passwd'), path.join(root, 'leak'));
+    } catch {
+      return; // platform without symlink perms — skip
+    }
+
+    const server = http.createServer(
+      createServeHandler({ dir: path.resolve(root), port: 0, host: '127.0.0.1', spa: false, noCache: true }),
+    );
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    try {
+      const ok = await req(server, '/index.html');
+      assert.equal(ok.status, 200);
+      assert.match(ok.body, /ok/);
+
+      const leak = await req(server, '/leak');
+      assert.equal(leak.status, 403); // symlink escape blocked
+      assert.doesNotMatch(leak.body, /TOPSECRET/);
+    } finally {
+      server.close();
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
