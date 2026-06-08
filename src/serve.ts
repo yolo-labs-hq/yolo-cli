@@ -115,6 +115,10 @@ export function resolveRequestPath(root: string, urlPath: string): string | null
   } catch {
     return null; // malformed percent-encoding
   }
+  // A decoded NUL byte (e.g. `/%00`) passes decodeURIComponent but makes the
+  // downstream fs.* calls THROW SYNCHRONOUSLY (ERR_INVALID_ARG_VALUE),
+  // crashing the server instead of returning a 4xx. Reject it here.
+  if (p.includes('\0')) return null;
   // Join + normalize, then confirm the result is still within root.
   const resolved = path.resolve(root, '.' + (p.startsWith('/') ? p : '/' + p));
   if (resolved !== root && !resolved.startsWith(root + path.sep)) return null;

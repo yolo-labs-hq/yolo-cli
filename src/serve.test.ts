@@ -95,6 +95,11 @@ describe('resolveRequestPath (traversal guard)', () => {
     assert.equal(resolveRequestPath(root, '/%zz'), null);
   });
 
+  it('rejects a decoded NUL byte (would crash fs.* synchronously)', () => {
+    assert.equal(resolveRequestPath(root, '/%00'), null);
+    assert.equal(resolveRequestPath(root, '/a%00b'), null);
+  });
+
   it('does not treat a sibling dir with the root prefix as inside root', () => {
     // /srv/site-secret must NOT be considered within /srv/site
     assert.equal(resolveRequestPath(root, '/../site-secret/x'), null);
