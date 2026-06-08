@@ -170,6 +170,10 @@ function printHelp(): void {
       '    [--limit <n>]                           Cap result count (1-500, default 100).',
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '    [--json]                                Pretty-print raw JSON instead of the table.',
+      '  serve <dir> [opts]                        Static file server (decision-preview / Gap 2a).',
+      '    [--port <n>]                            Port (default: $PORT, else 3000).',
+      '    [--host <h>]                            Bind host (default: 0.0.0.0).',
+      '    [--spa]                                 Serve index.html for unmatched routes (SPA mode).',
       '  --version                                 Print substrate CLI version.',
       '  --help                                    Print this help.',
       '',
@@ -1211,6 +1215,11 @@ async function main(argv: string[]): Promise<number> {
     process.stderr.write(`yolo: unknown artifact subcommand '${sub}'\n`);
     process.stderr.write('Subcommands: get, list\n');
     return 64;
+  }
+
+  if (cmd === 'serve') {
+    const { runServeCmd } = await import('./serve.js');
+    return runServeCmd(args.slice(1));
   }
 
   process.stderr.write(`yolo: unknown command '${cmd}'\n`);
