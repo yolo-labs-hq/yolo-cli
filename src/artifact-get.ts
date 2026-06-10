@@ -95,14 +95,13 @@ export async function runArtifactGet(options: ArtifactGetOptions): Promise<Artif
 
   const auth = resolveSubstrateContext(env);
   if (!auth.ok) return fail('auth', auth.message);
-  const { sessionId, commonApiUrl, userToken, internalApiKey } = auth.context;
+  const { sessionId, commonApiUrl, userToken } = auth.context;
 
   let mint;
   try {
     mint = await mintSubstrateToken({
       commonApiUrl,
       userToken,
-      internalApiKey,
       sessionId,
       scopes: SUBSTRATE_CLI_ARTIFACT_SCOPES,
       fetchImpl: options.fetchImpl,
@@ -123,7 +122,6 @@ export async function runArtifactGet(options: ArtifactGetOptions): Promise<Artif
 
   const ctx = {
     commonApiUrl,
-    internalApiKey,
     delegatedToken: mint.token,
     fetchImpl: options.fetchImpl,
   };

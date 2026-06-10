@@ -35,7 +35,8 @@ import type { FetchLike } from './work-client.js';
 
 const STUB_ENV = {
   SESSION_ID: 'sess-abc',
-  INTERNAL_API_KEY: 'svc-key-xyz',
+  HOME: '/nonexistent-yolo-cli-test-home',
+  YOLO_API_TOKEN: 'user-jwt',
   YOLO_COMMON_API_URL: 'https://api.example.com',
 };
 const STUB_WS = '507f1f77bcf86cd799439011';

@@ -1,9 +1,9 @@
 /**
  * Container ambient context resolver for the substrate CLI.
  *
- * Reads the Round 5 env trio (`SESSION_ID`, `YOLO_COMMON_API_URL`,
- * `INTERNAL_API_KEY`) and exposes a typed result. Exits with
- * `session-required` (exit code 78 = EX_CONFIG) if `SESSION_ID` is
+ * Reads `SESSION_ID`, `YOLO_COMMON_API_URL`, and the user access JWT
+ * (`~/.config/yolo/token` → `YOLO_API_TOKEN`) and exposes a typed result.
+ * Exits with `session-required` (exit code 78 = EX_CONFIG) if `SESSION_ID` is
  * missing — outside-container invocation is out of scope for v1.
  *
  * `WORKSPACE_ID` is read for display purposes (operators want a
@@ -16,10 +16,12 @@
  * consistently from the same source.
  */
 
+import { resolveUserToken } from './auth-context.js';
+
 export interface SessionContext {
   sessionId: string;
   commonApiUrl: string;
-  internalApiKeyPresent: boolean;
+  userTokenPresent: boolean;
   workspaceIdHint: string | null;
 }
 
@@ -49,11 +51,11 @@ export function readSessionContext(): SessionContext {
     );
   }
 
-  const internalApiKey = process.env.INTERNAL_API_KEY;
+  const userToken = resolveUserToken(process.env);
   return {
     sessionId,
     commonApiUrl,
-    internalApiKeyPresent: !!internalApiKey && internalApiKey.length > 0,
+    userTokenPresent: !!userToken && userToken.length > 0,
     workspaceIdHint: process.env.WORKSPACE_ID ?? null,
   };
 }
@@ -68,7 +70,7 @@ export function formatContext(ctx: SessionContext): string {
     'yolo substrate CLI — context',
     `  sessionId          ${ctx.sessionId}`,
     `  commonApiUrl       ${ctx.commonApiUrl}`,
-    `  internalApiKey     ${ctx.internalApiKeyPresent ? '(set)' : '(missing)'}`,
+    `  userToken          ${ctx.userTokenPresent ? '(set)' : '(missing)'}`,
     `  workspaceId        ${workspace}`,
     '',
   ].join('\n');

@@ -28,7 +28,11 @@ import type { FetchLike } from './work-client.js';
 
 const STUB_ENV = {
   SESSION_ID: 'sess-abc',
-  INTERNAL_API_KEY: 'svc-key',
+  // Non-existent HOME so resolveUserToken's `~/.config/yolo/token` read fails
+  // and YOLO_API_TOKEN is used deterministically (otherwise a real token file
+  // in the dev container would win and the asserted token would vary).
+  HOME: '/nonexistent-yolo-cli-test-home',
+  YOLO_API_TOKEN: 'user-jwt',
   YOLO_COMMON_API_URL: 'https://api.example.com',
 };
 const STUB_WS = '507f1f77bcf86cd799439011';
@@ -286,7 +290,7 @@ describe('run-lifecycle — failures', () => {
       verb: 'pause',
       planRunId: RUN_ID,
       fetchImpl: fetch,
-      env: { SESSION_ID: 's', INTERNAL_API_KEY: 'k', YOLO_API_URL: 'https://api.example.com' },
+      env: { SESSION_ID: 's', YOLO_API_TOKEN: 'user-jwt', YOLO_API_URL: 'https://api.example.com' },
     });
     assert.equal(result.ok, true);
   });
@@ -343,7 +347,7 @@ describe('run-lifecycle — failures', () => {
 
 // ─── auth-path shape (always user-route) ─────────────────────────────────
 describe('run-lifecycle — auth path', () => {
-  it('hits /v1/workspaces/.../runs/.../cancel with X-Internal-Auth + X-User-Id', async () => {
+  it('hits /v1/workspaces/.../runs/.../cancel as the user (Authorization: Bearer, no X-Internal-Auth)', async () => {
     const captured: { body?: unknown; url?: string; headers?: Record<string, string> } = {};
     const fetch = makeFetchStub([mintRoute, transitionRoute('cancel', 'cancelled', captured)]);
     const result = await runRunLifecycle({
@@ -356,13 +360,12 @@ describe('run-lifecycle — auth path', () => {
     assert.equal(result.ok, true);
     assert.equal(captured.url, 'cancel');
     assert.deepEqual(captured.body, { reason: 'cleaning up' });
-    assert.equal(captured.headers?.['X-Internal-Auth'], 'svc-key');
-    assert.equal(captured.headers?.['X-User-Id'], STUB_USER);
-    // Critically: NO Authorization Bearer header — the user route
-    // shouldn't see a delegated token; it would only confuse
-    // flexibleAuth's routing logic.
-    assert.equal(captured.headers?.['Authorization'], undefined);
-    assert.equal(captured.headers?.['authorization'], undefined);
+    // user-JWT-only: the user route is hit with the user's own Bearer token
+    // (flexibleAuth → userAuth). The X-Internal-Auth + X-User-Id impersonation
+    // path was removed along with the INTERNAL_API_KEY fallback.
+    assert.equal(captured.headers?.['Authorization'], 'Bearer user-jwt');
+    assert.equal(captured.headers?.['X-Internal-Auth'], undefined);
+    assert.equal(captured.headers?.['X-User-Id'], undefined);
   });
 });
 

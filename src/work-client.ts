@@ -4,20 +4,20 @@
  * Replaces the 8a Group 9 scaffold stub with the real auth flow:
  *
  *   1. `mintSubstrateToken` POSTs to `/internal/mcp/tokens` with
- *      `X-Internal-Auth: ${INTERNAL_API_KEY}` and the session-bound
- *      payload `{ sessionId, agentId: 'substrate-cli', scopes: [...] }`.
- *      The endpoint looks up the session, derives `workspaceId`, and
- *      returns a delegated JWT in `result.token` plus
- *      `result.claims.workspaceId`. The substrate CLI's lockfile is
- *      keyed by that workspaceId — `--workspace` is optional in
- *      containers because the session record IS the source of truth.
+ *      `Authorization: Bearer <user JWT>` and the session-bound payload
+ *      `{ sessionId, agentId: 'substrate-cli', scopes: [...] }`. The endpoint
+ *      (`internalOrUserAuth`) verifies the JWT's userId owns the session,
+ *      derives `workspaceId`, and returns a delegated JWT in `result.token`
+ *      plus `result.claims.workspaceId`. The substrate CLI's lockfile is
+ *      keyed by that workspaceId — `--workspace` is optional in containers
+ *      because the session record IS the source of truth.
  *
  *   2. `authenticatedRequest` is the helper used by `yolo plan
  *      import/export` (8c.3+) to call `/internal/work/*`. It sends
- *      both `X-Internal-Auth` (so common-api accepts the request as
- *      service-to-service) AND `Authorization: Bearer <delegated>`
- *      (so the per-agent allowedScopes check at the work routes
- *      passes — Phase 8a F8.14).
+ *      `Authorization: Bearer <delegated>` — the delegated MCP token is the
+ *      capability (the per-agent allowedScopes check at the work routes is
+ *      satisfied by the token's claims). The CLI is user-JWT-only; the
+ *      INTERNAL_API_KEY / X-Internal-Auth path was removed.
  *
  * Both calls take an injectable `fetchImpl` so unit tests can stub
  * the transport without touching real `globalThis.fetch`. In v1 the
@@ -96,33 +96,16 @@ export type FetchLike = (input: string, init?: {
 export interface MintTokenOptions {
   commonApiUrl: string;
   /**
-   * Preferred credential: the user's access JWT. When present, the mint
-   * request authenticates with `Authorization: Bearer <userToken>` and
-   * common-api enforces that the JWT's userId owns the session
-   * (AUTH_AND_ONBOARDING Slice 0). Falls back to `internalApiKey` when
-   * absent (service callers / transition).
+   * The user's access JWT. The mint request authenticates with
+   * `Authorization: Bearer <userToken>` and common-api enforces that the
+   * JWT's userId owns the session (AUTH_AND_ONBOARDING Slice 0). This is the
+   * sole credential — the INTERNAL_API_KEY fallback was removed.
    */
-  userToken?: string;
-  /** Service master-key fallback. Optional once a userToken is available. */
-  internalApiKey?: string;
+  userToken: string;
   sessionId: string;
   scopes: ReadonlyArray<string>;
   /** Test-injectable fetch. Defaults to `globalThis.fetch`. */
   fetchImpl?: FetchLike;
-}
-
-/**
- * Build the auth header for a mint request: prefer the user JWT, fall
- * back to the service key. Returns null when neither is present.
- */
-function mintAuthHeaders(opts: { userToken?: string; internalApiKey?: string }): Record<string, string> | null {
-  if (opts.userToken) {
-    return { Authorization: `Bearer ${opts.userToken}` };
-  }
-  if (opts.internalApiKey) {
-    return { 'X-Internal-Auth': opts.internalApiKey };
-  }
-  return null;
 }
 
 export interface MintTokenResult {
@@ -165,16 +148,15 @@ export async function mintSubstrateToken(options: MintTokenOptions): Promise<Min
   if (!fetchImpl) {
     throw new WorkClientError('fetch is not available; substrate CLI requires Node 20+', 0, 'INTERNAL');
   }
-  const authHeaders = mintAuthHeaders(options);
-  if (!authHeaders) {
-    throw new WorkClientError('no credential available to mint a substrate token (need userToken or internalApiKey)', 0, 'INTERNAL');
+  if (!options.userToken) {
+    throw new WorkClientError('no user token available to mint a substrate token', 0, 'INTERNAL');
   }
   const url = `${stripTrailingSlash(options.commonApiUrl)}/internal/mcp/tokens`;
   const response = await fetchImpl(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...authHeaders,
+      Authorization: `Bearer ${options.userToken}`,
     },
     body: JSON.stringify({
       sessionId: options.sessionId,
@@ -233,14 +215,7 @@ export async function mintSubstrateToken(options: MintTokenOptions): Promise<Min
 
 export interface AuthenticatedRequestOptions {
   commonApiUrl: string;
-  /**
-   * Optional service master key. When present it's sent as
-   * `X-Internal-Auth` for backwards-compat; the delegated bearer below
-   * is the actual capability (requireMcpAuth no longer requires the
-   * header post-Slice-0), so calls work header-less too.
-   */
-  internalApiKey?: string;
-  /** Delegated bearer from `mintSubstrateToken`. */
+  /** Delegated bearer from `mintSubstrateToken` — the sole capability. */
   delegatedToken: string;
   /** Test-injectable fetch. Defaults to `globalThis.fetch`. */
   fetchImpl?: FetchLike;
@@ -255,11 +230,11 @@ export interface AuthenticatedRequestInit {
 }
 
 /**
- * Make an authenticated request to `/internal/work/*`. Sends BOTH
- * `X-Internal-Auth` (service auth) and `Authorization: Bearer …`
- * (delegated). `workPath` is appended verbatim to
- * `${commonApiUrl}/internal/work` — start it with a slash, e.g.,
- * `/workspaces/${workspaceId}/plans/${planId}`.
+ * Make an authenticated request to `/internal/work/*` with
+ * `Authorization: Bearer <delegated token>` (the delegated MCP token is the
+ * capability; requireMcpAuth accepts it without any service header). `workPath`
+ * is appended verbatim to `${commonApiUrl}/internal/work` — start it with a
+ * slash, e.g., `/workspaces/${workspaceId}/plans/${planId}`.
  */
 export async function authenticatedRequest(
   options: AuthenticatedRequestOptions,
@@ -273,7 +248,6 @@ export async function authenticatedRequest(
   const url = `${stripTrailingSlash(options.commonApiUrl)}/internal/work${workPath}`;
   const headers: Record<string, string> = {
     ...(init.headers ?? {}),
-    ...(options.internalApiKey ? { 'X-Internal-Auth': options.internalApiKey } : {}),
     Authorization: `Bearer ${options.delegatedToken}`,
   };
   const fetchInit: { method?: string; headers: Record<string, string>; body?: string } = {
@@ -288,31 +262,20 @@ export async function authenticatedRequest(
 }
 
 /**
- * Make a service-to-service request to a user-facing route that uses
- * `flexibleAuth`. Sends `X-Internal-Auth` + `X-User-Id` so the route
- * resolves a user identity without going through the delegated token
- * path (which would carry MCP scope + R4 operator-binding semantics).
+ * Make a request to a user-facing `/v1/...` route (`flexibleAuth`) AS THE USER,
+ * with `Authorization: Bearer <user JWT>` — `flexibleAuth` falls through to
+ * `userAuth`, so the JWT IS the user identity (no `X-Internal-Auth` + `X-User-Id`
+ * impersonation). `routePath` is appended verbatim to `${commonApiUrl}/v1` —
+ * start with a slash, e.g. `/workspaces/${workspaceId}/runs/${planRunId}/cancel`.
  *
- * `routePath` is appended verbatim to `${commonApiUrl}/v1` — start
- * with a slash, e.g. `/workspaces/${workspaceId}/runs/${planRunId}/cancel`.
- *
- * Use this only when the substrate CLI deliberately wants to act as
- * the workspace owner (e.g. `yolo run cancel --user-driven` for a Run
- * the user started from the webapp). Default lifecycle calls go
- * through `authenticatedRequest` and the MCP path.
+ * Use this when the substrate CLI deliberately acts as the workspace owner
+ * (e.g. `yolo run cancel --user-driven` for a Run the user started from the
+ * webapp). Default lifecycle calls go through `authenticatedRequest` (MCP path).
  */
 export interface UserRouteRequestOptions {
   commonApiUrl: string;
-  /**
-   * Preferred: the user's own access JWT. `flexibleAuth` falls through
-   * to `userAuth` for a plain bearer, so the JWT IS the user identity —
-   * no `X-Internal-Auth` + `X-User-Id` impersonation needed. Falls back
-   * to the internal-key path when no userToken is available.
-   */
-  userToken?: string;
-  /** Service master-key fallback (paired with `userId`). */
-  internalApiKey?: string;
-  userId: string;
+  /** The user's own access JWT — the sole credential. */
+  userToken: string;
   fetchImpl?: FetchLike;
 }
 
@@ -325,11 +288,10 @@ export async function userRouteRequest(
   if (!fetchImpl) {
     throw new WorkClientError('fetch is not available; substrate CLI requires Node 20+', 0, 'INTERNAL');
   }
-  const authHeaders: Record<string, string> = options.userToken
-    ? { Authorization: `Bearer ${options.userToken}` }
-    : options.internalApiKey
-      ? { 'X-Internal-Auth': options.internalApiKey, 'X-User-Id': options.userId }
-      : (() => { throw new WorkClientError('no credential available for user-route request', 0, 'INTERNAL'); })();
+  if (!options.userToken) {
+    throw new WorkClientError('no user token available for user-route request', 0, 'INTERNAL');
+  }
+  const authHeaders: Record<string, string> = { Authorization: `Bearer ${options.userToken}` };
   const url = `${stripTrailingSlash(options.commonApiUrl)}/v1${routePath}`;
   const headers: Record<string, string> = {
     ...(init.headers ?? {}),

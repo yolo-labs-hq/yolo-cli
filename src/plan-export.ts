@@ -146,7 +146,7 @@ export async function runPlanExport(options: ExportOptions): Promise<ExportResul
   // 2) Substrate context
   const auth = resolveSubstrateContext(env);
   if (!auth.ok) return fail('auth', auth.message);
-  const { sessionId, commonApiUrl, userToken, internalApiKey } = auth.context;
+  const { sessionId, commonApiUrl, userToken } = auth.context;
 
   // 3) Mint token
   let mint;
@@ -154,7 +154,6 @@ export async function runPlanExport(options: ExportOptions): Promise<ExportResul
     mint = await mintSubstrateToken({
       commonApiUrl,
       userToken,
-      internalApiKey,
       sessionId,
       scopes: SUBSTRATE_CLI_PLAN_SCOPES,
       fetchImpl: options.fetchImpl,
@@ -178,7 +177,6 @@ export async function runPlanExport(options: ExportOptions): Promise<ExportResul
   const plansDir = options.plansDir ?? path.resolve('.yolo', 'plans');
   const requestCtx = {
     commonApiUrl,
-    internalApiKey,
     delegatedToken: mint.token,
     fetchImpl: options.fetchImpl,
   };
@@ -318,7 +316,7 @@ interface FetchFail { ok: false; error: ExportFailure }
 type FetchResult = FetchOk | FetchFail;
 
 async function tryGet(
-  ctx: { commonApiUrl: string; internalApiKey?: string; delegatedToken: string; fetchImpl?: FetchLike },
+  ctx: { commonApiUrl: string; delegatedToken: string; fetchImpl?: FetchLike },
   workspaceId: string,
   planId: string,
 ): Promise<FetchResult> {

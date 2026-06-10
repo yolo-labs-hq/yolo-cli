@@ -109,14 +109,13 @@ export async function runRunTransfer(options: RunTransferOptions): Promise<RunTr
 
   const auth = resolveSubstrateContext(env);
   if (!auth.ok) return fail('auth', auth.message);
-  const { sessionId, commonApiUrl, userToken, internalApiKey } = auth.context;
+  const { sessionId, commonApiUrl, userToken } = auth.context;
 
   let mint;
   try {
     mint = await mintSubstrateToken({
       commonApiUrl,
       userToken,
-      internalApiKey,
       sessionId,
       scopes: SUBSTRATE_CLI_RUN_SCOPES,
       fetchImpl: options.fetchImpl,
@@ -137,7 +136,6 @@ export async function runRunTransfer(options: RunTransferOptions): Promise<RunTr
 
   const ctx = {
     commonApiUrl,
-    internalApiKey,
     delegatedToken: mint.token,
     fetchImpl: options.fetchImpl,
   };

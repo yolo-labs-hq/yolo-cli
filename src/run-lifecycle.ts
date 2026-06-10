@@ -103,14 +103,13 @@ export async function runRunLifecycle(options: RunLifecycleOptions): Promise<Run
 
   const auth = resolveSubstrateContext(env);
   if (!auth.ok) return fail('auth', auth.message);
-  const { sessionId, commonApiUrl, userToken, internalApiKey } = auth.context;
+  const { sessionId, commonApiUrl, userToken } = auth.context;
 
   let mint;
   try {
     mint = await mintSubstrateToken({
       commonApiUrl,
       userToken,
-      internalApiKey,
       sessionId,
       scopes: SUBSTRATE_CLI_RUN_SCOPES,
       fetchImpl: options.fetchImpl,
@@ -138,8 +137,6 @@ export async function runRunLifecycle(options: RunLifecycleOptions): Promise<Run
     {
       commonApiUrl,
       userToken,
-      internalApiKey,
-      userId: mint.userId,
       fetchImpl: options.fetchImpl,
     },
     path,

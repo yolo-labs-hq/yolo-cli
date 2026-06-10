@@ -136,7 +136,7 @@ export async function runPlanStateTransition(options: PlanStateOptions): Promise
   // 2) env trio
   const auth = resolveSubstrateContext(env);
   if (!auth.ok) return fail('auth', auth.message);
-  const { sessionId, commonApiUrl, userToken, internalApiKey } = auth.context;
+  const { sessionId, commonApiUrl, userToken } = auth.context;
 
   // 3) Mint token
   let mint;
@@ -144,7 +144,6 @@ export async function runPlanStateTransition(options: PlanStateOptions): Promise
     mint = await mintSubstrateToken({
       commonApiUrl,
       userToken,
-      internalApiKey,
       sessionId,
       scopes: SUBSTRATE_CLI_PLAN_SCOPES,
       fetchImpl: options.fetchImpl,
@@ -166,7 +165,6 @@ export async function runPlanStateTransition(options: PlanStateOptions): Promise
 
   const ctx = {
     commonApiUrl,
-    internalApiKey,
     delegatedToken: mint.token,
     fetchImpl: options.fetchImpl,
   };

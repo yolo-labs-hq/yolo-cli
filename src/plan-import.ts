@@ -183,7 +183,7 @@ export async function runPlanImport(options: ImportOptions): Promise<ImportResul
   // 3) Substrate context
   const auth = resolveSubstrateContext(env);
   if (!auth.ok) return fail('auth', auth.message);
-  const { sessionId, commonApiUrl, userToken, internalApiKey } = auth.context;
+  const { sessionId, commonApiUrl, userToken } = auth.context;
 
   // 4) Mint token
   let mint;
@@ -191,7 +191,6 @@ export async function runPlanImport(options: ImportOptions): Promise<ImportResul
     mint = await mintSubstrateToken({
       commonApiUrl,
       userToken,
-      internalApiKey,
       sessionId,
       scopes: SUBSTRATE_CLI_PLAN_SCOPES,
       fetchImpl: options.fetchImpl,
@@ -233,7 +232,6 @@ export async function runPlanImport(options: ImportOptions): Promise<ImportResul
 
   const requestCtx = {
     commonApiUrl,
-    internalApiKey,
     delegatedToken: mint.token,
     fetchImpl: options.fetchImpl,
   };
@@ -328,7 +326,7 @@ interface CreateError { ok: false; conflict409?: false; error: ImportFailure }
 type CreateResult = CreateOk | CreateConflict | CreateError;
 
 async function tryCreate(
-  ctx: { commonApiUrl: string; internalApiKey?: string; delegatedToken: string; fetchImpl?: FetchLike },
+  ctx: { commonApiUrl: string; delegatedToken: string; fetchImpl?: FetchLike },
   workspaceId: string,
   filePlan: FilePlanShape,
 ): Promise<CreateResult> {
@@ -388,7 +386,7 @@ interface FetchError { ok: false; error: ImportFailure }
 type FetchResult = FetchOk | FetchError;
 
 async function tryGet(
-  ctx: { commonApiUrl: string; internalApiKey?: string; delegatedToken: string; fetchImpl?: FetchLike },
+  ctx: { commonApiUrl: string; delegatedToken: string; fetchImpl?: FetchLike },
   workspaceId: string,
   planId: string,
 ): Promise<FetchResult> {
@@ -414,7 +412,7 @@ interface UpdateError { ok: false; error: ImportFailure }
 type UpdateResult = UpdateOk | UpdateError;
 
 async function tryUpdate(
-  ctx: { commonApiUrl: string; internalApiKey?: string; delegatedToken: string; fetchImpl?: FetchLike },
+  ctx: { commonApiUrl: string; delegatedToken: string; fetchImpl?: FetchLike },
   workspaceId: string,
   filePlan: FilePlanShape,
   dbPlan: DbPlanSnapshot,

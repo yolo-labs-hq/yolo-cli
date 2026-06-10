@@ -35,7 +35,8 @@ import { writeLockfile } from './lockfile.js';
 
 const STUB_ENV = {
   SESSION_ID: 'sess-abc',
-  INTERNAL_API_KEY: 'svc-key-xyz',
+  HOME: '/nonexistent-yolo-cli-test-home',
+  YOLO_API_TOKEN: 'user-jwt',
   YOLO_COMMON_API_URL: 'https://api.example.com',
 };
 const STUB_WS = '507f1f77bcf86cd799439011';
@@ -538,7 +539,7 @@ describe('plan-import — env / flag failures', () => {
     }
   });
 
-  it('returns auth failure when INTERNAL_API_KEY is missing', async () => {
+  it('returns auth failure when no user token is present', async () => {
     const { dir, filePath } = setupTmp();
     try {
       const { fetch } = makeFetchStub([]);
@@ -546,7 +547,9 @@ describe('plan-import — env / flag failures', () => {
         filePath,
         plansDir: dir,
         fetchImpl: fetch,
-        env: { ...STUB_ENV, INTERNAL_API_KEY: undefined },
+        // No user token (HOME points nowhere so the token file read fails too)
+        // → the CLI is user-JWT-only, so this fails auth.
+        env: { ...STUB_ENV, YOLO_API_TOKEN: undefined },
         now: STUB_NOW,
       });
       assert.equal(result.ok, false);
@@ -566,7 +569,8 @@ describe('plan-import — env / flag failures', () => {
         fetchImpl: fetch,
         env: {
           SESSION_ID: 'sess',
-          INTERNAL_API_KEY: 'k',
+          HOME: '/nonexistent-yolo-cli-test-home',
+          YOLO_API_TOKEN: 'user-jwt',
           YOLO_API_URL: 'https://api.example.com',
         },
         now: STUB_NOW,

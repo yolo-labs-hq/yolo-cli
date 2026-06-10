@@ -43,38 +43,33 @@ describe('resolveUserToken — precedence', () => {
 });
 
 describe('resolveSubstrateContext', () => {
-  it('resolves with a user token (no internal key needed)', () => {
+  it('resolves with a user token', () => {
     const env = { ...BASE_ENV, HOME: '/home/yolo' };
     const res = resolveSubstrateContext(env, fileStub({ '/home/yolo/.config/yolo/token': 'file-token' }));
     assert.equal(res.ok, true);
     if (res.ok) {
       assert.equal(res.context.userToken, 'file-token');
-      assert.equal(res.context.internalApiKey, undefined);
       assert.equal(res.context.sessionId, 'sess-1');
       assert.equal(res.context.commonApiUrl, 'https://api.example.com');
     }
   });
 
-  it('drops INTERNAL_API_KEY when a user token also exists (codex P2)', () => {
-    // Both present → user token wins as the SOLE credential so the CLI
-    // never forwards a (possibly stale) service key on work calls.
+  it('ignores INTERNAL_API_KEY env entirely — a user token is the only credential', () => {
+    // INTERNAL_API_KEY in the shell is irrelevant now: the fallback was
+    // removed, so the user JWT is resolved and the env key is never read.
     const env = { ...BASE_ENV, HOME: '/home/yolo', INTERNAL_API_KEY: 'stale-svc-key' };
     const res = resolveSubstrateContext(env, fileStub({ '/home/yolo/.config/yolo/token': 'file-token' }));
     assert.equal(res.ok, true);
     if (res.ok) {
       assert.equal(res.context.userToken, 'file-token');
-      assert.equal(res.context.internalApiKey, undefined);
     }
   });
 
-  it('resolves with only the internal key (service-caller fallback)', () => {
+  it('fails when only INTERNAL_API_KEY is present (no user token) — fallback removed', () => {
     const env = { ...BASE_ENV, INTERNAL_API_KEY: 'svc-key' };
     const res = resolveSubstrateContext(env, fileStub({}));
-    assert.equal(res.ok, true);
-    if (res.ok) {
-      assert.equal(res.context.userToken, undefined);
-      assert.equal(res.context.internalApiKey, 'svc-key');
-    }
+    assert.equal(res.ok, false);
+    if (!res.ok) assert.match(res.message, /user-JWT-only|user token/i);
   });
 
   it('fails when SESSION_ID is missing', () => {
@@ -89,9 +84,9 @@ describe('resolveSubstrateContext', () => {
     if (!res.ok) assert.match(res.message, /YOLO_COMMON_API_URL/);
   });
 
-  it('fails when no credential is available', () => {
+  it('fails when no user token is available', () => {
     const res = resolveSubstrateContext({ ...BASE_ENV, HOME: '/home/yolo' }, fileStub({}));
     assert.equal(res.ok, false);
-    if (!res.ok) assert.match(res.message, /no credential/);
+    if (!res.ok) assert.match(res.message, /no user token|user-JWT-only/i);
   });
 });

@@ -9,12 +9,12 @@
  * NOT the agent CLI. The agent CLI is `yolo-code`. NOT the LLM router
  * client. The LLM router client is `yolo-router`.
  *
- * Auth contract (AUTH_AND_ONBOARDING Slice 0 — user-JWT-first):
+ * Auth contract (AUTH_AND_ONBOARDING Slice 0 — user-JWT-only):
  * `SESSION_ID` + `YOLO_COMMON_API_URL` + a USER ACCESS JWT, resolved by
  * `auth-context.ts` from `~/.config/yolo/token` (rotated) → `YOLO_API_TOKEN`.
- * That JWT is the SOLE credential when present (X-Internal-Auth is NOT sent
- * alongside it); `INTERNAL_API_KEY` is only a transitional fallback for
- * credential-less callers and is empty in live session pods. The CLI exits
+ * That JWT is the SOLE credential — it's sent as `Authorization: Bearer` and
+ * `X-Internal-Auth` is never sent. The `INTERNAL_API_KEY` fallback was REMOVED;
+ * the CLI fails with an auth error if no user token is available. The CLI exits
  * with `session-required` if `SESSION_ID` is missing — outside-container
  * invocation is out of scope for v1 (future external-login flow). Workspace
  * binding is derived from the session record, not from env or args.

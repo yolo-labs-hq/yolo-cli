@@ -18,7 +18,7 @@ import { formatContext, type SessionContext } from './context.js';
 const BASE: SessionContext = {
   sessionId: 'sess-abc',
   commonApiUrl: 'https://api.example.com',
-  internalApiKeyPresent: true,
+  userTokenPresent: true,
   workspaceIdHint: null,
 };
 
@@ -36,9 +36,9 @@ describe('context — formatContext', () => {
     assert.match(out, /resolve from session at mint time/);
   });
 
-  it('reports internalApiKey state honestly (set vs missing)', () => {
-    assert.match(formatContext({ ...BASE, internalApiKeyPresent: true }), /internalApiKey\s+\(set\)/);
-    assert.match(formatContext({ ...BASE, internalApiKeyPresent: false }), /internalApiKey\s+\(missing\)/);
+  it('reports userToken state honestly (set vs missing)', () => {
+    assert.match(formatContext({ ...BASE, userTokenPresent: true }), /userToken\s+\(set\)/);
+    assert.match(formatContext({ ...BASE, userTokenPresent: false }), /userToken\s+\(missing\)/);
   });
 
   it('renders sessionId + commonApiUrl directly (no hedging on either)', () => {

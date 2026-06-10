@@ -69,14 +69,13 @@ export async function runPlanOpen(options: OpenOptions): Promise<OpenResult> {
 
   const auth = resolveSubstrateContext(env);
   if (!auth.ok) return fail('auth', auth.message);
-  const { sessionId, commonApiUrl, userToken, internalApiKey } = auth.context;
+  const { sessionId, commonApiUrl, userToken } = auth.context;
 
   let mint;
   try {
     mint = await mintSubstrateToken({
       commonApiUrl,
       userToken,
-      internalApiKey,
       sessionId,
       scopes: SUBSTRATE_CLI_PLAN_SCOPES,
       fetchImpl: options.fetchImpl,
@@ -99,7 +98,6 @@ export async function runPlanOpen(options: OpenOptions): Promise<OpenResult> {
   // Cheaper than fetching the full plan: just rely on the HTTP status.
   const ctx = {
     commonApiUrl,
-    internalApiKey,
     delegatedToken: mint.token,
     fetchImpl: options.fetchImpl,
   };
