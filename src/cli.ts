@@ -9,11 +9,15 @@
  * NOT the agent CLI. The agent CLI is `yolo-code`. NOT the LLM router
  * client. The LLM router client is `yolo-router`.
  *
- * Auth contract (Round 5 trio): `SESSION_ID`, `YOLO_COMMON_API_URL`,
- * `INTERNAL_API_KEY`. The CLI exits with `session-required` if
- * `SESSION_ID` is missing — outside-container invocation is out of
- * scope for v1 (future external-login flow). Workspace binding is
- * derived from the session record, not from env or args.
+ * Auth contract (AUTH_AND_ONBOARDING Slice 0 — user-JWT-first):
+ * `SESSION_ID` + `YOLO_COMMON_API_URL` + a USER ACCESS JWT, resolved by
+ * `auth-context.ts` from `~/.config/yolo/token` (rotated) → `YOLO_API_TOKEN`.
+ * That JWT is the SOLE credential when present (X-Internal-Auth is NOT sent
+ * alongside it); `INTERNAL_API_KEY` is only a transitional fallback for
+ * credential-less callers and is empty in live session pods. The CLI exits
+ * with `session-required` if `SESSION_ID` is missing — outside-container
+ * invocation is out of scope for v1 (future external-login flow). Workspace
+ * binding is derived from the session record, not from env or args.
  */
 
 import { readSessionContext, formatContext, ContextResolutionError } from './context.js';
