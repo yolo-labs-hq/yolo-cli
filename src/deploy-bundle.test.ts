@@ -311,11 +311,33 @@ describe('deploy-bundle — worker modules', () => {
       assert.deepEqual(Object.keys(res.manifest), ['/index.html']);
       assert.equal(
         res.bundleDigest,
-        computeBundleDigest(Buffer.from(prebuilt), res.manifest),
+        computeBundleDigest([{ name: 'worker.mjs', contents: Buffer.from(prebuilt) }], res.manifest),
       );
       // Module bytes participate: same manifest, no module ⇒ different digest.
-      assert.notEqual(res.bundleDigest, computeBundleDigest(undefined, res.manifest));
+      assert.notEqual(res.bundleDigest, computeBundleDigest([], res.manifest));
     }
+  });
+
+  // ⚠️ Cross-implementation lockstep: the SAME vector (same expected hex) is
+  // asserted in common-api release-service tests and yolo-studio-mcp
+  // static-bundle tests. The server recipe is canonical — if this test fails,
+  // fix THIS implementation, then keep all three green together.
+  it('golden vector matches the canonical server digest recipe', () => {
+    const manifest = {
+      '/index.html': { hash: 'a'.repeat(64), size: 5 },
+      '/app.css': { hash: 'b'.repeat(64), size: 10 },
+    };
+    assert.equal(
+      computeBundleDigest(
+        [{ name: 'index.js', contents: Buffer.from('export default {};', 'utf8') }],
+        manifest,
+      ),
+      'sha256:3d7cb9f8616025431ef83d245f579851a7b704da9d5130da1b479bbccd846e28',
+    );
+    assert.equal(
+      computeBundleDigest([], manifest),
+      'sha256:78950c2010b4b065c2334e2067ada09381661e57b8aec2bf9a5f635d1d230aa7',
+    );
   });
 
   it('worker WITHOUT assetsDir ships a module and an empty manifest', async () => {

@@ -209,26 +209,39 @@ export async function bundleProject(
     moduleSource,
     fileCount,
     totalAssetBytes,
-    bundleDigest: computeBundleDigest(module?.contents, manifest),
+    bundleDigest: computeBundleDigest(module === null ? [] : [module], manifest),
     warnings,
   };
 }
 
 /**
- * `sha256:<hex>` over the module bytes (when present) followed by the
- * manifest entries in sorted-path order. Deterministic: the same bytes
- * always produce the same digest, so T3 approvals bind to content.
+ * `sha256:<hex>` over name-framed module bytes + the sorted manifest.
+ *
+ * ⚠️ MIRROR — the CANONICAL implementation is the server verifier
+ * (`common-api/src/services/hosting/release-service.ts` computeBundleDigest);
+ * finalize recomputes with this exact recipe and refuses on mismatch
+ * (`bundle-digest-mismatch`). Recipe: modules sorted by name, each hashed as
+ * `name‖0x00‖bytes‖0x00`; then `JSON.stringify` of path-sorted entries shaped
+ * `[path, {hash, size}]`. The golden-vector test pins all three copies
+ * (this, the server, yolo-studio-mcp/src/lib/static-bundle.ts) to the same
+ * output — change one, change all.
  */
 export function computeBundleDigest(
-  moduleBytes: Uint8Array | undefined,
+  modules: Array<{ name: string; contents: Uint8Array }>,
   manifest: Record<string, AssetManifestEntry>,
 ): string {
   const hash = createHash('sha256');
-  if (moduleBytes !== undefined) hash.update(moduleBytes);
-  for (const manifestPath of Object.keys(manifest).sort()) {
-    const entry = manifest[manifestPath]!;
-    hash.update(`${manifestPath}\0${entry.hash}\0${entry.size}\n`);
+  const sorted = [...modules].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  for (const mod of sorted) {
+    hash.update(mod.name, 'utf8');
+    hash.update(Buffer.from([0]));
+    hash.update(mod.contents);
+    hash.update(Buffer.from([0]));
   }
+  const entries = Object.keys(manifest)
+    .sort()
+    .map((path) => [path, { hash: manifest[path]!.hash, size: manifest[path]!.size }]);
+  hash.update(JSON.stringify(entries), 'utf8');
   return `sha256:${hash.digest('hex')}`;
 }
 
