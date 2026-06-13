@@ -421,15 +421,12 @@ async function runLogsCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
   }
 
   if (parsed.tail) {
-    const tailImpl = deps.tailLogsImpl ?? tailLogs;
-    const result = await tailImpl(auth.context, linked.projectId, { sinceMinutes: parsed.sinceMinutes }, (line) => {
-      io.out(`${parsed.jsonOutput ? line : formatLogLine(line)}\n`);
-    });
-    if (!result.ok) {
-      io.err(`${formatFail(result)}\n`);
-      return exitCodeForFailure(result.kind);
-    }
-    return 0;
+    // Honest degradation (codex P2 r3): the backend logs route is a buffered
+    // Phase-1 stub — there is no NDJSON stream to tail yet. A tail that
+    // silently exits after one buffered response would read as "no more
+    // logs"; say what's happening and fall through to the buffered fetch.
+    // tailLogs (deploy-client) stays for when the streaming route lands.
+    io.err('deploy: --tail is not available yet (log streaming lands with Phase 3 observability); showing recent entries instead\n');
   }
 
   const logsImpl = deps.getLogsImpl ?? getLogs;

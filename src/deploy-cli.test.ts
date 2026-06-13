@@ -360,20 +360,24 @@ describe('deploy-cli — logs', () => {
     assert.match(io.stdout.join(''), /\[2026-06-13T00:00:00Z\] info hello/);
   });
 
-  it('--tail streams lines through the tail leg', async () => {
+  it('--tail degrades honestly to the buffered fetch with a notice (codex P2 r3 — no streaming route yet)', async () => {
     const io = makeIo();
+    let buffered = 0;
     const code = await runDeployCmd(
       ['logs', '--tail', '--json'],
       baseDeps(io, {
-        tailLogsImpl: async (_ctx, _projectId, _options, onLine) => {
-          onLine('{"level":"info","message":"a"}');
-          onLine('{"level":"info","message":"b"}');
-          return { ok: true, value: undefined };
+        getLogsImpl: async () => {
+          buffered += 1;
+          return { ok: true, value: { entries: [], note: 'stub' } };
+        },
+        tailLogsImpl: async () => {
+          throw new Error('tail leg must NOT be called until the streaming route exists');
         },
       }),
     );
     assert.equal(code, 0);
-    assert.equal(io.stdout.join(''), '{"level":"info","message":"a"}\n{"level":"info","message":"b"}\n');
+    assert.equal(buffered, 1);
+    assert.match(io.stderr.join(''), /--tail is not available yet/);
   });
 
   it('rejects an invalid --since with exit 64', async () => {
