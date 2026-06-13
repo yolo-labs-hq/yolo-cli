@@ -91,15 +91,24 @@ describe('yolo tileapp publish', () => {
     if (!r.ok) { assert.equal(r.kind, 'usage'); assert.match(r.message, /sign/); }
   });
 
-  it('submits a signed manifest and prints the releaseId', async () => {
+  it('submits a signed manifest and prints the releaseId; OMITS channel by default (server defaults to stable)', async () => {
     const signed = { ...MANIFEST, signature: 'SIG==', publisherKeyId: 'acme-k1' };
     let captured: any = {};
-    const fetchImpl = stubFetch((url, init) => { captured = { url, body: JSON.parse(String(init?.body)) }; return { status: 200, body: { ok: true, releaseId: 'acme-app@1.0.0#beta', status: 'submitted' } }; });
+    const fetchImpl = stubFetch((url, init) => { captured = { url, body: JSON.parse(String(init?.body)) }; return { status: 200, body: { ok: true, releaseId: 'acme-app@1.0.0#stable', status: 'submitted' } }; });
     const r = await runTileAppPublish({ manifestPath: tmpManifest(signed), env: ENV, fetchImpl });
     assert.equal(r.ok, true);
     assert.match(captured.url, /\/v1\/publisher\/publish$/);
+    assert.equal('channel' in captured.body, false); // not forced — server applies its stable default
+    if (r.ok) assert.match(r.output, /acme-app@1\.0\.0#stable/);
+  });
+
+  it('sends channel only when --channel is explicitly passed', async () => {
+    const signed = { ...MANIFEST, signature: 'SIG==', publisherKeyId: 'acme-k1' };
+    let captured: any = {};
+    const fetchImpl = stubFetch((url, init) => { captured = { url, body: JSON.parse(String(init?.body)) }; return { status: 200, body: { ok: true, releaseId: 'acme-app@1.0.0#beta', status: 'submitted' } }; });
+    const r = await runTileAppPublish({ manifestPath: tmpManifest(signed), env: ENV, fetchImpl, channel: 'beta' });
+    assert.equal(r.ok, true);
     assert.equal(captured.body.channel, 'beta');
-    if (r.ok) assert.match(r.output, /acme-app@1\.0\.0#beta/);
   });
 });
 

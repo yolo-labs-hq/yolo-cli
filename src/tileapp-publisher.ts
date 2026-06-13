@@ -121,10 +121,16 @@ export async function runTileAppPublish(opts: PublishOptions): Promise<CmdResult
   const fetchImpl = opts.fetchImpl ?? fetch;
   let res: Awaited<ReturnType<FetchLike>>;
   try {
+    // Only send `channel` when the user explicitly passed --channel, so the
+    // CLI default can't diverge from the server's (the publish endpoint defaults
+    // to `stable`). Same for imageDigest.
+    const body: Record<string, unknown> = { manifest: read.manifest };
+    if (opts.channel) body.channel = opts.channel;
+    if (opts.imageDigest) body.imageDigest = opts.imageDigest;
     res = await fetchImpl(`${apiBase(auth.commonApiUrl)}/publisher/publish`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${auth.userToken}` },
-      body: JSON.stringify({ manifest: read.manifest, channel: opts.channel ?? 'beta', imageDigest: opts.imageDigest }),
+      body: JSON.stringify(body),
     });
   } catch (e) {
     return { ok: false, kind: 'http', message: `publish request failed: ${(e as Error).message}` };
