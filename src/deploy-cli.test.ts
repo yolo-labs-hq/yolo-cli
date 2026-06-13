@@ -164,6 +164,14 @@ describe('deploy-cli — validate', () => {
     assert.match(io.stderr.join(''), /\$version: must be the number 1, got 2/);
   });
 
+  it('rejects unknown flags/positionals with exit 64', async () => {
+    const io = makeIo();
+    assert.equal(await runDeployCmd(['validate', '--jsoon'], baseDeps(io)), 64);
+    assert.match(io.stderr.join(''), /unexpected argument/);
+    const io2 = makeIo();
+    assert.equal(await runDeployCmd(['validate', './dist'], baseDeps(io2)), 64);
+  });
+
   it('--json emits a machine-readable result and exits 1 on failure', async () => {
     const io = makeIo();
     const code = await runDeployCmd(

@@ -498,6 +498,12 @@ async function runLinkCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
  */
 async function runValidateCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Promise<number> {
   const jsonOutput = args.includes('--json');
+  // Reject unknown flags/positionals (consistent with the other subcommands).
+  const unexpected = args.filter((a) => a !== '--json');
+  if (unexpected.length > 0) {
+    io.err(`yolo deploy validate: unexpected argument(s): ${unexpected.join(' ')}\nUsage: yolo deploy validate [--json]\n`);
+    return 64;
+  }
   const cwd = deps.cwd ?? process.cwd();
   const readFileImpl = deps.readFileImpl;
   const readConfig = deps.readDeployConfigImpl ?? readDeployConfig;
