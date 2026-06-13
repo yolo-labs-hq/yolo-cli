@@ -115,6 +115,68 @@ describe('deploy-cli — usage & dispatch', () => {
   });
 });
 
+// ─── validate ─────────────────────────────────────────────────────────────
+
+describe('deploy-cli — validate', () => {
+  const workerCfg = {
+    ok: true as const,
+    config: { $version: 1 as const, projectId: 'hp_1', slug: 'app', type: 'worker' as const, worker: { entry: 'src/index.ts' } },
+    path: CONFIG_PATH,
+  };
+
+  it('passes a valid worker config whose entry exists (exit 0)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['validate'],
+      baseDeps(io, { readDeployConfigImpl: () => workerCfg, existsImpl: () => true }),
+    );
+    assert.equal(code, 0);
+    assert.match(io.stdout.join(''), /OK: deploy config is valid/);
+    assert.match(io.stdout.join(''), /entry: src\/index\.ts/);
+  });
+
+  it('fails when the worker entry does not exist (exit 1)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['validate'],
+      baseDeps(io, { readDeployConfigImpl: () => workerCfg, existsImpl: () => false }),
+    );
+    assert.equal(code, 1);
+    assert.match(io.stderr.join(''), /FAIL: deploy config is not valid/);
+    assert.match(io.stderr.join(''), /worker\.entry: entry 'src\/index\.ts' does not exist/);
+  });
+
+  it('reports schema errors with their path (exit 1)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['validate'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => ({
+          ok: false as const,
+          kind: 'invalid' as const,
+          path: CONFIG_PATH,
+          message: 'invalid deploy config',
+          errors: [{ path: '$version', message: 'must be the number 1, got 2' }],
+        }),
+      }),
+    );
+    assert.equal(code, 1);
+    assert.match(io.stderr.join(''), /\$version: must be the number 1, got 2/);
+  });
+
+  it('--json emits a machine-readable result and exits 1 on failure', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['validate', '--json'],
+      baseDeps(io, { readDeployConfigImpl: () => workerCfg, existsImpl: () => false }),
+    );
+    assert.equal(code, 1);
+    const parsed = JSON.parse(io.stdout.join('').trim());
+    assert.equal(parsed.ok, false);
+    assert.ok(parsed.issues.some((i: { path?: string }) => i.path === 'worker.entry'));
+  });
+});
+
 // ─── Bare ship ────────────────────────────────────────────────────────────
 
 describe('deploy-cli — bare ship', () => {

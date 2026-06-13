@@ -22,6 +22,7 @@
  */
 
 import * as path from 'node:path';
+import { existsSync } from 'node:fs';
 
 import {
   runDeployShip,
@@ -48,6 +49,7 @@ import {
   type D1QueryRow,
 } from './deploy-client.js';
 import { readDeployConfig, writeDeployConfig, type DeployConfig } from './deploy-config.js';
+import { detectProjectShape, type ProjectShape } from './deploy-detect.js';
 import type { ReadFileImpl } from './auth-context.js';
 
 // ─── Injectable surface ───────────────────────────────────────────────────
@@ -62,6 +64,8 @@ export interface DeployCliDeps {
   env?: Record<string, string | undefined>;
   io?: DeployIo;
   readFileImpl?: ReadFileImpl;
+  /** Path-existence probe (for `validate`'s entry/assets checks); defaults to fs.existsSync. */
+  existsImpl?: (p: string) => boolean;
   fetchImpl?: DeployFetchLike;
   runShipImpl?: typeof runDeployShip;
   readDeployConfigImpl?: typeof readDeployConfig;
@@ -80,6 +84,7 @@ const USAGE = [
   'Usage: yolo deploy [--env <staging|prod>] [--dry-run] [--json]',
   '       yolo deploy init [--slug <slug>] [--type <static|worker>]',
   '       yolo deploy link (--project-id <id> | --slug <slug>) [--type <static|worker>]',
+  '       yolo deploy validate [--json]',
   '       yolo deploy status [--json]',
   '       yolo deploy logs [--tail] [--since <dur>] [--json]',
   '       yolo deploy rollback [releaseId] [--json]',
@@ -99,6 +104,7 @@ export async function runDeployCmd(args: string[], deps: DeployCliDeps = {}): Pr
   }
   if (sub === 'init') return runInitCmd(args.slice(1), deps, io);
   if (sub === 'link') return runLinkCmd(args.slice(1), deps, io);
+  if (sub === 'validate') return runValidateCmd(args.slice(1), deps, io);
   if (sub === 'status') return runStatusCmd(args.slice(1), deps, io);
   if (sub === 'logs') return runLogsCmd(args.slice(1), deps, io);
   if (sub === 'rollback') return runRollbackCmd(args.slice(1), deps, io);
@@ -479,6 +485,114 @@ async function runLinkCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
     { projectId: projectId!, slug, type: parsed.type, existing },
     `OK: linked project ${projectId}${slug ? ` (slug ${slug})` : ''} — wrote .yolo/deploy.json`,
   );
+}
+
+// ─── validate ─────────────────────────────────────────────────────────────
+
+/**
+ * `yolo deploy validate [--json]` — check `.yolo/deploy.json` + the resolved
+ * project shape WITHOUT bundling, uploading, or any network call. Catches config
+ * problems (bad `$version`/`type`, malformed JSON, missing `worker.entry`, a
+ * static project with no assets dir, a `prebuilt` entry that doesn't exist, …)
+ * before a real `yolo deploy` would fail mid-ship. Exit 0 = valid, 1 = invalid.
+ */
+async function runValidateCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Promise<number> {
+  const jsonOutput = args.includes('--json');
+  const cwd = deps.cwd ?? process.cwd();
+  const readFileImpl = deps.readFileImpl;
+  const readConfig = deps.readDeployConfigImpl ?? readDeployConfig;
+
+  const issues: Array<{ path?: string; message: string }> = [];
+
+  // 1. Parse + schema-validate .yolo/deploy.json (absent is allowed — detection
+  //    can still infer the shape; surfaced as a hint, not an error).
+  const readResult = readConfig(cwd, readFileImpl);
+  let config: DeployConfig | null = null;
+  let configMissing = false;
+  if (!readResult.ok) {
+    if (readResult.errors && readResult.errors.length > 0) {
+      for (const e of readResult.errors) issues.push({ path: e.path, message: e.message });
+    } else {
+      issues.push({ message: readResult.message });
+    }
+  } else {
+    config = readResult.config;
+    configMissing = config === null;
+  }
+
+  // 2. Resolve the project shape (static-vs-worker, entry/assets), only if the
+  //    config itself parsed.
+  let shape: ProjectShape | null = null;
+  if (readResult.ok) {
+    const det = detectProjectShape({ cwd, config: config ?? null, readFileImpl });
+    if (!det.ok) issues.push({ message: det.message });
+    else shape = det.shape;
+  }
+
+  // 3. Verify the resolved entry / assets actually exist on disk — detection
+  //    trusts an EXPLICIT worker.entry without checking it, so a typo'd or
+  //    not-yet-built path would otherwise only fail mid-ship.
+  const exists = deps.existsImpl ?? existsSync;
+  if (shape) {
+    if (shape.type === 'worker') {
+      const entryPath = path.resolve(cwd, shape.entry);
+      if (!exists(entryPath)) {
+        issues.push({
+          path: 'worker.entry',
+          message: `entry '${shape.entry}' does not exist${shape.prebuilt ? ' (prebuilt entries must be built before deploy)' : ' — build it or fix the path'}`,
+        });
+      }
+      if (shape.assetsDir && !exists(path.resolve(cwd, shape.assetsDir))) {
+        issues.push({ path: 'worker.assetsDir', message: `assets dir '${shape.assetsDir}' does not exist` });
+      }
+    } else if (shape.type === 'static') {
+      if (!exists(path.resolve(cwd, shape.assetsDir))) {
+        issues.push({
+          path: 'build.outputDir',
+          message: `static assets dir '${shape.assetsDir}' does not exist — run the build first`,
+        });
+      }
+    }
+  }
+
+  const ok = issues.length === 0;
+
+  if (jsonOutput) {
+    io.out(`${JSON.stringify({ ok, configMissing, config, shape, issues })}\n`);
+    return ok ? 0 : 1;
+  }
+
+  if (!ok) {
+    io.err('FAIL: deploy config is not valid\n');
+    for (const it of issues) io.err(`  - ${it.path ? `${it.path}: ` : ''}${it.message}\n`);
+    if (configMissing) io.err("  hint: run 'yolo deploy init' to create .yolo/deploy.json\n");
+    return 1;
+  }
+
+  io.out('OK: deploy config is valid\n');
+  if (config) {
+    const link = config.projectId
+      ? `${config.projectId}${config.slug ? ` (${config.slug})` : ''}`
+      : '(unlinked — run `yolo deploy link`)';
+    io.out(`  project: ${link}\n`);
+  } else {
+    io.out('  project: no .yolo/deploy.json — shape auto-detected\n');
+  }
+  if (shape) {
+    if (shape.type === 'static') {
+      io.out(`  type: static · assets: ${shape.assetsDir}\n`);
+    } else {
+      const bits = [`entry: ${shape.entry}`];
+      if (shape.prebuilt) bits.push('prebuilt');
+      if (shape.assetsDir) bits.push(`assets: ${shape.assetsDir}`);
+      if (shape.buildCommand) bits.push(`build: ${shape.buildCommand}`);
+      io.out(`  type: worker · ${bits.join(' · ')}\n`);
+    }
+  }
+  if (config?.compatibilityFlags?.length) {
+    io.out(`  compatibilityFlags: ${config.compatibilityFlags.join(', ')}\n`);
+  }
+  return 0;
 }
 
 // ─── status ───────────────────────────────────────────────────────────────
