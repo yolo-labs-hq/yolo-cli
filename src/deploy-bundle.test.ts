@@ -275,12 +275,12 @@ describe('deploy-bundle — worker modules', () => {
     }
   });
 
-  it('bundles a Worker that imports @yololabs/flexdb WITHOUT it installed (vendored)', async () => {
+  it('bundles a Worker that imports @yolo-labs/flexdb WITHOUT it installed (vendored)', async () => {
     const tmp = makeTmpDir();
     // No node_modules / no install — the deploy bundler must vendor FlexDB.
     writeTree(tmp, {
       'src/index.ts': [
-        "import { FlexDB } from '@yololabs/flexdb';",
+        "import { FlexDB } from '@yolo-labs/flexdb';",
         'export default {',
         '  async fetch(req: Request, env: any): Promise<Response> {',
         '    const db = new FlexDB(env.DB);',
@@ -298,7 +298,7 @@ describe('deploy-bundle — worker modules', () => {
       const text = Buffer.from(res.module!.contents).toString('utf8');
       // FlexDB's code is inlined (minified), and nothing left unresolved.
       assert.ok(text.includes('_flexdb_documents'), 'FlexDB engine inlined into the bundle');
-      assert.ok(!text.includes('@yololabs/flexdb'), 'no unresolved package specifier');
+      assert.ok(!text.includes('@yolo-labs/flexdb'), 'no unresolved package specifier');
     }
   });
 

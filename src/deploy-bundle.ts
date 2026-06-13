@@ -41,10 +41,10 @@ import type { Plugin } from 'esbuild';
 
 import type { ProjectShape } from './deploy-detect.js';
 
-// ─── Vendored @yololabs/flexdb ─────────────────────────────────────────────
+// ─── Vendored @yolo-labs/flexdb ─────────────────────────────────────────────
 //
 // FlexDB is not published to npm yet (it will be). Until then, the deploy
-// bundler resolves `import { FlexDB } from '@yololabs/flexdb'` to a copy
+// bundler resolves `import { FlexDB } from '@yolo-labs/flexdb'` to a copy
 // vendored into the CLI's dist (built by scripts/build-vendored-flexdb.mjs), so
 // a customer Worker can use FlexDB without installing it. A real installed copy
 // is preferred once the package is published — see vendoredFlexdbPlugin.
@@ -64,7 +64,7 @@ function readVendoredFlexdb(): string | null {
 }
 
 /**
- * esbuild plugin that supplies `@yololabs/flexdb` from the CLI's vendored copy
+ * esbuild plugin that supplies `@yolo-labs/flexdb` from the CLI's vendored copy
  * when the project hasn't installed it. A real installed copy (post-publish) is
  * preferred. Returns null when no vendored bundle is present, leaving esbuild's
  * default resolution untouched.
@@ -73,11 +73,11 @@ function vendoredFlexdbPlugin(): Plugin | null {
   const source = readVendoredFlexdb();
   if (source === null) return null;
   const NS = 'yolo-vendored-flexdb';
-  const SPECIFIER = '@yololabs/flexdb';
+  const SPECIFIER = '@yolo-labs/flexdb';
   return {
     name: 'yolo-vendored-flexdb',
     setup(build) {
-      build.onResolve({ filter: /^@yololabs\/flexdb$/ }, async (args) => {
+      build.onResolve({ filter: /^@yolo-labs\/flexdb$/ }, async (args) => {
         // Re-entry guard: our build.resolve() below re-fires this same filter.
         if ((args.pluginData as { vendored?: boolean } | undefined)?.vendored) return null;
         // Prefer a real installed copy if the project has one (post-publish).
@@ -344,8 +344,8 @@ async function buildWorkerModule(
   } else {
     // Lazy-load so non-deploy verbs never pay esbuild's startup cost.
     const esbuild = await import('esbuild');
-    // Vendor @yololabs/flexdb (not yet published) so a customer Worker can
-    // `import { FlexDB } from '@yololabs/flexdb'` without installing it.
+    // Vendor @yolo-labs/flexdb (not yet published) so a customer Worker can
+    // `import { FlexDB } from '@yolo-labs/flexdb'` without installing it.
     const flexdbPlugin = vendoredFlexdbPlugin();
     let result;
     try {

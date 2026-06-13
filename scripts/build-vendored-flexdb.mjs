@@ -1,14 +1,14 @@
 /**
- * Vendor @yololabs/flexdb into the CLI so `yolo deploy` can bundle it into a
+ * Vendor @yolo-labs/flexdb into the CLI so `yolo deploy` can bundle it into a
  * customer Worker WITHOUT the package being installable from a registry.
  *
  * FlexDB isn't published yet (it will be soon). Until then, the deploy bundler
- * resolves `import { FlexDB } from '@yololabs/flexdb'` to this vendored copy via
+ * resolves `import { FlexDB } from '@yolo-labs/flexdb'` to this vendored copy via
  * an esbuild plugin (see deploy-bundle.ts). This script produces that copy: a
  * single self-contained ESM module (FlexDB is zero-dep) emitted into
  * `dist/vendored/flexdb.mjs`, which ships in the CLI tarball (`files: ["dist"]`).
  *
- * Once @yololabs/flexdb is published, this vendoring can be dropped (the deploy
+ * Once @yolo-labs/flexdb is published, this vendoring can be dropped (the deploy
  * bundler already prefers a real installed copy — vendored is the fallback).
  */
 import { build } from 'esbuild';
