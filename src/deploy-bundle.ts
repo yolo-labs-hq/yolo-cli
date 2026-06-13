@@ -32,7 +32,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { gzipSync } from 'node:zlib';
 
@@ -333,10 +333,29 @@ async function buildWorkerModule(
 
 /**
  * Depth-first walk returning sorted posix-relative file paths. Skips
- * dotfiles/dot-dirs and node_modules at every level. Symlinks to files
- * are included (resolved); symlinked dirs are skipped (cycle safety).
+ * dotfiles/dot-dirs and node_modules at every level. Symlinked DIRS are
+ * skipped (cycle safety). Symlinked FILES are included only when their
+ * realpath stays INSIDE the asset root (codex P1 r12) — a
+ * `public/token.txt -> ~/.config/yolo/token` link would otherwise publish a
+ * credential as a public asset.
  */
 function walkAssetFiles(rootAbs: string): string[] {
+  // Resolve the root once (it may itself be reached through a symlink) so the
+  // containment check compares real paths on both sides.
+  let rootReal: string;
+  try {
+    rootReal = realpathSync(rootAbs);
+  } catch {
+    rootReal = rootAbs;
+  }
+  const within = (abs: string): boolean => {
+    try {
+      const real = realpathSync(abs);
+      return real === rootReal || real.startsWith(rootReal + path.sep);
+    } catch {
+      return false; // dangling / unreadable → don't include
+    }
+  };
   const files: string[] = [];
   const walk = (relPosix: string): void => {
     const dirAbs = relPosix === '' ? rootAbs : path.join(rootAbs, ...relPosix.split('/'));
@@ -350,8 +369,11 @@ function walkAssetFiles(rootAbs: string): string[] {
       } else if (entry.isFile()) {
         files.push(childRel);
       } else if (entry.isSymbolicLink()) {
+        // Follow file symlinks ONLY when they resolve to a regular file that
+        // stays under the asset root.
+        const abs = path.join(dirAbs, entry.name);
         try {
-          if (statSync(path.join(dirAbs, entry.name)).isFile()) files.push(childRel);
+          if (statSync(abs).isFile() && within(abs)) files.push(childRel);
         } catch {
           // dangling symlink — skip
         }

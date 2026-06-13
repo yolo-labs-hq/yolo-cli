@@ -11,7 +11,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -135,6 +135,27 @@ describe('deploy-bundle — static asset manifest', () => {
     assert.equal(res.ok, true);
     if (res.ok) {
       assert.deepEqual(Object.keys(res.manifest).sort(), ['/index.html', '/sub/keep.txt']);
+    }
+  });
+
+  it('excludes a symlink that escapes the asset root, includes one that stays inside (codex P1 r12)', async () => {
+    const tmp = makeTmpDir();
+    writeTree(tmp, {
+      'dist/index.html': '<html/>',
+      'dist/real.txt': 'inside',
+      'secret.txt': 'TOP SECRET credential outside the bundle root',
+    });
+    // Escaping symlink → must NOT be published.
+    symlinkSync(path.join(tmp, 'secret.txt'), path.join(tmp, 'dist', 'leak.txt'));
+    // In-root symlink → allowed (resolves under dist/).
+    symlinkSync(path.join(tmp, 'dist', 'real.txt'), path.join(tmp, 'dist', 'alias.txt'));
+
+    const res = await bundleProject(STATIC_SHAPE, tmp);
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      const keys = Object.keys(res.manifest).sort();
+      assert.ok(!keys.includes('/leak.txt'), `escaping symlink leaked: ${keys.join(', ')}`);
+      assert.deepEqual(keys, ['/alias.txt', '/index.html', '/real.txt']);
     }
   });
 
