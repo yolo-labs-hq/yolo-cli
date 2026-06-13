@@ -38,6 +38,12 @@ function sha256(text: string | Buffer): string {
   return createHash('sha256').update(text).digest('hex');
 }
 
+// Cloudflare Workers-Assets manifest hash: sha256(base64(contents)+ext) → 32 hex.
+function cfHash(text: string | Buffer, ext: string): string {
+  const buf = Buffer.isBuffer(text) ? text : Buffer.from(text);
+  return createHash('sha256').update(buf.toString('base64') + ext).digest('hex').slice(0, 32);
+}
+
 const STATIC_SHAPE: ProjectShape = { type: 'static', assetsDir: 'dist' };
 
 // ─── Spec default ceilings ────────────────────────────────────────────────
@@ -69,9 +75,11 @@ describe('deploy-bundle — static asset manifest', () => {
       assert.equal(res.moduleSource, null);
       assert.equal(res.fileCount, 2);
       assert.deepEqual(res.manifest, {
-        '/index.html': { hash: sha256('<html>hello</html>'), size: 18 },
-        '/js/app.js': { hash: sha256('console.log(1)'), size: 14 },
+        '/index.html': { hash: cfHash('<html>hello</html>', 'html'), size: 18 },
+        '/js/app.js': { hash: cfHash('console.log(1)', 'js'), size: 14 },
       });
+      // CF requires 32-hex asset hashes (rejects 64-hex sha256).
+      assert.match(res.manifest['/index.html']!.hash, /^[0-9a-f]{32}$/);
       assert.equal(res.totalAssetBytes, 32);
       assert.equal(res.assetPaths['/index.html'], path.join(tmp, 'dist', 'index.html'));
       assert.match(res.bundleDigest, /^sha256:[0-9a-f]{64}$/);

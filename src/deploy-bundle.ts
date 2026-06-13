@@ -188,7 +188,7 @@ export async function bundleProject(
       }
 
       const manifestPath = '/' + relPosix;
-      const hash = sha256Hex(readFileSync(absPath));
+      const hash = cfAssetHash(readFileSync(absPath), manifestPath);
       manifest[manifestPath] = { hash, size };
       assetPaths[manifestPath] = absPath;
       assets.push({ path: manifestPath, hash, size, absPath });
@@ -384,8 +384,21 @@ function walkAssetFiles(rootAbs: string): string[] {
   return files;
 }
 
-function sha256Hex(bytes: Uint8Array): string {
-  return createHash('sha256').update(bytes).digest('hex');
+/**
+ * Cloudflare Workers-Assets manifest hash (wrangler's scheme, verified against
+ * the CF assets-upload-session API 2026-06-13): `sha256(base64(contents) +
+ * extension-without-dot)` hex-encoded, truncated to 32 chars. CF rejects a
+ * full 64-hex sha256 ("file hash size of 64 is too large", code 10304) and
+ * content-addresses uploaded assets by THIS value — it must match exactly or
+ * the bucket upload / serve fails. The server keeps this value verbatim in the
+ * manifest (it never recomputes asset hashes), so the CLI is canonical here.
+ */
+function cfAssetHash(bytes: Uint8Array, manifestPath: string): string {
+  const ext = path.extname(manifestPath).slice(1); // 'html', 'css', '' …
+  return createHash('sha256')
+    .update(Buffer.from(bytes).toString('base64') + ext)
+    .digest('hex')
+    .slice(0, 32);
 }
 
 function formatBytes(n: number): string {
