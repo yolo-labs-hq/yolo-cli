@@ -67,8 +67,39 @@ describe('deploy-detect — deploy.json type wins', () => {
     assert.equal(res.ok, true);
     if (res.ok) {
       assert.equal(res.source, 'deploy-json');
-      assert.deepEqual(res.shape, { type: 'worker', entry: '.vinext/worker.mjs', assetsDir: '.vinext/assets' });
+      assert.deepEqual(res.shape, {
+        type: 'worker',
+        entry: '.vinext/worker.mjs',
+        assetsDir: '.vinext/assets',
+        prebuilt: true,
+      });
     }
+  });
+
+  it('auto-detected src/index.js is SOURCE — not flagged prebuilt (codex P2 r6)', () => {
+    const res = detectProjectShape({
+      cwd: '/proj',
+      readFileImpl: fileStub('/proj', {
+        'src/index.js': 'import { greet } from "./lib.js";\nexport default { async fetch(req) { return new Response(greet()); } };\n',
+      }),
+    });
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      assert.equal(res.source, 'worker-entry');
+      assert.equal(res.shape.type, 'worker');
+      assert.notEqual((res.shape as { prebuilt?: boolean }).prebuilt, true);
+    }
+  });
+
+  it('deploy.json worker.entry pointing at SOURCE .ts is not prebuilt', () => {
+    const config: DeployConfig = { $version: 1, type: 'worker', worker: { entry: 'src/index.ts' } };
+    const res = detectProjectShape({
+      cwd: '/proj',
+      config,
+      readFileImpl: fileStub('/proj', { 'src/index.ts': 'export default { fetch() {} };' }),
+    });
+    assert.equal(res.ok, true);
+    if (res.ok) assert.notEqual((res.shape as { prebuilt?: boolean }).prebuilt, true);
   });
 
   it('beats a wrangler config sitting in the same project', () => {

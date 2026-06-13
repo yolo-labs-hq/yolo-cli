@@ -37,7 +37,11 @@ import { readDeployConfig, type DeployConfig } from './deploy-config.js';
 
 export type ProjectShape =
   | { type: 'static'; assetsDir: string; buildCommand?: string }
-  | { type: 'worker'; entry: string; assetsDir?: string; buildCommand?: string };
+  // `prebuilt` is set ONLY when deploy.json explicitly points worker.entry at
+  // a built .js/.mjs module (the vinext/OpenNext path) — those ship as-is.
+  // Auto-detected (src/index.js) and wrangler `main` entries are SOURCE and
+  // must go through esbuild so their imports are bundled (codex P2 r6).
+  | { type: 'worker'; entry: string; assetsDir?: string; buildCommand?: string; prebuilt?: boolean };
 
 /** Which detection step produced the shape (progress lines + tests). */
 export type DetectSource =
@@ -109,16 +113,22 @@ export function detectProjectShape(options: DetectOptions): DetectResult {
     );
   }
   if (config?.type === 'worker') {
-    const entry = config.worker?.entry ?? findWorkerEntry(cwd, read, /* requireSignature */ false);
+    const explicitEntry = config.worker?.entry;
+    const entry = explicitEntry ?? findWorkerEntry(cwd, read, /* requireSignature */ false);
     if (entry === undefined) {
       return fail(
         ".yolo/deploy.json sets type 'worker' but no entry was found: set worker.entry (source or a pre-built .js/.mjs module)",
       );
     }
+    // Prebuilt skip applies ONLY to an explicitly-configured built output —
+    // a deploy.json worker.entry ending .js/.mjs. A fallback-discovered entry
+    // (or any other source) is bundled by esbuild.
+    const prebuilt = explicitEntry !== undefined && /\.(?:js|mjs)$/i.test(explicitEntry);
     return hit(
       {
         type: 'worker',
         entry,
+        ...(prebuilt && { prebuilt: true }),
         ...optional('assetsDir', config.worker?.assetsDir),
         ...optional('buildCommand', config.build?.command),
       },

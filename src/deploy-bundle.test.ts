@@ -198,7 +198,7 @@ describe('deploy-bundle — ceilings', () => {
   it('worker-module ceiling → bundle-too-large', async () => {
     const tmp = makeTmpDir();
     writeTree(tmp, { 'worker.mjs': 'export default { fetch() {} };// ' + 'x'.repeat(100) });
-    const shape: ProjectShape = { type: 'worker', entry: 'worker.mjs' };
+    const shape: ProjectShape = { type: 'worker', entry: 'worker.mjs', prebuilt: true };
     const res = await bundleProject(shape, tmp, { maxModuleBytes: 64 });
     assert.equal(res.ok, false);
     if (!res.ok) {
@@ -265,7 +265,7 @@ describe('deploy-bundle — worker modules', () => {
     // proves esbuild never touched it.
     const prebuilt = '// vinext build output — esbuild must not touch this\nexport default {\n  fetch() { return new Response("ok"); }\n};\n';
     writeTree(tmp, { '.vinext/worker.mjs': prebuilt });
-    const shape: ProjectShape = { type: 'worker', entry: '.vinext/worker.mjs' };
+    const shape: ProjectShape = { type: 'worker', entry: '.vinext/worker.mjs', prebuilt: true };
     const res = await bundleProject(shape, tmp);
     assert.equal(res.ok, true);
     if (res.ok) {
@@ -279,7 +279,7 @@ describe('deploy-bundle — worker modules', () => {
   it('ceilings still apply to pre-built modules', async () => {
     const tmp = makeTmpDir();
     writeTree(tmp, { 'worker.js': '// ' + 'z'.repeat(200) });
-    const shape: ProjectShape = { type: 'worker', entry: 'worker.js' };
+    const shape: ProjectShape = { type: 'worker', entry: 'worker.js', prebuilt: true };
     const res = await bundleProject(shape, tmp, { maxModuleBytes: 100 });
     assert.equal(res.ok, false);
     if (!res.ok) assert.equal(res.kind, 'bundle-too-large');
@@ -287,7 +287,7 @@ describe('deploy-bundle — worker modules', () => {
 
   it('a missing pre-built entry fails build-failed with the framework-build hint', async () => {
     const tmp = makeTmpDir();
-    const shape: ProjectShape = { type: 'worker', entry: '.vinext/worker.mjs' };
+    const shape: ProjectShape = { type: 'worker', entry: '.vinext/worker.mjs', prebuilt: true };
     const res = await bundleProject(shape, tmp);
     assert.equal(res.ok, false);
     if (!res.ok) {
@@ -303,7 +303,7 @@ describe('deploy-bundle — worker modules', () => {
       '.vinext/worker.mjs': prebuilt,
       '.vinext/assets/index.html': '<html/>',
     });
-    const shape: ProjectShape = { type: 'worker', entry: '.vinext/worker.mjs', assetsDir: '.vinext/assets' };
+    const shape: ProjectShape = { type: 'worker', entry: '.vinext/worker.mjs', assetsDir: '.vinext/assets', prebuilt: true };
     const res = await bundleProject(shape, tmp);
     assert.equal(res.ok, true);
     if (res.ok) {

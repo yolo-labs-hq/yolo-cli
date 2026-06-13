@@ -124,7 +124,7 @@ export async function bundleProject(
   let module: BundleSuccess['module'] = null;
   let moduleSource: BundleSuccess['moduleSource'] = null;
   if (shape.type === 'worker') {
-    const built = await buildWorkerModule(shape.entry, cwd, caps, warnings);
+    const built = await buildWorkerModule(shape.entry, cwd, shape.prebuilt === true, caps, warnings);
     if (!built.ok) return built;
     module = built.module;
     moduleSource = built.source;
@@ -254,6 +254,7 @@ type BuildModuleResult =
 async function buildWorkerModule(
   entry: string,
   cwd: string,
+  prebuilt: boolean,
   caps: Required<BundleCeilings>,
   warnings: string[],
 ): Promise<BuildModuleResult> {
@@ -262,8 +263,10 @@ async function buildWorkerModule(
   let name: string;
   let source: 'esbuild' | 'prebuilt';
 
-  if (/\.(js|mjs)$/i.test(entryAbs)) {
-    // Pre-built module (vinext/OpenNext output) — ship as-is, no esbuild.
+  // Ship as-is ONLY for an explicitly-configured built output (deploy.json
+  // worker.entry → .js/.mjs). Auto-detected `src/index.js` is SOURCE and must
+  // be bundled or its imports are dropped (codex P2 r6).
+  if (prebuilt) {
     try {
       contents = readFileSync(entryAbs);
     } catch {
