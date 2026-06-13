@@ -194,6 +194,14 @@ function printHelp(): void {
       '    [--port <n>]                            Port (default: $PORT, else 3000).',
       '    [--host <h>]                            Bind host (default: 0.0.0.0).',
       '    [--spa]                                 Serve index.html for unmatched routes (SPA mode).',
+      '  deploy [opts]                             Ship the cwd project (detect → build → bundle → upload).',
+      '    [--env <staging|prod>]                  Target env (default staging; prod needs operator approval).',
+      '    [--dry-run]                             Stop after bundling; print the manifest summary (offline).',
+      '    [--json]                                Progress to stderr; final JSON result on stdout.',
+      '  deploy init [--slug <s>] [--type <t>]     Create/link a hosting project; writes .yolo/deploy.json.',
+      '  deploy status [--json]                    Project + release status (incl. pending approvals).',
+      '  deploy logs [--tail] [--since <dur>]      Recent logs; --tail streams NDJSON.',
+      '  deploy rollback [releaseId] [--json]      Repoint the project to a previous release.',
       '  --version                                 Print substrate CLI version.',
       '  --help                                    Print this help.',
       '',
@@ -1346,6 +1354,13 @@ async function main(argv: string[]): Promise<number> {
   if (cmd === 'serve') {
     const { runServeCmd } = await import('./serve.js');
     return runServeCmd(args.slice(1));
+  }
+
+  if (cmd === 'deploy') {
+    // Lazy-load (serve precedent) so the deploy stack — incl. esbuild via
+    // deploy-bundle — never taxes `yolo plan` startup.
+    const { runDeployCmd } = await import('./deploy-cli.js');
+    return runDeployCmd(args.slice(1));
   }
 
   process.stderr.write(`yolo: unknown command '${cmd}'\n`);

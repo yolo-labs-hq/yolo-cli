@@ -1,0 +1,349 @@
+/**
+ * `.yolo/deploy.json` — the durable project↔hosting link (spec
+ * `docs/MANAGED_HOSTING_CLI_SPEC.md` §3).
+ *
+ * COMMITTED by design (the wrangler-config analog): gitignored `.yolo/`
+ * entries are per-machine state; `deploy.json` is durable shared
+ * identity so future sessions/teammates/CI ship to the SAME project
+ * instead of forking a new slug. No secrets live in it — the credential
+ * is the session JWT; `projectId` is non-secret and ownership-checked
+ * server-side on every call.
+ *
+ * Canonical write shape (mirrors `lockfile.ts` write discipline):
+ *   - JSON, 2-space indent, single trailing `\n`.
+ *   - Fixed key order per the spec example: $version, projectId, slug,
+ *     type, build{command,outputDir}, worker{entry,assetsDir},
+ *     compatibilityFlags, bindings. Absent optional fields are omitted.
+ *   - Same input → byte-identical output (idempotent re-write).
+ *
+ * Validation is lenient on PRESENCE (only `$version` is required —
+ * `init` may write a partial link before detection fills the rest) but
+ * strict on TYPES: a present field with the wrong shape is a structured
+ * error, never silently coerced. Unknown top-level keys are tolerated
+ * (forward compat) but not round-tripped by the canonical writer.
+ */
+
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+
+import type { ReadFileImpl } from './auth-context.js';
+
+// ─── Public types ─────────────────────────────────────────────────────────
+
+export interface DeployBuildConfig {
+  /** Build command run before bundling (e.g. `npm run build`). */
+  command?: string;
+  /** Static output dir relative to project root (e.g. `dist`). */
+  outputDir?: string;
+}
+
+export interface DeployWorkerConfig {
+  /**
+   * Worker entry relative to project root. By default it's treated as SOURCE
+   * and esbuild bundles it (so relative imports come along). Set
+   * `prebuilt: true` to ship `entry` byte-for-byte without esbuild — for a
+   * self-contained build output (vinext/OpenNext). Extension alone is NOT a
+   * reliable signal: a built bundle and a source file can both be `.js`
+   * (codex P2 r9).
+   */
+  entry?: string;
+  /**
+   * Ship `entry` as-is, skipping esbuild. Only for a self-contained built
+   * module — a source file with relative imports would lose its deps.
+   */
+  prebuilt?: boolean;
+  /** Static assets shipped alongside the worker (e.g. `.vinext/assets`). */
+  assetsDir?: string;
+}
+
+export interface DeployBinding {
+  /** Resource kind (`d1`, `r2`, `kv`, …). */
+  kind: string;
+  /** The binding name the worker code sees (e.g. `DB`). */
+  binding: string;
+  /** Extra provisioning hints are tolerated and preserved. */
+  [key: string]: unknown;
+}
+
+export interface DeployConfig {
+  $version: 1;
+  /** The durable link (`hp_…`). Absent until `yolo deploy init` links. */
+  projectId?: string;
+  /** Informational; the server is the source of truth. */
+  slug?: string;
+  type?: 'static' | 'worker';
+  build?: DeployBuildConfig;
+  worker?: DeployWorkerConfig;
+  /** Passed through ship/start → WfP upload metadata (Next.js needs `nodejs_compat`). */
+  compatibilityFlags?: string[];
+  /** Binding EXPECTATIONS; mismatch at ship is a warning, not a failure. */
+  bindings?: DeployBinding[];
+}
+
+export interface DeployConfigValidationError {
+  /** Dotted field path, e.g. `build.outputDir` or `bindings[1].binding`. */
+  path: string;
+  message: string;
+}
+
+export type ValidateDeployConfigResult =
+  | { ok: true; config: DeployConfig }
+  | { ok: false; errors: DeployConfigValidationError[] };
+
+export type ReadDeployConfigResult =
+  /** `config: null` ⇒ no `.yolo/deploy.json` exists (not an error — first-ship case). */
+  | { ok: true; config: DeployConfig | null; path: string }
+  | {
+      ok: false;
+      kind: 'malformed' | 'invalid';
+      path: string;
+      message: string;
+      errors?: DeployConfigValidationError[];
+    };
+
+export class DeployConfigError extends Error {
+  readonly code: 'invalid' | 'unwritable';
+  readonly errors?: DeployConfigValidationError[];
+  constructor(message: string, code: DeployConfigError['code'], errors?: DeployConfigValidationError[]) {
+    super(message);
+    this.name = 'DeployConfigError';
+    this.code = code;
+    this.errors = errors;
+  }
+}
+
+// ─── Public API ───────────────────────────────────────────────────────────
+
+/** Resolve the deploy.json path for a project root. */
+export function deployConfigPath(cwd: string): string {
+  return path.join(cwd, '.yolo', 'deploy.json');
+}
+
+/**
+ * Read `.yolo/deploy.json` from a project root. Absent file is the
+ * non-error `{ ok: true, config: null }` case (detection falls through
+ * to heuristics); malformed JSON or schema violations are structured
+ * failures so the CLI can print `FAIL [<reason>]` with field paths.
+ */
+export function readDeployConfig(
+  cwd: string,
+  readFileImpl: ReadFileImpl = defaultReadFile,
+): ReadDeployConfigResult {
+  const filePath = deployConfigPath(cwd);
+  const text = readFileImpl(filePath);
+  if (text === undefined) return { ok: true, config: null, path: filePath };
+  if (text.trim() === '') return { ok: true, config: null, path: filePath };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      kind: 'malformed',
+      path: filePath,
+      message: `malformed JSON in ${filePath}: ${msg}`,
+    };
+  }
+
+  const validated = validateDeployConfig(parsed);
+  if (!validated.ok) {
+    return {
+      ok: false,
+      kind: 'invalid',
+      path: filePath,
+      message:
+        `invalid deploy config at ${filePath}: ` +
+        validated.errors.map((e) => `${e.path}: ${e.message}`).join('; '),
+      errors: validated.errors,
+    };
+  }
+  return { ok: true, config: validated.config, path: filePath };
+}
+
+/**
+ * Write `.yolo/deploy.json` in canonical form (2-space JSON, fixed key
+ * order, trailing newline). Creates `.yolo/` if missing. Validates
+ * before touching disk and throws `DeployConfigError` on an invalid
+ * config or fs failure — a half-written link file is worse than none.
+ */
+export function writeDeployConfig(cwd: string, config: DeployConfig): string {
+  const validated = validateDeployConfig(config);
+  if (!validated.ok) {
+    throw new DeployConfigError(
+      'refusing to write invalid deploy config: ' +
+        validated.errors.map((e) => `${e.path}: ${e.message}`).join('; '),
+      'invalid',
+      validated.errors,
+    );
+  }
+  const filePath = deployConfigPath(cwd);
+  const dir = path.dirname(filePath);
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new DeployConfigError(`could not create ${dir}: ${msg}`, 'unwritable');
+  }
+  const text = JSON.stringify(canonicalize(validated.config), null, 2) + '\n';
+  try {
+    writeFileSync(filePath, text, 'utf8');
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new DeployConfigError(`could not write ${filePath}: ${msg}`, 'unwritable');
+  }
+  return filePath;
+}
+
+/**
+ * Schema validation per spec §3. Returns the value typed as
+ * `DeployConfig` on success or a full list of structured errors (all
+ * violations, not just the first) on failure. Pure — no I/O.
+ */
+export function validateDeployConfig(value: unknown): ValidateDeployConfigResult {
+  const errors: DeployConfigValidationError[] = [];
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return { ok: false, errors: [{ path: '$', message: `must be a JSON object, got ${describe(value)}` }] };
+  }
+  const obj = value as Record<string, unknown>;
+
+  if (obj.$version !== 1) {
+    errors.push({ path: '$version', message: `must be the number 1, got ${describe(obj.$version)}` });
+  }
+  checkOptionalString(obj, 'projectId', errors);
+  checkOptionalString(obj, 'slug', errors);
+  if (obj.type !== undefined && obj.type !== 'static' && obj.type !== 'worker') {
+    errors.push({ path: 'type', message: `must be 'static' or 'worker', got ${describe(obj.type)}` });
+  }
+
+  if (obj.build !== undefined) {
+    if (!isPlainObject(obj.build)) {
+      errors.push({ path: 'build', message: `must be an object, got ${describe(obj.build)}` });
+    } else {
+      checkOptionalString(obj.build, 'command', errors, 'build.');
+      checkOptionalString(obj.build, 'outputDir', errors, 'build.');
+    }
+  }
+
+  if (obj.worker !== undefined) {
+    if (!isPlainObject(obj.worker)) {
+      errors.push({ path: 'worker', message: `must be an object, got ${describe(obj.worker)}` });
+    } else {
+      checkOptionalString(obj.worker, 'entry', errors, 'worker.');
+      checkOptionalString(obj.worker, 'assetsDir', errors, 'worker.');
+      if (obj.worker.prebuilt !== undefined && typeof obj.worker.prebuilt !== 'boolean') {
+        errors.push({ path: 'worker.prebuilt', message: `must be a boolean, got ${describe(obj.worker.prebuilt)}` });
+      }
+    }
+  }
+
+  if (obj.compatibilityFlags !== undefined) {
+    if (!Array.isArray(obj.compatibilityFlags)) {
+      errors.push({
+        path: 'compatibilityFlags',
+        message: `must be an array of strings, got ${describe(obj.compatibilityFlags)}`,
+      });
+    } else {
+      obj.compatibilityFlags.forEach((flag, i) => {
+        if (typeof flag !== 'string' || flag.trim() === '') {
+          errors.push({ path: `compatibilityFlags[${i}]`, message: `must be a non-empty string, got ${describe(flag)}` });
+        }
+      });
+    }
+  }
+
+  if (obj.bindings !== undefined) {
+    if (!Array.isArray(obj.bindings)) {
+      errors.push({ path: 'bindings', message: `must be an array, got ${describe(obj.bindings)}` });
+    } else {
+      obj.bindings.forEach((b, i) => {
+        if (!isPlainObject(b)) {
+          errors.push({ path: `bindings[${i}]`, message: `must be an object, got ${describe(b)}` });
+          return;
+        }
+        if (typeof b.kind !== 'string' || b.kind.trim() === '') {
+          errors.push({ path: `bindings[${i}].kind`, message: `must be a non-empty string, got ${describe(b.kind)}` });
+        }
+        if (typeof b.binding !== 'string' || b.binding.trim() === '') {
+          errors.push({ path: `bindings[${i}].binding`, message: `must be a non-empty string, got ${describe(b.binding)}` });
+        }
+      });
+    }
+  }
+
+  if (errors.length > 0) return { ok: false, errors };
+  return { ok: true, config: obj as unknown as DeployConfig };
+}
+
+// ─── Internals ────────────────────────────────────────────────────────────
+
+/**
+ * Reorder to the spec's fixed key order, omitting absent optionals.
+ * Binding entries keep `kind`, `binding` first; extra hint keys follow
+ * lex-sorted (same rule the plan-file canonicalizer applies to
+ * free-form maps). Pure — does not mutate input.
+ */
+function canonicalize(config: DeployConfig): Record<string, unknown> {
+  const out: Record<string, unknown> = { $version: 1 };
+  if (config.projectId !== undefined) out.projectId = config.projectId;
+  if (config.slug !== undefined) out.slug = config.slug;
+  if (config.type !== undefined) out.type = config.type;
+  if (config.build !== undefined) {
+    const build: Record<string, unknown> = {};
+    if (config.build.command !== undefined) build.command = config.build.command;
+    if (config.build.outputDir !== undefined) build.outputDir = config.build.outputDir;
+    out.build = build;
+  }
+  if (config.worker !== undefined) {
+    const worker: Record<string, unknown> = {};
+    if (config.worker.entry !== undefined) worker.entry = config.worker.entry;
+    if (config.worker.prebuilt !== undefined) worker.prebuilt = config.worker.prebuilt;
+    if (config.worker.assetsDir !== undefined) worker.assetsDir = config.worker.assetsDir;
+    out.worker = worker;
+  }
+  if (config.compatibilityFlags !== undefined) out.compatibilityFlags = [...config.compatibilityFlags];
+  if (config.bindings !== undefined) {
+    out.bindings = config.bindings.map((b) => {
+      const entry: Record<string, unknown> = { kind: b.kind, binding: b.binding };
+      for (const key of Object.keys(b).sort()) {
+        if (key !== 'kind' && key !== 'binding') entry[key] = b[key];
+      }
+      return entry;
+    });
+  }
+  return out;
+}
+
+function checkOptionalString(
+  obj: Record<string, unknown>,
+  key: string,
+  errors: DeployConfigValidationError[],
+  prefix = '',
+): void {
+  const v = obj[key];
+  if (v === undefined) return;
+  if (typeof v !== 'string' || v.trim() === '') {
+    errors.push({ path: `${prefix}${key}`, message: `must be a non-empty string, got ${describe(v)}` });
+  }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function describe(value: unknown): string {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'array';
+  if (typeof value === 'string') return `'${value}'`;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return typeof value;
+}
+
+function defaultReadFile(filePath: string): string | undefined {
+  try {
+    return readFileSync(filePath, 'utf8');
+  } catch {
+    return undefined;
+  }
+}
