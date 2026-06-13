@@ -91,15 +91,25 @@ export function detectProjectShape(options: DetectOptions): DetectResult {
     config = result.config;
   }
 
+  // Package build command — computed up front so the pinned-static branch can
+  // fall back to it (codex P2 r11), same as the untyped package-build path.
+  const pkg = readPackageJson(cwd, read);
+  const pkgBuildCommand = pkg?.scripts?.build !== undefined ? buildCommandFor(cwd, read) : undefined;
+
   // ── 1. deploy.json `type` is authoritative ─────────────────────────────
   if (config?.type === 'static') {
+    const buildCommand = config.build?.command ?? pkgBuildCommand;
     const assetsDir =
       config.build?.outputDir ??
       resolveOutputDir(cwd, read) ??
-      (read(path.join(cwd, 'index.html')) !== undefined ? '.' : undefined);
+      (read(path.join(cwd, 'index.html')) !== undefined ? '.' : undefined) ??
+      // A clean checkout whose build hasn't run yet: with a build command we
+      // can default the output dir (build creates it, then bundle reads it) —
+      // `yolo deploy init --type static` writes the pin but no build.command.
+      (buildCommand !== undefined ? OUTPUT_DIR_CANDIDATES[0] : undefined);
     if (assetsDir === undefined) {
       return fail(
-        ".yolo/deploy.json sets type 'static' but no output dir was found: set build.outputDir, or build the project so one of " +
+        ".yolo/deploy.json sets type 'static' but no output dir was found: set build.outputDir, add a package.json build script, or build the project so one of " +
           `${OUTPUT_DIR_CANDIDATES.join('/')} contains index.html`,
       );
     }
@@ -107,7 +117,7 @@ export function detectProjectShape(options: DetectOptions): DetectResult {
       {
         type: 'static',
         assetsDir,
-        ...optional('buildCommand', config.build?.command),
+        ...optional('buildCommand', buildCommand),
       },
       'deploy-json',
     );
@@ -137,9 +147,7 @@ export function detectProjectShape(options: DetectOptions): DetectResult {
     );
   }
 
-  // Shared inputs for steps 2–3.
-  const pkg = readPackageJson(cwd, read);
-  const pkgBuildCommand = pkg?.scripts?.build !== undefined ? buildCommandFor(cwd, read) : undefined;
+  // pkg / pkgBuildCommand are computed above (reused by steps 2–6).
 
   // ── 2. wrangler.jsonc / wrangler.toml ──────────────────────────────────
   const wrangler = readWranglerConfig(cwd, read);
