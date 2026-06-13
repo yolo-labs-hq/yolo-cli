@@ -120,10 +120,11 @@ export function detectProjectShape(options: DetectOptions): DetectResult {
         ".yolo/deploy.json sets type 'worker' but no entry was found: set worker.entry (source or a pre-built .js/.mjs module)",
       );
     }
-    // Prebuilt skip applies ONLY to an explicitly-configured built output —
-    // a deploy.json worker.entry ending .js/.mjs. A fallback-discovered entry
-    // (or any other source) is bundled by esbuild.
-    const prebuilt = explicitEntry !== undefined && /\.(?:js|mjs)$/i.test(explicitEntry);
+    // Prebuilt skip is OPT-IN via deploy.json worker.prebuilt (codex P2 r9) —
+    // the extension is not a reliable signal (a built bundle and a source
+    // file can both be .js, and skipping esbuild on source drops its
+    // imports). Only an explicitly-set entry can be prebuilt.
+    const prebuilt = config.worker?.prebuilt === true && explicitEntry !== undefined;
     return hit(
       {
         type: 'worker',

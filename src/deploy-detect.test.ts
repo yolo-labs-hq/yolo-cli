@@ -56,11 +56,11 @@ describe('deploy-detect — deploy.json type wins', () => {
     }
   });
 
-  it('worker type with prebuilt entry + assetsDir (the vinext shape)', () => {
+  it('worker type with prebuilt:true entry + assetsDir (the vinext shape)', () => {
     const config: DeployConfig = {
       $version: 1,
       type: 'worker',
-      worker: { entry: '.vinext/worker.mjs', assetsDir: '.vinext/assets' },
+      worker: { entry: '.vinext/worker.mjs', prebuilt: true, assetsDir: '.vinext/assets' },
       compatibilityFlags: ['nodejs_compat'],
     };
     const res = detectProjectShape({ cwd: '/proj', config, readFileImpl: fileStub('/proj', {}) });
@@ -76,7 +76,7 @@ describe('deploy-detect — deploy.json type wins', () => {
     }
   });
 
-  it('auto-detected src/index.js is SOURCE — not flagged prebuilt (codex P2 r6)', () => {
+  it('auto-detected src/index.js is SOURCE — never prebuilt (codex P2 r6)', () => {
     const res = detectProjectShape({
       cwd: '/proj',
       readFileImpl: fileStub('/proj', {
@@ -91,12 +91,14 @@ describe('deploy-detect — deploy.json type wins', () => {
     }
   });
 
-  it('deploy.json worker.entry pointing at SOURCE .ts is not prebuilt', () => {
-    const config: DeployConfig = { $version: 1, type: 'worker', worker: { entry: 'src/index.ts' } };
+  it('a .js/.mjs worker.entry WITHOUT prebuilt:true is bundled, not shipped raw (codex P2 r9)', () => {
+    // Extension is not a prebuilt signal — a source src/worker.js with imports
+    // must go through esbuild or its deps are dropped.
+    const config: DeployConfig = { $version: 1, type: 'worker', worker: { entry: 'src/worker.js' } };
     const res = detectProjectShape({
       cwd: '/proj',
       config,
-      readFileImpl: fileStub('/proj', { 'src/index.ts': 'export default { fetch() {} };' }),
+      readFileImpl: fileStub('/proj', { 'src/worker.js': 'import x from "./y.js"; export default { fetch() { return x; } };' }),
     });
     assert.equal(res.ok, true);
     if (res.ok) assert.notEqual((res.shape as { prebuilt?: boolean }).prebuilt, true);

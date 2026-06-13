@@ -34,7 +34,7 @@ const FULL_CONFIG: DeployConfig = {
   slug: 'my-app',
   type: 'worker',
   build: { command: 'npm run build', outputDir: 'dist' },
-  worker: { entry: '.vinext/worker.mjs', assetsDir: '.vinext/assets' },
+  worker: { entry: '.vinext/worker.mjs', prebuilt: true, assetsDir: '.vinext/assets' },
   compatibilityFlags: ['nodejs_compat'],
   bindings: [{ kind: 'd1', binding: 'DB' }],
 };
@@ -136,6 +136,13 @@ describe('deploy-config — validateDeployConfig', () => {
       const paths = res.errors.map((e) => e.path).sort();
       assert.deepEqual(paths, ['bindings[0].binding', 'bindings[1]', 'compatibilityFlags[1]', 'projectId']);
     }
+  });
+
+  it('accepts worker.prebuilt as a boolean and rejects a non-boolean (codex P2 r9)', () => {
+    assert.equal(validateDeployConfig({ $version: 1, worker: { entry: 'x.js', prebuilt: true } }).ok, true);
+    const bad = validateDeployConfig({ $version: 1, worker: { entry: 'x.js', prebuilt: 'yes' } });
+    assert.equal(bad.ok, false);
+    if (!bad.ok) assert.equal(bad.errors[0]!.path, 'worker.prebuilt');
   });
 
   it('rejects non-object build / worker sections', () => {

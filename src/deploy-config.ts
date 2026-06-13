@@ -39,11 +39,19 @@ export interface DeployBuildConfig {
 
 export interface DeployWorkerConfig {
   /**
-   * Worker entry relative to project root. May point at SOURCE
-   * (`src/index.ts`, esbuild bundles it) or at a PRE-BUILT `.js`/`.mjs`
-   * module (vinext/OpenNext output — shipped as-is, esbuild skipped).
+   * Worker entry relative to project root. By default it's treated as SOURCE
+   * and esbuild bundles it (so relative imports come along). Set
+   * `prebuilt: true` to ship `entry` byte-for-byte without esbuild — for a
+   * self-contained build output (vinext/OpenNext). Extension alone is NOT a
+   * reliable signal: a built bundle and a source file can both be `.js`
+   * (codex P2 r9).
    */
   entry?: string;
+  /**
+   * Ship `entry` as-is, skipping esbuild. Only for a self-contained built
+   * module — a source file with relative imports would lose its deps.
+   */
+  prebuilt?: boolean;
   /** Static assets shipped alongside the worker (e.g. `.vinext/assets`). */
   assetsDir?: string;
 }
@@ -224,6 +232,9 @@ export function validateDeployConfig(value: unknown): ValidateDeployConfigResult
     } else {
       checkOptionalString(obj.worker, 'entry', errors, 'worker.');
       checkOptionalString(obj.worker, 'assetsDir', errors, 'worker.');
+      if (obj.worker.prebuilt !== undefined && typeof obj.worker.prebuilt !== 'boolean') {
+        errors.push({ path: 'worker.prebuilt', message: `must be a boolean, got ${describe(obj.worker.prebuilt)}` });
+      }
     }
   }
 
@@ -287,6 +298,7 @@ function canonicalize(config: DeployConfig): Record<string, unknown> {
   if (config.worker !== undefined) {
     const worker: Record<string, unknown> = {};
     if (config.worker.entry !== undefined) worker.entry = config.worker.entry;
+    if (config.worker.prebuilt !== undefined) worker.prebuilt = config.worker.prebuilt;
     if (config.worker.assetsDir !== undefined) worker.assetsDir = config.worker.assetsDir;
     out.worker = worker;
   }
