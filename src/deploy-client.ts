@@ -349,6 +349,55 @@ export async function rollbackProject(
   return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/rollback`, { method: 'POST', jsonBody: request });
 }
 
+export interface D1QueryRow {
+  [column: string]: unknown;
+}
+
+export interface D1QueryResult {
+  /** Result rows (SELECT) — empty for writes. */
+  results: D1QueryRow[];
+  /** Optional CF/D1 meta (rows_read, changes, …) — passed through as-is. */
+  meta?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+/**
+ * POST /v1/deploy/projects/:id/resources/:rid/query (Phase 2).
+ *
+ * The CLI does NOT know the resourceId — it targets the project's SOLE
+ * D1 by sending the `default` segment (the route's `resourceId?`
+ * contract; the server resolves the lone D1). Writes need
+ * `allowWrite:true`; DDL/PRAGMA/ATTACH are blocked server-side
+ * (`sql-not-allowed`). 4xx refusal reasons pass through verbatim as the
+ * structured failure `kind`.
+ */
+export async function queryD1(
+  ctx: DeployContext,
+  projectId: string,
+  sql: string,
+  options: { params?: Array<string | number | boolean | null>; allowWrite?: boolean } = {},
+): Promise<ClientResult<D1QueryResult>> {
+  const result = await jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/resources/default/query`, {
+    method: 'POST',
+    jsonBody: {
+      sql,
+      ...(options.params !== undefined ? { params: options.params } : {}),
+      allowWrite: options.allowWrite ?? false,
+    },
+  });
+  if (!result.ok) return result;
+  const value = (result.value && typeof result.value === 'object' ? result.value : {}) as Record<string, unknown>;
+  const results = Array.isArray(value.results)
+    ? (value.results as D1QueryRow[])
+    : Array.isArray(value.rows)
+      ? (value.rows as D1QueryRow[])
+      : [];
+  return {
+    ok: true,
+    value: { ...value, results, meta: value.meta && typeof value.meta === 'object' ? (value.meta as Record<string, unknown>) : undefined },
+  };
+}
+
 /** GET /v1/deploy/projects/:id/logs (buffered variant). */
 export async function getLogs(
   ctx: DeployContext,

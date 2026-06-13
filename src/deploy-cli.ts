@@ -39,8 +39,10 @@ import {
   rollbackProject,
   getLogs,
   tailLogs,
+  queryD1,
   type DeployContext,
   type DeployFetchLike,
+  type D1QueryRow,
 } from './deploy-client.js';
 import { readDeployConfig, writeDeployConfig, type DeployConfig } from './deploy-config.js';
 import type { ReadFileImpl } from './auth-context.js';
@@ -66,6 +68,7 @@ export interface DeployCliDeps {
   rollbackProjectImpl?: typeof rollbackProject;
   getLogsImpl?: typeof getLogs;
   tailLogsImpl?: typeof tailLogs;
+  queryD1Impl?: typeof queryD1;
   shipDeps?: DeployShipDeps;
 }
 
@@ -75,6 +78,7 @@ const USAGE = [
   '       yolo deploy status [--json]',
   '       yolo deploy logs [--tail] [--since <dur>] [--json]',
   '       yolo deploy rollback [releaseId] [--json]',
+  '       yolo deploy db query "<sql>" [--json]',
 ].join('\n');
 
 // ─── Entry ────────────────────────────────────────────────────────────────
@@ -92,10 +96,7 @@ export async function runDeployCmd(args: string[], deps: DeployCliDeps = {}): Pr
   if (sub === 'status') return runStatusCmd(args.slice(1), deps, io);
   if (sub === 'logs') return runLogsCmd(args.slice(1), deps, io);
   if (sub === 'rollback') return runRollbackCmd(args.slice(1), deps, io);
-  if (sub === 'db') {
-    io.err('yolo deploy: `db query` is not available yet (Phase 2)\n');
-    return 64;
-  }
+  if (sub === 'db') return runDbCmd(args.slice(1), deps, io);
   if (sub && !sub.startsWith('--')) {
     io.err(`yolo deploy: unknown subcommand '${sub}'\n${USAGE}\n`);
     return 64;
@@ -530,6 +531,115 @@ async function runRollbackCmd(args: string[], deps: DeployCliDeps, io: DeployIo)
   const url = str(raw.url) ?? str(release.url);
   io.out(`OK: rolled back ${linked.slug ?? linked.projectId} to release ${releaseId}${url ? ` → ${url}` : ''}\n`);
   return 0;
+}
+
+// ─── db query (Phase 2) ─────────────────────────────────────────────────────
+//
+// The ONE ergonomic in-pod data verb. Provisioning + env/secret writes are
+// MCP-only (T2/T3, no cwd dependency) — `db query` is here because it's a
+// frequent inspect-your-data loop and reads the linked project from
+// .yolo/deploy.json like every other CLI verb. It targets the project's sole
+// D1; multi-D1 selection stays an MCP concern (deploy.db_query resourceId).
+
+interface ParsedDbQueryArgs {
+  ok: true;
+  sql: string;
+  jsonOutput: boolean;
+}
+
+export function parseDbQueryArgs(args: string[]): ParsedDbQueryArgs | ParseError {
+  let sql: string | undefined;
+  let jsonOutput = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--json') {
+      jsonOutput = true;
+    } else if (a.startsWith('--')) {
+      return { ok: false, message: `unknown option: ${a}` };
+    } else if (sql === undefined) {
+      sql = a;
+    } else {
+      return { ok: false, message: `unexpected positional argument: ${a} (quote the whole SQL statement as one argument)` };
+    }
+  }
+  if (sql === undefined || sql.trim() === '') {
+    return { ok: false, message: 'a SQL statement is required: yolo deploy db query "<sql>"' };
+  }
+  return { ok: true, sql, jsonOutput };
+}
+
+async function runDbCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Promise<number> {
+  const verb = args[0];
+  // Only `db query` is a CLI verb. Provisioning/env/secret are MCP-only;
+  // reject other db subcommands with usage + exit 64.
+  if (verb !== 'query') {
+    io.err(
+      `yolo deploy db: unknown subcommand '${verb ?? ''}'\n` +
+        'Usage: yolo deploy db query "<sql>" [--json]\n' +
+        'note: provisioning (db_provision/kv_create/bucket_create), env_set and set_secret are MCP-only (no CLI verb).\n',
+    );
+    return 64;
+  }
+
+  const parsed = parseDbQueryArgs(args.slice(1));
+  if (!parsed.ok) {
+    io.err(`yolo deploy db query: ${parsed.message}\nUsage: yolo deploy db query "<sql>" [--json]\n`);
+    return 64;
+  }
+  const linked = requireLink(deps, io);
+  if (!linked.ok) return linked.exitCode;
+  const auth = resolveAuth(deps);
+  if (!auth.ok) {
+    io.err(`${formatFail({ kind: 'auth', message: auth.message })}\n`);
+    return 78;
+  }
+
+  const query = deps.queryD1Impl ?? queryD1;
+  const result = await query(auth.context, linked.projectId, parsed.sql);
+  if (!result.ok) {
+    io.err(`${formatFail(result)}\n`);
+    return exitCodeForFailure(result.kind);
+  }
+  if (parsed.jsonOutput) {
+    io.out(`${JSON.stringify(result.value, null, 2)}\n`);
+    return 0;
+  }
+  io.out(`${formatRowsTable(result.value.results)}\n`);
+  return 0;
+}
+
+/**
+ * Render D1 rows as a simple aligned text table. Columns are the union of
+ * keys across rows (first-seen order). Empty result → a friendly "(0 rows)".
+ */
+export function formatRowsTable(rows: D1QueryRow[]): string {
+  if (!rows || rows.length === 0) return '(0 rows)';
+  const columns: string[] = [];
+  for (const row of rows) {
+    for (const key of Object.keys(row)) {
+      if (!columns.includes(key)) columns.push(key);
+    }
+  }
+  if (columns.length === 0) return `(${rows.length} row${rows.length === 1 ? '' : 's'}, no columns)`;
+
+  const cell = (value: unknown): string => {
+    if (value === null || value === undefined) return 'NULL';
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+  };
+
+  const widths = columns.map((col) =>
+    Math.max(col.length, ...rows.map((row) => cell(row[col]).length)),
+  );
+  const pad = (text: string, width: number) => text + ' '.repeat(Math.max(0, width - text.length));
+
+  const header = columns.map((col, i) => pad(col, widths[i]!)).join(' | ');
+  const separator = widths.map((w) => '-'.repeat(w)).join('-+-');
+  const body = rows.map((row) => columns.map((col, i) => pad(cell(row[col]), widths[i]!)).join(' | '));
+
+  const footer = `(${rows.length} row${rows.length === 1 ? '' : 's'})`;
+  return [header, separator, ...body, footer].join('\n');
 }
 
 // ─── Shared helpers ───────────────────────────────────────────────────────

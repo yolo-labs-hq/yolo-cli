@@ -18,6 +18,7 @@ import {
   rollbackProject,
   getLogs,
   tailLogs,
+  queryD1,
   type DeployContext,
   type DeployFetchLike,
 } from './deploy-client.js';
@@ -407,5 +408,62 @@ describe('deploy-client — thin wrappers', () => {
     const result = await tailLogs(makeContext(fetch), 'hp_9', {}, () => undefined);
     assert.equal(result.ok, false);
     if (!result.ok) assert.equal(result.kind, 'hosting-disabled');
+  });
+});
+
+// ─── queryD1 (Phase 2) ─────────────────────────────────────────────────────
+
+describe('deploy-client — queryD1', () => {
+  it("POSTs to the sole-D1 'default' segment with allowWrite:false by default", async () => {
+    const { fetch, calls } = makeFetchStub({ jsonBody: { results: [{ id: 1 }] } });
+    const result = await queryD1(makeContext(fetch), 'hp_9', 'SELECT * FROM t');
+    assert.equal(result.ok, true);
+    if (result.ok) assert.deepEqual(result.value.results, [{ id: 1 }]);
+    assert.equal(calls[0]!.url, 'https://api.example.com/v1/deploy/projects/hp_9/resources/default/query');
+    assert.equal(calls[0]!.method, 'POST');
+    assert.equal(calls[0]!.headers['Authorization'], 'Bearer tok-env');
+    assert.deepEqual(JSON.parse(calls[0]!.body as string), { sql: 'SELECT * FROM t', allowWrite: false });
+  });
+
+  it('threads params and allowWrite through', async () => {
+    const { fetch, calls } = makeFetchStub({ jsonBody: { results: [] } });
+    await queryD1(makeContext(fetch), 'hp_9', 'UPDATE t SET x=? WHERE id=?', { params: ['v', 3], allowWrite: true });
+    assert.deepEqual(JSON.parse(calls[0]!.body as string), {
+      sql: 'UPDATE t SET x=? WHERE id=?',
+      params: ['v', 3],
+      allowWrite: true,
+    });
+  });
+
+  it('normalizes a missing results array to []', async () => {
+    const { fetch } = makeFetchStub({ jsonBody: { meta: { rows_read: 0 } } });
+    const result = await queryD1(makeContext(fetch), 'hp_9', 'SELECT 1 WHERE 0');
+    assert.equal(result.ok, true);
+    if (result.ok) assert.deepEqual(result.value.results, []);
+  });
+
+  it('passes the sql-not-allowed refusal reason through verbatim', async () => {
+    const { fetch } = makeFetchStub({
+      ok: false,
+      status: 403,
+      jsonBody: { ok: false, reason: 'sql-not-allowed', message: 'writes require allowWrite:true' },
+    });
+    const result = await queryD1(makeContext(fetch), 'hp_9', 'DELETE FROM t');
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.kind, 'sql-not-allowed');
+      assert.equal(result.status, 403);
+    }
+  });
+
+  it('passes resource-not-found (no D1 provisioned yet) through', async () => {
+    const { fetch } = makeFetchStub({
+      ok: false,
+      status: 404,
+      jsonBody: { ok: false, reason: 'resource-not-found', message: 'no D1 on this project' },
+    });
+    const result = await queryD1(makeContext(fetch), 'hp_9', 'SELECT 1');
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.kind, 'resource-not-found');
   });
 });

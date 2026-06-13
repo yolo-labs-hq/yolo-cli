@@ -8,7 +8,14 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { runDeployCmd, parseSinceMinutes, type DeployCliDeps, type DeployIo } from './deploy-cli.js';
+import {
+  runDeployCmd,
+  parseSinceMinutes,
+  parseDbQueryArgs,
+  formatRowsTable,
+  type DeployCliDeps,
+  type DeployIo,
+} from './deploy-cli.js';
 import type { DeployShipResult } from './deploy-ship.js';
 
 const ENV = { YOLO_COMMON_API_URL: 'https://api.example.com', YOLO_API_TOKEN: 'tok', HOME: '/home/test' };
@@ -86,11 +93,18 @@ describe('deploy-cli — usage & dispatch', () => {
     assert.match(io.stderr.join(''), /unknown subcommand 'promote'/);
   });
 
-  it('refuses db query (Phase 2) with exit 64', async () => {
+  it('rejects an unknown db subcommand with exit 64 + MCP-only note', async () => {
     const io = makeIo();
-    const code = await runDeployCmd(['db', 'query', 'select 1'], baseDeps(io));
+    const code = await runDeployCmd(['db', 'provision'], baseDeps(io));
     assert.equal(code, 64);
-    assert.match(io.stderr.join(''), /Phase 2/);
+    assert.match(io.stderr.join(''), /unknown subcommand 'provision'/);
+    assert.match(io.stderr.join(''), /MCP-only/);
+  });
+
+  it('rejects a bare `db` (no verb) with exit 64', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(['db'], baseDeps(io));
+    assert.equal(code, 64);
   });
 
   it('prints deploy usage on --help with exit 0', async () => {
@@ -430,5 +444,122 @@ describe('deploy-cli — rollback', () => {
     );
     assert.equal(code, 2);
     assert.match(io.stderr.join(''), /FAIL \[release-not-found\]/);
+  });
+});
+
+// ─── db query (Phase 2) ─────────────────────────────────────────────────────
+
+describe('deploy-cli — db query arg parsing', () => {
+  it('requires a SQL statement (exit 64 on empty)', () => {
+    assert.equal(parseDbQueryArgs([]).ok, false);
+    assert.equal(parseDbQueryArgs(['   ']).ok, false);
+  });
+
+  it('takes the quoted SQL as a single positional and the --json flag', () => {
+    const r = parseDbQueryArgs(['SELECT * FROM users', '--json']);
+    assert.equal(r.ok, true);
+    if (r.ok) {
+      assert.equal(r.sql, 'SELECT * FROM users');
+      assert.equal(r.jsonOutput, true);
+    }
+  });
+
+  it('rejects a second positional (unquoted SQL) with a quoting hint', () => {
+    const r = parseDbQueryArgs(['SELECT', '*']);
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.match(r.message, /quote the whole SQL/);
+  });
+
+  it('rejects an unknown flag', () => {
+    assert.equal(parseDbQueryArgs(['SELECT 1', '--bogus']).ok, false);
+  });
+});
+
+describe('deploy-cli — db query execution', () => {
+  it('resolves the linked project, queries the sole D1, prints a table, exits 0', async () => {
+    const io = makeIo();
+    let seen: { projectId?: string; sql?: string } = {};
+    const code = await runDeployCmd(
+      ['db', 'query', 'SELECT id, name FROM users'],
+      baseDeps(io, {
+        queryD1Impl: async (_ctx, projectId, sql) => {
+          seen = { projectId, sql };
+          return { ok: true, value: { results: [{ id: 1, name: 'ada' }, { id: 2, name: 'bob' }] } };
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.deepEqual(seen, { projectId: 'hp_8f3a', sql: 'SELECT id, name FROM users' });
+    const out = io.stdout.join('');
+    assert.match(out, /id \| name/);
+    assert.match(out, /1  \| ada/);
+    assert.match(out, /\(2 rows\)/);
+  });
+
+  it('prints (0 rows) for an empty result set', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['db', 'query', 'SELECT 1 WHERE 0'],
+      baseDeps(io, { queryD1Impl: async () => ({ ok: true, value: { results: [] } }) }),
+    );
+    assert.equal(code, 0);
+    assert.match(io.stdout.join(''), /\(0 rows\)/);
+  });
+
+  it('--json prints the raw response (no table)', async () => {
+    const io = makeIo();
+    await runDeployCmd(
+      ['db', 'query', 'SELECT 1 AS n', '--json'],
+      baseDeps(io, { queryD1Impl: async () => ({ ok: true, value: { results: [{ n: 1 }], meta: { rows_read: 1 } } }) }),
+    );
+    assert.deepEqual(JSON.parse(io.stdout.join('')), { results: [{ n: 1 }], meta: { rows_read: 1 } });
+  });
+
+  it('passes a sql-not-allowed refusal through with exit 2', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['db', 'query', 'DELETE FROM users'],
+      baseDeps(io, {
+        queryD1Impl: async () => ({ ok: false, kind: 'sql-not-allowed', message: 'writes need allowWrite', status: 403 }),
+      }),
+    );
+    assert.equal(code, 2);
+    assert.match(io.stderr.join(''), /FAIL \[sql-not-allowed\]/);
+  });
+
+  it('fails not-linked (exit 1) when there is no deploy.json', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['db', 'query', 'SELECT 1'],
+      baseDeps(io, { readDeployConfigImpl: () => linked(null) }),
+    );
+    assert.equal(code, 1);
+    assert.match(io.stderr.join(''), /FAIL \[not-linked\]/);
+  });
+});
+
+describe('deploy-cli — formatRowsTable', () => {
+  it('renders a header, separator, aligned rows, and a footer', () => {
+    const table = formatRowsTable([{ id: 1, name: 'ada' }, { id: 22, name: 'b' }]);
+    const lines = table.split('\n');
+    assert.match(lines[0]!, /id \| name/);
+    assert.match(lines[1]!, /^--/);
+    assert.equal(lines[lines.length - 1], '(2 rows)');
+  });
+
+  it('renders NULL for null/undefined and JSON for objects', () => {
+    const table = formatRowsTable([{ a: null, b: { x: 1 } }]);
+    assert.match(table, /NULL/);
+    assert.match(table, /\{"x":1\}/);
+  });
+
+  it('unions columns across rows with differing shapes', () => {
+    const table = formatRowsTable([{ a: 1 }, { b: 2 }]);
+    // Header has both columns (padded to data width — 'NULL' widens each to 4).
+    assert.match(table.split('\n')[0]!, /a +\| b/);
+  });
+
+  it('returns (0 rows) for an empty array', () => {
+    assert.equal(formatRowsTable([]), '(0 rows)');
   });
 });
