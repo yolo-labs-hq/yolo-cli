@@ -275,6 +275,33 @@ describe('deploy-bundle — worker modules', () => {
     }
   });
 
+  it('bundles a Worker that imports @yololabs/flexdb WITHOUT it installed (vendored)', async () => {
+    const tmp = makeTmpDir();
+    // No node_modules / no install — the deploy bundler must vendor FlexDB.
+    writeTree(tmp, {
+      'src/index.ts': [
+        "import { FlexDB } from '@yololabs/flexdb';",
+        'export default {',
+        '  async fetch(req: Request, env: any): Promise<Response> {',
+        '    const db = new FlexDB(env.DB);',
+        "    await db.collection('todos').insertOne({ title: 'x' });",
+        '    return new Response("ok");',
+        '  },',
+        '};',
+      ].join('\n'),
+    });
+    const shape: ProjectShape = { type: 'worker', entry: 'src/index.ts' };
+    const res = await bundleProject(shape, tmp);
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      assert.equal(res.moduleSource, 'esbuild');
+      const text = Buffer.from(res.module!.contents).toString('utf8');
+      // FlexDB's code is inlined (minified), and nothing left unresolved.
+      assert.ok(text.includes('_flexdb_documents'), 'FlexDB engine inlined into the bundle');
+      assert.ok(!text.includes('@yololabs/flexdb'), 'no unresolved package specifier');
+    }
+  });
+
   it('a broken entry fails build-failed (esbuild error surfaced, not thrown)', async () => {
     const tmp = makeTmpDir();
     // The import must be USED — esbuild elides unused TS imports before

@@ -1,6 +1,6 @@
 {
   "name": "@yololabs/yolo-cli",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "YOLO Studio substrate CLI — owns yolo plan/workspace/artifact substrate-tooling commands. Distinct from yolo-code (the agent CLI) and yolo-router (the LLM gateway client).",
   "license": "MIT",
   "type": "module",
@@ -12,7 +12,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && cp src/plan-frontmatter.schema.json dist/",
+    "build": "tsc -p tsconfig.json && cp src/plan-frontmatter.schema.json dist/ && node scripts/build-vendored-flexdb.mjs",
     "test": "npm run build && node --test --test-reporter=spec dist/*.test.js",
     "clean": "rm -rf dist"
   },

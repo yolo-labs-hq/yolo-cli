@@ -32,11 +32,73 @@
  */
 
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
 
+import type { Plugin } from 'esbuild';
+
 import type { ProjectShape } from './deploy-detect.js';
+
+// ─── Vendored @yololabs/flexdb ─────────────────────────────────────────────
+//
+// FlexDB is not published to npm yet (it will be). Until then, the deploy
+// bundler resolves `import { FlexDB } from '@yololabs/flexdb'` to a copy
+// vendored into the CLI's dist (built by scripts/build-vendored-flexdb.mjs), so
+// a customer Worker can use FlexDB without installing it. A real installed copy
+// is preferred once the package is published — see vendoredFlexdbPlugin.
+
+let cachedFlexdbSource: string | null | undefined;
+
+/** The vendored FlexDB bundle shipped in the CLI's dist, or null if absent (unbuilt dev tree). */
+function readVendoredFlexdb(): string | null {
+  if (cachedFlexdbSource !== undefined) return cachedFlexdbSource;
+  try {
+    const p = fileURLToPath(new URL('./vendored/flexdb.mjs', import.meta.url));
+    cachedFlexdbSource = existsSync(p) ? readFileSync(p, 'utf8') : null;
+  } catch {
+    cachedFlexdbSource = null;
+  }
+  return cachedFlexdbSource;
+}
+
+/**
+ * esbuild plugin that supplies `@yololabs/flexdb` from the CLI's vendored copy
+ * when the project hasn't installed it. A real installed copy (post-publish) is
+ * preferred. Returns null when no vendored bundle is present, leaving esbuild's
+ * default resolution untouched.
+ */
+function vendoredFlexdbPlugin(): Plugin | null {
+  const source = readVendoredFlexdb();
+  if (source === null) return null;
+  const NS = 'yolo-vendored-flexdb';
+  const SPECIFIER = '@yololabs/flexdb';
+  return {
+    name: 'yolo-vendored-flexdb',
+    setup(build) {
+      build.onResolve({ filter: /^@yololabs\/flexdb$/ }, async (args) => {
+        // Re-entry guard: our build.resolve() below re-fires this same filter.
+        if ((args.pluginData as { vendored?: boolean } | undefined)?.vendored) return null;
+        // Prefer a real installed copy if the project has one (post-publish).
+        const real = await build.resolve(args.path, {
+          importer: args.importer,
+          resolveDir: args.resolveDir,
+          kind: args.kind,
+          pluginData: { vendored: true },
+        });
+        if (real.errors.length === 0 && real.path) return real;
+        // Otherwise route to the vendored virtual module.
+        return { path: SPECIFIER, namespace: NS };
+      });
+      build.onLoad({ filter: /.*/, namespace: NS }, () => ({
+        contents: source,
+        loader: 'js',
+        resolveDir: '/',
+      }));
+    },
+  };
+}
 
 // ─── Public types ─────────────────────────────────────────────────────────
 
@@ -282,6 +344,9 @@ async function buildWorkerModule(
   } else {
     // Lazy-load so non-deploy verbs never pay esbuild's startup cost.
     const esbuild = await import('esbuild');
+    // Vendor @yololabs/flexdb (not yet published) so a customer Worker can
+    // `import { FlexDB } from '@yololabs/flexdb'` without installing it.
+    const flexdbPlugin = vendoredFlexdbPlugin();
     let result;
     try {
       result = await esbuild.build({
@@ -295,6 +360,7 @@ async function buildWorkerModule(
         minify: true,
         absWorkingDir: path.resolve(cwd),
         logLevel: 'silent',
+        plugins: flexdbPlugin ? [flexdbPlugin] : [],
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
