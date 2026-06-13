@@ -203,6 +203,24 @@ export function detectProjectShape(options: DetectOptions): DetectResult {
     return hit({ type: 'worker', entry }, 'worker-entry');
   }
 
+  // ── 6. build-script static with no output yet (clean checkout) ──────────
+  // Detection is offline and runs BEFORE the build, so a fresh static app's
+  // output dir doesn't exist yet (codex P2 r8). We've now ruled out a worker
+  // entry, so a `build` script means static: default the assets dir to the
+  // configured value or `dist`. The orchestrator runs the build, then bundle
+  // reads it — a wrong guess fails later with a clear "assets dir not found"
+  // pointing the user to set build.outputDir.
+  if (pkgBuildCommand !== undefined) {
+    return hit(
+      {
+        type: 'static',
+        assetsDir: config?.build?.outputDir ?? OUTPUT_DIR_CANDIDATES[0]!,
+        buildCommand: config?.build?.command ?? pkgBuildCommand,
+      },
+      'package-build',
+    );
+  }
+
   // ── 6. detect-failed ────────────────────────────────────────────────────
   return fail(
     `could not detect a deployable project in ${cwd}: no .yolo/deploy.json type, ` +

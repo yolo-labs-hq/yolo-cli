@@ -299,6 +299,34 @@ describe('deploy-detect — package.json build script', () => {
       assert.deepEqual(res.shape, { type: 'worker', entry: 'src/index.ts' });
     }
   });
+
+  it('fresh static checkout (build script, no built output yet, no worker) defaults to dist (codex P2 r8)', () => {
+    const tmp = makeTmpDir();
+    // No dist/ exists yet — the build hasn't run. Detection is offline and
+    // precedes the build, so it must still resolve a target output dir.
+    writeTree(tmp, {
+      'package.json': JSON.stringify({ scripts: { build: 'vite build' } }),
+      'src/main.tsx': 'export const x = 1;', // not a worker fetch handler
+      'index.html': '<div id="root"></div>',
+    });
+    const res = detectProjectShape({ cwd: tmp });
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      assert.equal(res.source, 'package-build');
+      assert.equal((res.shape as { type: string }).type, 'static');
+      assert.equal((res.shape as { assetsDir: string }).assetsDir, 'dist');
+      assert.match((res.shape as { buildCommand: string }).buildCommand, /\bbuild\b/);
+    }
+  });
+
+  it('honors an explicit build.outputDir that does not exist yet', () => {
+    const tmp = makeTmpDir();
+    const config: DeployConfig = { $version: 1, type: 'static', build: { command: 'astro build', outputDir: 'dist/client' } };
+    writeTree(tmp, { 'package.json': JSON.stringify({ scripts: { build: 'astro build' } }) });
+    const res = detectProjectShape({ cwd: tmp, config });
+    assert.equal(res.ok, true);
+    if (res.ok) assert.equal((res.shape as { assetsDir: string }).assetsDir, 'dist/client');
+  });
 });
 
 // ─── 4. plain static ──────────────────────────────────────────────────────
