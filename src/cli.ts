@@ -81,6 +81,11 @@ import {
   runArtifactList,
   exitCodeForFailure as artifactListExitCode,
 } from './artifact-list.js';
+import {
+  runTileAppSign,
+  runTileAppPublish,
+  exitCodeForFailure as tileAppExitCode,
+} from './tileapp-publisher.js';
 
 // Resolved at startup from the package's own package.json so the
 // `--version` output can never drift from the npm version. Touching
@@ -174,6 +179,12 @@ function printHelp(): void {
       '    [--limit <n>]                           Cap result count (1-500, default 100).',
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '    [--json]                                Pretty-print raw JSON instead of the table.',
+      '  tileapp sign <manifest> --publisher <id>  KMS-sign a tile-app manifest (POST /v1/publisher/sign).',
+      '    [--key <keyId>]                         Pick a specific signing key (default: the only active one).',
+      '    [--stdout]                              Print the signed manifest instead of rewriting the file.',
+      '  tileapp publish <manifest> [opts]         Submit a signed manifest for review (POST /v1/publisher/publish).',
+      '    [--channel beta|stable]                 Target channel (default: beta).',
+      '    [--image-digest <d>]                    Consistency check: must equal the signed manifest image.digest.',
       '  serve <dir> [opts]                        Static file server (decision-preview / Gap 2a).',
       '    [--port <n>]                            Port (default: $PORT, else 3000).',
       '    [--host <h>]                            Bind host (default: 0.0.0.0).',
@@ -787,6 +798,55 @@ function parseRunGetArgs(args: string[]): ParsedRunGetArgs | ParseError {
   return { ok: true, planRunId, workspaceFlag, jsonOutput };
 }
 
+function tileAppUsage(sub: 'sign' | 'publish', message: string): number {
+  process.stderr.write(`yolo tileapp ${sub}: ${message}\n`);
+  process.stderr.write(sub === 'sign'
+    ? 'Usage: yolo tileapp sign <manifest.json> --publisher <id> [--key <keyId>] [--stdout]\n'
+    : 'Usage: yolo tileapp publish <manifest.json> [--channel beta|stable] [--image-digest <d>]\n');
+  return 64;
+}
+
+async function runTileAppSignCmd(args: string[]): Promise<number> {
+  let manifestPath: string | undefined;
+  let publisherId: string | undefined;
+  let keyId: string | undefined;
+  let toStdout = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--publisher' || a === '-p') { publisherId = args[++i]; if (publisherId === undefined) return tileAppUsage('sign', "--publisher requires a value"); }
+    else if (a === '--key') { keyId = args[++i]; if (keyId === undefined) return tileAppUsage('sign', '--key requires a value'); }
+    else if (a === '--stdout') toStdout = true;
+    else if (!a.startsWith('-') && !manifestPath) manifestPath = a;
+    else return tileAppUsage('sign', `unexpected argument '${a}'`);
+  }
+  if (!manifestPath || !publisherId) return tileAppUsage('sign', 'a manifest path and --publisher <id> are required');
+  const result = await runTileAppSign({ manifestPath, publisherId, keyId, toStdout });
+  if (result.ok) { process.stdout.write(`${result.output}\n`); return 0; }
+  process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
+  return tileAppExitCode(result.kind);
+}
+
+async function runTileAppPublishCmd(args: string[]): Promise<number> {
+  let manifestPath: string | undefined;
+  let channel: 'beta' | 'stable' | undefined;
+  let imageDigest: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--channel') {
+      const v = args[++i];
+      if (v !== 'beta' && v !== 'stable') return tileAppUsage('publish', `invalid --channel '${v ?? ''}' (expected beta|stable)`);
+      channel = v;
+    } else if (a === '--image-digest') { imageDigest = args[++i]; if (imageDigest === undefined) return tileAppUsage('publish', '--image-digest requires a value'); }
+    else if (!a.startsWith('-') && !manifestPath) manifestPath = a;
+    else return tileAppUsage('publish', `unexpected argument '${a}'`);
+  }
+  if (!manifestPath) return tileAppUsage('publish', 'a manifest path is required');
+  const result = await runTileAppPublish({ manifestPath, channel, imageDigest });
+  if (result.ok) { process.stdout.write(`${result.output}\n`); return 0; }
+  process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
+  return tileAppExitCode(result.kind);
+}
+
 async function runRunGetCmd(args: string[]): Promise<number> {
   const parsed = parseRunGetArgs(args);
   if (!parsed.ok) {
@@ -1218,6 +1278,19 @@ async function main(argv: string[]): Promise<number> {
     }
     process.stderr.write(`yolo: unknown artifact subcommand '${sub}'\n`);
     process.stderr.write('Subcommands: get, list\n');
+    return 64;
+  }
+
+  if (cmd === 'tileapp') {
+    const sub = args[1];
+    if (sub === 'sign') return runTileAppSignCmd(args.slice(2));
+    if (sub === 'publish') return runTileAppPublishCmd(args.slice(2));
+    if (!sub) {
+      process.stderr.write('yolo: tileapp requires a subcommand (sign, publish)\n');
+      return 64;
+    }
+    process.stderr.write(`yolo: unknown tileapp subcommand '${sub}'\n`);
+    process.stderr.write('Subcommands: sign, publish\n');
     return 64;
   }
 
