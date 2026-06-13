@@ -21,6 +21,7 @@ import {
   queryD1,
   type DeployContext,
   type DeployFetchLike,
+  type RetryConfig,
 } from './deploy-client.js';
 
 interface CapturedCall {
@@ -465,5 +466,68 @@ describe('deploy-client — queryD1', () => {
     const result = await queryD1(makeContext(fetch), 'hp_9', 'SELECT 1');
     assert.equal(result.ok, false);
     if (!result.ok) assert.equal(result.kind, 'resource-not-found');
+  });
+});
+
+// ─── transient retry (bounded backoff on kind 'network') ───────────────────
+
+describe('deploy-client — transient retry', () => {
+  const START_REQ = { env: 'prod' as const, type: 'static' as const, manifest: {}, bundleDigest: 'sha256:dead' };
+
+  function retryCtx(
+    fetch: DeployFetchLike,
+    onRetry?: RetryConfig['onRetry'],
+    overrides: Partial<RetryConfig> = {},
+  ): DeployContext {
+    return makeContext(fetch, {
+      retry: { sleepImpl: async () => {}, onRetry, ...overrides },
+    });
+  }
+
+  it('retries ship/start past a CF 522 and succeeds (incident repro)', async () => {
+    const retries: string[] = [];
+    const { fetch, calls } = makeFetchStub([
+      { ok: false, status: 522, textBody: 'HTTP 522' },
+      START_OK,
+    ]);
+    const result = await startShip(retryCtx(fetch, (i) => retries.push(`${i.leg} ${i.attempt}/${i.maxAttempts}`)), 'hp_1', START_REQ);
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 2); // one failure + one success
+    assert.deepEqual(retries, ['ship/start 1/3']);
+  });
+
+  it('gives up after maxAttempts on persistent 5xx and returns kind network', async () => {
+    const { fetch, calls } = makeFetchStub({ ok: false, status: 503, textBody: 'down' });
+    const result = await startShip(retryCtx(fetch), 'hp_1', START_REQ);
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.kind, 'network');
+    assert.equal(calls.length, 3); // default maxAttempts
+  });
+
+  it('does NOT retry a deterministic 4xx refusal', async () => {
+    const { fetch, calls } = makeFetchStub({
+      ok: false,
+      status: 409,
+      jsonBody: { ok: false, reason: 'quota-exceeded', message: 'over cap' },
+    });
+    const result = await startShip(retryCtx(fetch), 'hp_1', START_REQ);
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.kind, 'quota-exceeded');
+    assert.equal(calls.length, 1); // no retry
+  });
+
+  it('does not retry at all when no retry config is set (single attempt)', async () => {
+    const { fetch, calls } = makeFetchStub({ ok: false, status: 522, textBody: 'HTTP 522' });
+    const result = await startShip(makeContext(fetch), 'hp_1', START_REQ);
+    assert.equal(result.ok, false);
+    assert.equal(calls.length, 1);
+  });
+
+  it('does NOT retry the finalize leg (single-shot — avoid masking a lost-response success)', async () => {
+    const { fetch, calls } = makeFetchStub({ ok: false, status: 502, textBody: 'bad gateway' });
+    const result = await finalizeShip(retryCtx(fetch), 'hp_1', 'shp_1', []);
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.kind, 'network');
+    assert.equal(calls.length, 1); // surfaced as transient, not retried
   });
 });

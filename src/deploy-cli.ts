@@ -36,12 +36,15 @@ import {
   resolveDeployContext,
   createProject,
   getProjectStatus,
+  listProjects,
   rollbackProject,
   getLogs,
   tailLogs,
   queryD1,
+  type DeployClientFailure,
   type DeployContext,
   type DeployFetchLike,
+  type DeployProjectSummary,
   type D1QueryRow,
 } from './deploy-client.js';
 import { readDeployConfig, writeDeployConfig, type DeployConfig } from './deploy-config.js';
@@ -65,6 +68,7 @@ export interface DeployCliDeps {
   writeDeployConfigImpl?: typeof writeDeployConfig;
   createProjectImpl?: typeof createProject;
   getProjectStatusImpl?: typeof getProjectStatus;
+  listProjectsImpl?: typeof listProjects;
   rollbackProjectImpl?: typeof rollbackProject;
   getLogsImpl?: typeof getLogs;
   tailLogsImpl?: typeof tailLogs;
@@ -75,6 +79,7 @@ export interface DeployCliDeps {
 const USAGE = [
   'Usage: yolo deploy [--env <staging|prod>] [--dry-run] [--json]',
   '       yolo deploy init [--slug <slug>] [--type <static|worker>]',
+  '       yolo deploy link (--project-id <id> | --slug <slug>) [--type <static|worker>]',
   '       yolo deploy status [--json]',
   '       yolo deploy logs [--tail] [--since <dur>] [--json]',
   '       yolo deploy rollback [releaseId] [--json]',
@@ -93,6 +98,7 @@ export async function runDeployCmd(args: string[], deps: DeployCliDeps = {}): Pr
     return 0;
   }
   if (sub === 'init') return runInitCmd(args.slice(1), deps, io);
+  if (sub === 'link') return runLinkCmd(args.slice(1), deps, io);
   if (sub === 'status') return runStatusCmd(args.slice(1), deps, io);
   if (sub === 'logs') return runLogsCmd(args.slice(1), deps, io);
   if (sub === 'rollback') return runRollbackCmd(args.slice(1), deps, io);
@@ -266,38 +272,213 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
     ...(parsed.slug ? { slug: parsed.slug } : {}),
   });
   if (!created.ok) {
+    // create-or-LINK: a `slug-taken` on a slug the caller ALREADY OWNS means a
+    // prior create (commonly via the deploy_create_project MCP tool, which
+    // doesn't write the link file). Reconcile by linking to it instead of
+    // dead-ending — `init` should never strand an owned project. The slug is
+    // the explicit `--slug` OR (when omitted) the server-derived slug, which
+    // the refusal carries in `detail.slug` — so bare `yolo deploy init` also
+    // reconciles.
+    if (created.kind === 'slug-taken') {
+      const takenSlug = parsed.slug ?? str((created.detail as Record<string, unknown> | undefined)?.slug);
+      if (takenSlug) {
+        // Best-effort: if the lookup itself fails (auth/network), don't mask
+        // the genuine slug-taken — fall through to it below.
+        const lookup = await findOwnedProjectBySlug(deps, auth.context, takenSlug);
+        const owned = lookup.ok ? lookup.project : undefined;
+        const projectId = owned ? resolveProjectId(owned) : undefined;
+        if (projectId) {
+          return writeLinkFile(
+            cwd,
+            writeConfig,
+            io,
+            { projectId, slug: str(owned!.slug) ?? takenSlug, type: parsed.type, existing },
+            `OK: slug '${takenSlug}' was already yours — linked existing project ${projectId} — wrote .yolo/deploy.json`,
+          );
+        }
+      }
+    }
     io.err(`${formatFail(created)}\n`);
     return exitCodeForFailure(created.kind);
   }
 
   const raw = created.value as Record<string, unknown>;
   const project = (raw.project && typeof raw.project === 'object' ? raw.project : raw) as Record<string, unknown>;
-  const projectId = str(project.projectId) ?? str(project.id) ?? str(project._id);
+  const projectId = resolveProjectId(project);
   const slug = str(project.slug) ?? parsed.slug;
   if (!projectId) {
     io.err(`${formatFail({ kind: 'invalid-response', message: 'create-project response missing a project id' })}\n`);
     return 2;
   }
 
-  const config: DeployConfig = {
-    ...(existing ?? {}),
-    $version: 1,
-    projectId,
-    ...(slug ? { slug } : {}),
-    ...(parsed.type ? { type: parsed.type } : {}),
-  };
-  try {
-    writeConfig(cwd, config);
-  } catch (err) {
+  return writeLinkFile(
+    cwd,
+    writeConfig,
+    io,
+    { projectId, slug, type: parsed.type, existing },
+    `OK: linked project ${projectId}${slug ? ` (slug ${slug})` : ''} — wrote .yolo/deploy.json`,
+  );
+}
+
+// ─── link ─────────────────────────────────────────────────────────────────
+//
+// Link this directory to an EXISTING hosting project without creating one —
+// the reconciliation path for a project made out-of-band (e.g. the
+// deploy_create_project MCP tool, which claims a slug but doesn't write the
+// link file). `init` link-on-conflict covers the common case; `link` is the
+// explicit verb when you already hold the projectId or slug.
+
+interface ParsedLinkArgs {
+  ok: true;
+  projectId?: string;
+  slug?: string;
+  type?: 'static' | 'worker';
+}
+
+export function parseLinkArgs(args: string[]): ParsedLinkArgs | ParseError {
+  let projectId: string | undefined;
+  let slug: string | undefined;
+  let type: 'static' | 'worker' | undefined;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--project-id') {
+      const v = args[++i];
+      if (!v || v.startsWith('--')) return { ok: false, message: '--project-id requires a value' };
+      projectId = v;
+    } else if (a.startsWith('--project-id=')) {
+      projectId = a.slice('--project-id='.length);
+    } else if (a === '--slug') {
+      const v = args[++i];
+      if (!v || v.startsWith('--')) return { ok: false, message: '--slug requires a value' };
+      slug = v;
+    } else if (a.startsWith('--slug=')) {
+      slug = a.slice('--slug='.length);
+    } else if (a === '--type') {
+      const v = args[++i];
+      if (!v || v.startsWith('--')) return { ok: false, message: '--type requires a value (static|worker)' };
+      if (v !== 'static' && v !== 'worker') return { ok: false, message: `--type must be 'static' or 'worker' (got '${v}')` };
+      type = v;
+    } else if (a.startsWith('--type=')) {
+      const v = a.slice('--type='.length);
+      if (v !== 'static' && v !== 'worker') return { ok: false, message: `--type must be 'static' or 'worker' (got '${v}')` };
+      type = v;
+    } else if (a.startsWith('--')) {
+      return { ok: false, message: `unknown option: ${a}` };
+    } else {
+      return { ok: false, message: `unexpected positional argument: ${a}` };
+    }
+  }
+  if (!projectId && !slug) {
+    return { ok: false, message: 'provide --project-id <id> or --slug <slug> to identify the existing project' };
+  }
+  if (projectId && slug) {
+    // Either/or: accepting both would let a mismatched --slug write misleading
+    // link metadata that disagrees with the project the id resolves to.
+    return { ok: false, message: 'pass either --project-id or --slug, not both (the project\'s slug is resolved server-side)' };
+  }
+  return { ok: true, projectId, slug, type };
+}
+
+async function runLinkCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Promise<number> {
+  const parsed = parseLinkArgs(args);
+  if (!parsed.ok) {
     io.err(
-      `${formatFail({ kind: 'config-write-failed', message: `failed to write .yolo/deploy.json: ${describeError(err)}` })}\n`,
+      `yolo deploy link: ${parsed.message}\nUsage: yolo deploy link (--project-id <id> | --slug <slug>) [--type <static|worker>]\n`,
     );
-    return 1;
+    return 64;
+  }
+  const cwd = deps.cwd ?? process.cwd();
+  const readConfig = deps.readDeployConfigImpl ?? readDeployConfig;
+  const writeConfig = deps.writeDeployConfigImpl ?? writeDeployConfig;
+
+  const readResult = readConfig(cwd);
+  if (!readResult.ok) {
+    io.err(`${formatFail({ kind: readResult.kind, message: readResult.message })}\n`);
+    return exitCodeForFailure(readResult.kind);
+  }
+  const existing: DeployConfig | null = readResult.config;
+
+  const auth = resolveAuth(deps);
+  if (!auth.ok) {
+    io.err(`${formatFail({ kind: 'auth', message: auth.message })}\n`);
+    return 78;
   }
 
-  io.out(`OK: linked project ${projectId}${slug ? ` (slug ${slug})` : ''} — wrote .yolo/deploy.json\n`);
-  io.out('note: .yolo/deploy.json is committed by design; it contains no secrets — commit it so future sessions, teammates, and CI ship to the same project.\n');
-  return 0;
+  // Resolve the target project — verify ownership server-side either way so we
+  // never write a link to a project the caller can't actually reach.
+  let projectId: string | undefined;
+  let slug: string | undefined = parsed.slug;
+  if (parsed.projectId) {
+    const status = deps.getProjectStatusImpl ?? getProjectStatus;
+    const result = await status(auth.context, parsed.projectId);
+    if (!result.ok) {
+      io.err(`${formatFail(result)}\n`);
+      return exitCodeForFailure(result.kind);
+    }
+    const raw = (result.value && typeof result.value === 'object' ? result.value : {}) as Record<string, unknown>;
+    const project = (raw.project && typeof raw.project === 'object' ? raw.project : raw) as Record<string, unknown>;
+    projectId = resolveProjectId(project) ?? parsed.projectId;
+    slug = parsed.slug ?? str(project.slug);
+  } else {
+    const lookup = await findOwnedProjectBySlug(deps, auth.context, parsed.slug!);
+    if (!lookup.ok) {
+      // A list failure (auth/network) is NOT "not found" — surface the real
+      // error + its exit code so the caller can retry or re-auth.
+      io.err(`${formatFail(lookup)}\n`);
+      return exitCodeForFailure(lookup.kind);
+    }
+    const owned = lookup.project;
+    projectId = owned ? resolveProjectId(owned) : undefined;
+    if (!projectId) {
+      io.err(
+        `${formatFail({
+          kind: 'not-found',
+          message: `no hosting project you own has slug '${parsed.slug}'`,
+          hint: "run 'yolo deploy status' from a linked dir, or pass --project-id",
+        })}\n`,
+      );
+      return exitCodeForFailure('not-found');
+    }
+    slug = str(owned!.slug) ?? parsed.slug;
+  }
+
+  // Refuse to silently repoint an existing link at a DIFFERENT project.
+  if (existing?.projectId && existing.projectId !== projectId) {
+    io.err(
+      `${formatFail({
+        kind: 'already-linked',
+        message: `this directory is already linked to project ${existing.projectId}; refusing to repoint to ${projectId}`,
+        hint: 'edit or remove .yolo/deploy.json by hand if the repoint is intentional',
+      })}\n`,
+    );
+    return exitCodeForFailure('already-linked');
+  }
+  if (existing?.projectId === projectId) {
+    // Already linked to this project. Still honor a requested --type that isn't
+    // already set (the deploy_create_project link block has no `type`, so the
+    // advertised `link --type …` must be able to pin detection here). Pure
+    // no-op only when --type adds nothing.
+    if (!parsed.type || existing.type === parsed.type) {
+      io.out(`OK: already linked to project ${projectId}${slug ? ` (slug ${slug})` : ''} — .yolo/deploy.json left unchanged\n`);
+      return 0;
+    }
+    return writeLinkFile(
+      cwd,
+      writeConfig,
+      io,
+      { projectId: projectId!, slug: slug ?? existing.slug, type: parsed.type, existing },
+      `OK: already linked to project ${projectId} — set type ${parsed.type} in .yolo/deploy.json`,
+    );
+  }
+
+  return writeLinkFile(
+    cwd,
+    writeConfig,
+    io,
+    { projectId: projectId!, slug, type: parsed.type, existing },
+    `OK: linked project ${projectId}${slug ? ` (slug ${slug})` : ''} — wrote .yolo/deploy.json`,
+  );
 }
 
 // ─── status ───────────────────────────────────────────────────────────────
@@ -677,6 +858,59 @@ function requireLink(
     return { ok: false, exitCode: exitCodeForFailure('not-linked') };
   }
   return { ok: true, projectId: config.projectId, slug: config.slug };
+}
+
+/** projectId from a serialized project (server emits `id`; tolerate variants). */
+function resolveProjectId(project: Record<string, unknown>): string | undefined {
+  return str(project.projectId) ?? str(project.id) ?? str(project._id);
+}
+
+/**
+ * Find one of the caller's OWN projects by slug (for init/link reconcile).
+ * Distinguishes a list FAILURE (auth/network — propagated so the caller can
+ * surface the real, possibly-retryable error) from a clean not-found
+ * (`{ ok:true, project: undefined }`).
+ */
+async function findOwnedProjectBySlug(
+  deps: DeployCliDeps,
+  ctx: DeployContext,
+  slug: string,
+): Promise<{ ok: true; project?: DeployProjectSummary } | DeployClientFailure> {
+  const list = deps.listProjectsImpl ?? listProjects;
+  const result = await list(ctx);
+  if (!result.ok) return result;
+  return { ok: true, project: result.value.find((p) => str(p.slug) === slug) };
+}
+
+/**
+ * Write `.yolo/deploy.json` in canonical form, preserving any existing fields,
+ * and print the success message + the commit note. Shared by init + link.
+ */
+function writeLinkFile(
+  cwd: string,
+  writeConfig: typeof writeDeployConfig,
+  io: DeployIo,
+  params: { projectId: string; slug?: string; type?: 'static' | 'worker'; existing?: DeployConfig | null },
+  message: string,
+): number {
+  const config: DeployConfig = {
+    ...(params.existing ?? {}),
+    $version: 1,
+    projectId: params.projectId,
+    ...(params.slug ? { slug: params.slug } : {}),
+    ...(params.type ? { type: params.type } : {}),
+  };
+  try {
+    writeConfig(cwd, config);
+  } catch (err) {
+    io.err(
+      `${formatFail({ kind: 'config-write-failed', message: `failed to write .yolo/deploy.json: ${describeError(err)}` })}\n`,
+    );
+    return 1;
+  }
+  io.out(`${message}\n`);
+  io.out('note: .yolo/deploy.json is committed by design; it contains no secrets — commit it so future sessions, teammates, and CI ship to the same project.\n');
+  return 0;
 }
 
 function resolveAuth(deps: DeployCliDeps): { ok: true; context: DeployContext } | { ok: false; message: string } {

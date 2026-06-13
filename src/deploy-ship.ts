@@ -34,6 +34,7 @@ import {
   type AssetManifest,
   type AssetUploadFile,
   type DeployClientFailure,
+  type DeployContext,
   type DeployFetchLike,
   type StartShipRequest,
 } from './deploy-client.js';
@@ -204,7 +205,17 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
 
   const auth = resolveDeployContext(options.env ?? process.env, options.readFileImpl, options.fetchImpl);
   if (!auth.ok) return fail('auth', auth.message);
-  const ctx = auth.context;
+  // Bounded auto-retry for transient edge/origin 5xx (incl. CF 522) on the
+  // ship legs — a single transient blip shouldn't hard-fail a prod deploy.
+  const ctx: DeployContext = {
+    ...auth.context,
+    retry: {
+      onRetry: ({ leg, attempt, maxAttempts, delayMs, failure }) =>
+        progress(
+          `deploy: ${leg} transient error (${failure.message}); retrying ${attempt}/${maxAttempts - 1} in ${Math.round(delayMs)}ms`,
+        ),
+    },
+  };
 
   // 6. ship/start — manifest up, missing-hash buckets back.
   const manifest: AssetManifest = bundled.manifest;

@@ -268,17 +268,69 @@ describe('deploy-cli — init', () => {
     assert.match(io.stdout.join(''), /already linked to project hp_8f3a/);
   });
 
-  it('passes a slug-taken refusal through with exit 2', async () => {
+  it('passes a slug-taken refusal through with exit 2 when the slug is NOT one we own', async () => {
     const io = makeIo();
     const code = await runDeployCmd(
       ['init', '--slug', 'taken'],
       baseDeps(io, {
         readDeployConfigImpl: () => linked(null),
         createProjectImpl: async () => ({ ok: false, kind: 'slug-taken', message: "slug 'taken' is in use", status: 409 }),
+        // We own other projects, but none with slug 'taken' → genuinely taken.
+        listProjectsImpl: async () => ({ ok: true, value: [{ id: 'hp_other', slug: 'something-else' }] }),
       }),
     );
     assert.equal(code, 2);
     assert.match(io.stderr.join(''), /FAIL \[slug-taken\]/);
+  });
+
+  it('reconciles a slug-taken when the slug is ALREADY OURS — links to it (exit 0)', async () => {
+    const io = makeIo();
+    const written: Array<{ cwd: string; config: Record<string, unknown> }> = [];
+    const code = await runDeployCmd(
+      ['init', '--slug', 'sushi-rescue'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => linked(null),
+        createProjectImpl: async () => ({ ok: false, kind: 'slug-taken', message: "slug 'sushi-rescue' is in use", status: 409 }),
+        listProjectsImpl: async () => ({
+          ok: true,
+          value: [{ id: 'hp_sushi', slug: 'sushi-rescue' }],
+        }),
+        writeDeployConfigImpl: (cwd, config) => {
+          written.push({ cwd, config: config as unknown as Record<string, unknown> });
+          return CONFIG_PATH;
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.equal(written.length, 1);
+    assert.deepEqual(written[0]!.config, { $version: 1, projectId: 'hp_sushi', slug: 'sushi-rescue' });
+    assert.match(io.stdout.join(''), /was already yours — linked existing project hp_sushi/);
+  });
+
+  it('reconciles a slug-taken with NO --slug, using the server-derived slug from detail', async () => {
+    const io = makeIo();
+    const written: Array<{ config: Record<string, unknown> }> = [];
+    const code = await runDeployCmd(
+      ['init'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => linked(null),
+        // bare init derives a slug server-side; the refusal carries it in detail.
+        createProjectImpl: async () => ({
+          ok: false,
+          kind: 'slug-taken',
+          message: 'in use',
+          status: 409,
+          detail: { slug: 'derived-slug' },
+        }),
+        listProjectsImpl: async () => ({ ok: true, value: [{ id: 'hp_d', slug: 'derived-slug' }] }),
+        writeDeployConfigImpl: (_cwd, config) => {
+          written.push({ config: config as unknown as Record<string, unknown> });
+          return CONFIG_PATH;
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.deepEqual(written[0]!.config, { $version: 1, projectId: 'hp_d', slug: 'derived-slug' });
   });
 
   it('rejects a bad --type with exit 64', async () => {
@@ -295,6 +347,146 @@ describe('deploy-cli — init', () => {
     );
     assert.equal(code, 78);
     assert.match(io.stderr.join(''), /FAIL \[auth\]/);
+  });
+});
+
+// ─── link ──────────────────────────────────────────────────────────────────
+
+describe('deploy-cli — link', () => {
+  it('requires --project-id or --slug (exit 64)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(['link'], baseDeps(io, { readDeployConfigImpl: () => linked(null) }));
+    assert.equal(code, 64);
+    assert.match(io.stderr.join(''), /--project-id <id> or --slug <slug>/);
+  });
+
+  it('rejects --project-id and --slug together (exit 64)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['link', '--project-id', 'hp_a', '--slug', 'slug-for-b'],
+      baseDeps(io, { readDeployConfigImpl: () => linked(null) }),
+    );
+    assert.equal(code, 64);
+    assert.match(io.stderr.join(''), /not both/);
+  });
+
+  it('links by --project-id (ownership verified via status) and writes the file', async () => {
+    const io = makeIo();
+    const written: Array<{ config: Record<string, unknown> }> = [];
+    const code = await runDeployCmd(
+      ['link', '--project-id', 'hp_sushi'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => linked(null),
+        getProjectStatusImpl: async (_ctx, projectId) => {
+          assert.equal(projectId, 'hp_sushi');
+          return { ok: true, value: { project: { id: 'hp_sushi', slug: 'sushi-rescue' } } };
+        },
+        writeDeployConfigImpl: (_cwd, config) => {
+          written.push({ config: config as unknown as Record<string, unknown> });
+          return CONFIG_PATH;
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.deepEqual(written[0]!.config, { $version: 1, projectId: 'hp_sushi', slug: 'sushi-rescue' });
+    assert.match(io.stdout.join(''), /linked project hp_sushi \(slug sushi-rescue\)/);
+  });
+
+  it('links by --slug via the owned-project lookup', async () => {
+    const io = makeIo();
+    const written: Array<{ config: Record<string, unknown> }> = [];
+    const code = await runDeployCmd(
+      ['link', '--slug', 'sushi-rescue'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => linked(null),
+        listProjectsImpl: async () => ({ ok: true, value: [{ id: 'hp_sushi', slug: 'sushi-rescue' }] }),
+        writeDeployConfigImpl: (_cwd, config) => {
+          written.push({ config: config as unknown as Record<string, unknown> });
+          return CONFIG_PATH;
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.deepEqual(written[0]!.config, { $version: 1, projectId: 'hp_sushi', slug: 'sushi-rescue' });
+  });
+
+  it('errors when no owned project has the given slug', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['link', '--slug', 'ghost'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => linked(null),
+        listProjectsImpl: async () => ({ ok: true, value: [] }),
+      }),
+    );
+    assert.notEqual(code, 0);
+    assert.match(io.stderr.join(''), /no hosting project you own has slug 'ghost'/);
+  });
+
+  it('propagates a list FAILURE (network) rather than reporting not-found', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['link', '--slug', 'sushi-rescue'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => linked(null),
+        listProjectsImpl: async () => ({ ok: false, kind: 'network', message: 'server error (HTTP 503)' }),
+      }),
+    );
+    assert.equal(code, 4); // transient transport — retryable, not "not found"
+    assert.match(io.stderr.join(''), /FAIL \[network\]/);
+    assert.doesNotMatch(io.stderr.join(''), /no hosting project you own/);
+  });
+
+  it('refuses to repoint an existing link at a different project', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['link', '--project-id', 'hp_new'],
+      baseDeps(io, {
+        // default baseDeps readDeployConfigImpl is linked to hp_8f3a
+        getProjectStatusImpl: async () => ({ ok: true, value: { project: { id: 'hp_new', slug: 'new' } } }),
+      }),
+    );
+    assert.notEqual(code, 0);
+    assert.match(io.stderr.join(''), /already linked to project hp_8f3a/);
+  });
+
+  it('is a no-op when already linked to the same project (no new --type)', async () => {
+    const io = makeIo();
+    let wrote = false;
+    const code = await runDeployCmd(
+      ['link', '--project-id', 'hp_8f3a'],
+      baseDeps(io, {
+        getProjectStatusImpl: async () => ({ ok: true, value: { project: { id: 'hp_8f3a', slug: 'my-app' } } }),
+        writeDeployConfigImpl: () => {
+          wrote = true;
+          return CONFIG_PATH;
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.equal(wrote, false);
+    assert.match(io.stdout.join(''), /already linked to project hp_8f3a/);
+  });
+
+  it('honors a new --type when already linked to the same project', async () => {
+    const io = makeIo();
+    const written: Array<{ config: Record<string, unknown> }> = [];
+    const code = await runDeployCmd(
+      ['link', '--project-id', 'hp_8f3a', '--type', 'worker'],
+      baseDeps(io, {
+        // default baseDeps is linked to hp_8f3a, slug my-app, no type
+        getProjectStatusImpl: async () => ({ ok: true, value: { project: { id: 'hp_8f3a', slug: 'my-app' } } }),
+        writeDeployConfigImpl: (_cwd, config) => {
+          written.push({ config: config as unknown as Record<string, unknown> });
+          return CONFIG_PATH;
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.equal(written.length, 1);
+    assert.equal(written[0]!.config.type, 'worker');
+    assert.equal(written[0]!.config.projectId, 'hp_8f3a');
+    assert.match(io.stdout.join(''), /set type worker/);
   });
 });
 
