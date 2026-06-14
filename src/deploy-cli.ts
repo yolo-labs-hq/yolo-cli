@@ -549,38 +549,45 @@ async function runValidateCmd(args: string[], deps: DeployCliDeps, io: DeployIo)
 
   // 3. Verify the resolved entry / assets exist AND are the right kind on disk —
   //    detection trusts an EXPLICIT worker.entry without checking it, so a
-  //    typo'd, not-yet-built, or wrong-kind path (e.g. entry pointing at a
-  //    directory) would otherwise only fail mid-ship.
+  //    typo'd or wrong-kind path (e.g. entry pointing at a directory) would
+  //    otherwise only fail mid-ship. BUT a missing path is fine when a build
+  //    command will PRODUCE it (clean checkout, output dir not committed) —
+  //    `yolo deploy` runs the build before bundling — so that's a note, not an
+  //    error (codex P2). A present-but-wrong-kind path is always an error.
+  const notes: string[] = [];
+  // Prefer the shape's resolved buildCommand — `detectProjectShape` infers one
+  // from package.json even when `.yolo/deploy.json` has no explicit
+  // `build.command` (both static and worker shapes carry it) — and fall back to
+  // the raw config command when there's no detected shape.
+  const buildCmd = shape?.buildCommand ?? config?.build?.command;
   const statPath = deps.statPathImpl ?? defaultStatPath;
-  const checkFile = (rel: string, field: string, builtHint = false) => {
+  const checkPath = (rel: string, field: string, want: 'file' | 'dir', missingMsg: string) => {
     const kind = statPath(path.resolve(cwd, rel));
     if (kind === 'missing') {
-      issues.push({
-        path: field,
-        message: `entry '${rel}' does not exist${builtHint ? ' (prebuilt entries must be built before deploy)' : ' — build it or fix the path'}`,
-      });
-    } else if (kind !== 'file') {
-      issues.push({ path: field, message: `entry '${rel}' is not a file (it's a ${kind})` });
+      if (buildCmd) notes.push(`'${rel}' not present yet — produced by the build (\`${buildCmd}\`) at deploy time`);
+      else issues.push({ path: field, message: missingMsg });
+    } else if ((want === 'file' && kind !== 'file') || (want === 'dir' && kind !== 'dir')) {
+      issues.push({ path: field, message: `'${rel}' is not a ${want === 'file' ? 'file' : 'directory'} (it's a ${kind})` });
     }
-  };
-  const checkDir = (rel: string, field: string, missingMsg: string) => {
-    const kind = statPath(path.resolve(cwd, rel));
-    if (kind === 'missing') issues.push({ path: field, message: missingMsg });
-    else if (kind !== 'dir') issues.push({ path: field, message: `'${rel}' is not a directory (it's a ${kind})` });
   };
   if (shape) {
     if (shape.type === 'worker') {
-      checkFile(shape.entry, 'worker.entry', shape.prebuilt);
-      if (shape.assetsDir) checkDir(shape.assetsDir, 'worker.assetsDir', `assets dir '${shape.assetsDir}' does not exist`);
+      checkPath(
+        shape.entry,
+        'worker.entry',
+        'file',
+        `entry '${shape.entry}' does not exist${shape.prebuilt ? ' (prebuilt entries must be built before deploy)' : ' — build it or fix the path'}`,
+      );
+      if (shape.assetsDir) checkPath(shape.assetsDir, 'worker.assetsDir', 'dir', `assets dir '${shape.assetsDir}' does not exist`);
     } else if (shape.type === 'static') {
-      checkDir(shape.assetsDir, 'build.outputDir', `static assets dir '${shape.assetsDir}' does not exist — run the build first`);
+      checkPath(shape.assetsDir, 'build.outputDir', 'dir', `static assets dir '${shape.assetsDir}' does not exist — run the build first`);
     }
   }
 
   const ok = issues.length === 0;
 
   if (jsonOutput) {
-    io.out(`${JSON.stringify({ ok, configMissing, config, shape, issues })}\n`);
+    io.out(`${JSON.stringify({ ok, configMissing, config, shape, issues, notes })}\n`);
     return ok ? 0 : 1;
   }
 
@@ -614,6 +621,7 @@ async function runValidateCmd(args: string[], deps: DeployCliDeps, io: DeployIo)
   if (config?.compatibilityFlags?.length) {
     io.out(`  compatibilityFlags: ${config.compatibilityFlags.join(', ')}\n`);
   }
+  for (const n of notes) io.out(`  note: ${n}\n`);
   return 0;
 }
 

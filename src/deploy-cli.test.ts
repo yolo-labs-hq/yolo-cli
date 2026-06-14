@@ -153,7 +153,7 @@ describe('deploy-cli — validate', () => {
       baseDeps(io, { readDeployConfigImpl: () => workerCfg, statPathImpl: () => 'dir' }),
     );
     assert.equal(code, 1);
-    assert.match(io.stderr.join(''), /worker\.entry: entry 'src\/index\.ts' is not a file \(it's a dir\)/);
+    assert.match(io.stderr.join(''), /worker\.entry: 'src\/index\.ts' is not a file \(it's a dir\)/);
   });
 
   it('reports schema errors with their path (exit 1)', async () => {
@@ -172,6 +172,44 @@ describe('deploy-cli — validate', () => {
     );
     assert.equal(code, 1);
     assert.match(io.stderr.join(''), /\$version: must be the number 1, got 2/);
+  });
+
+  it('passes a static project with a build command even if the output dir is missing (note, exit 0)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['validate'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => ({
+          ok: true as const,
+          config: { $version: 1 as const, slug: 's', type: 'static' as const, build: { command: 'npm run build', outputDir: 'dist' } },
+          path: CONFIG_PATH,
+        }),
+        statPathImpl: () => 'missing', // dist not built yet
+      }),
+    );
+    assert.equal(code, 0);
+    assert.match(io.stdout.join(''), /note:.*produced by the build/);
+  });
+
+  it('passes a static project whose build command is INFERRED from package.json (note, exit 0)', async () => {
+    const io = makeIo();
+    const pkgJson = JSON.stringify({ scripts: { build: 'vite build' } });
+    const code = await runDeployCmd(
+      ['validate'],
+      baseDeps(io, {
+        // No explicit build.command — detection infers `npm run build` from the
+        // package.json build script, so the missing dist/ is a note, not error.
+        readDeployConfigImpl: () => ({
+          ok: true as const,
+          config: { $version: 1 as const, slug: 's', type: 'static' as const, build: { outputDir: 'dist' } },
+          path: CONFIG_PATH,
+        }),
+        readFileImpl: (p: string) => (p.endsWith('package.json') ? pkgJson : undefined),
+        statPathImpl: () => 'missing',
+      }),
+    );
+    assert.equal(code, 0);
+    assert.match(io.stdout.join(''), /note:.*produced by the build/);
   });
 
   it('rejects unknown flags/positionals with exit 64', async () => {
