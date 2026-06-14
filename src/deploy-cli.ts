@@ -22,7 +22,19 @@
  */
 
 import * as path from 'node:path';
-import { existsSync } from 'node:fs';
+import { statSync } from 'node:fs';
+
+/** Path kind for `validate`: a file, a directory, something else, or missing. */
+export type PathKind = 'file' | 'dir' | 'other' | 'missing';
+
+function defaultStatPath(p: string): PathKind {
+  try {
+    const s = statSync(p);
+    return s.isFile() ? 'file' : s.isDirectory() ? 'dir' : 'other';
+  } catch {
+    return 'missing';
+  }
+}
 
 import {
   runDeployShip,
@@ -64,8 +76,8 @@ export interface DeployCliDeps {
   env?: Record<string, string | undefined>;
   io?: DeployIo;
   readFileImpl?: ReadFileImpl;
-  /** Path-existence probe (for `validate`'s entry/assets checks); defaults to fs.existsSync. */
-  existsImpl?: (p: string) => boolean;
+  /** Path-kind probe (for `validate`'s entry/assets checks); defaults to a statSync wrapper. */
+  statPathImpl?: (p: string) => PathKind;
   fetchImpl?: DeployFetchLike;
   runShipImpl?: typeof runDeployShip;
   readDeployConfigImpl?: typeof readDeployConfig;
@@ -535,29 +547,33 @@ async function runValidateCmd(args: string[], deps: DeployCliDeps, io: DeployIo)
     else shape = det.shape;
   }
 
-  // 3. Verify the resolved entry / assets actually exist on disk — detection
-  //    trusts an EXPLICIT worker.entry without checking it, so a typo'd or
-  //    not-yet-built path would otherwise only fail mid-ship.
-  const exists = deps.existsImpl ?? existsSync;
+  // 3. Verify the resolved entry / assets exist AND are the right kind on disk —
+  //    detection trusts an EXPLICIT worker.entry without checking it, so a
+  //    typo'd, not-yet-built, or wrong-kind path (e.g. entry pointing at a
+  //    directory) would otherwise only fail mid-ship.
+  const statPath = deps.statPathImpl ?? defaultStatPath;
+  const checkFile = (rel: string, field: string, builtHint = false) => {
+    const kind = statPath(path.resolve(cwd, rel));
+    if (kind === 'missing') {
+      issues.push({
+        path: field,
+        message: `entry '${rel}' does not exist${builtHint ? ' (prebuilt entries must be built before deploy)' : ' — build it or fix the path'}`,
+      });
+    } else if (kind !== 'file') {
+      issues.push({ path: field, message: `entry '${rel}' is not a file (it's a ${kind})` });
+    }
+  };
+  const checkDir = (rel: string, field: string, missingMsg: string) => {
+    const kind = statPath(path.resolve(cwd, rel));
+    if (kind === 'missing') issues.push({ path: field, message: missingMsg });
+    else if (kind !== 'dir') issues.push({ path: field, message: `'${rel}' is not a directory (it's a ${kind})` });
+  };
   if (shape) {
     if (shape.type === 'worker') {
-      const entryPath = path.resolve(cwd, shape.entry);
-      if (!exists(entryPath)) {
-        issues.push({
-          path: 'worker.entry',
-          message: `entry '${shape.entry}' does not exist${shape.prebuilt ? ' (prebuilt entries must be built before deploy)' : ' — build it or fix the path'}`,
-        });
-      }
-      if (shape.assetsDir && !exists(path.resolve(cwd, shape.assetsDir))) {
-        issues.push({ path: 'worker.assetsDir', message: `assets dir '${shape.assetsDir}' does not exist` });
-      }
+      checkFile(shape.entry, 'worker.entry', shape.prebuilt);
+      if (shape.assetsDir) checkDir(shape.assetsDir, 'worker.assetsDir', `assets dir '${shape.assetsDir}' does not exist`);
     } else if (shape.type === 'static') {
-      if (!exists(path.resolve(cwd, shape.assetsDir))) {
-        issues.push({
-          path: 'build.outputDir',
-          message: `static assets dir '${shape.assetsDir}' does not exist — run the build first`,
-        });
-      }
+      checkDir(shape.assetsDir, 'build.outputDir', `static assets dir '${shape.assetsDir}' does not exist — run the build first`);
     }
   }
 

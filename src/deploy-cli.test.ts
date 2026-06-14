@@ -128,7 +128,7 @@ describe('deploy-cli — validate', () => {
     const io = makeIo();
     const code = await runDeployCmd(
       ['validate'],
-      baseDeps(io, { readDeployConfigImpl: () => workerCfg, existsImpl: () => true }),
+      baseDeps(io, { readDeployConfigImpl: () => workerCfg, statPathImpl: () => 'file' }),
     );
     assert.equal(code, 0);
     assert.match(io.stdout.join(''), /OK: deploy config is valid/);
@@ -139,11 +139,21 @@ describe('deploy-cli — validate', () => {
     const io = makeIo();
     const code = await runDeployCmd(
       ['validate'],
-      baseDeps(io, { readDeployConfigImpl: () => workerCfg, existsImpl: () => false }),
+      baseDeps(io, { readDeployConfigImpl: () => workerCfg, statPathImpl: () => 'missing' }),
     );
     assert.equal(code, 1);
     assert.match(io.stderr.join(''), /FAIL: deploy config is not valid/);
     assert.match(io.stderr.join(''), /worker\.entry: entry 'src\/index\.ts' does not exist/);
+  });
+
+  it('fails when the worker entry is a directory, not a file (exit 1)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['validate'],
+      baseDeps(io, { readDeployConfigImpl: () => workerCfg, statPathImpl: () => 'dir' }),
+    );
+    assert.equal(code, 1);
+    assert.match(io.stderr.join(''), /worker\.entry: entry 'src\/index\.ts' is not a file \(it's a dir\)/);
   });
 
   it('reports schema errors with their path (exit 1)', async () => {
@@ -176,7 +186,7 @@ describe('deploy-cli — validate', () => {
     const io = makeIo();
     const code = await runDeployCmd(
       ['validate', '--json'],
-      baseDeps(io, { readDeployConfigImpl: () => workerCfg, existsImpl: () => false }),
+      baseDeps(io, { readDeployConfigImpl: () => workerCfg, statPathImpl: () => 'missing' }),
     );
     assert.equal(code, 1);
     const parsed = JSON.parse(io.stdout.join('').trim());
