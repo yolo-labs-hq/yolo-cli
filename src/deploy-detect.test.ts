@@ -13,7 +13,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-import { DETECT_INIT_HINT, detectProjectShape } from './deploy-detect.js';
+import { DETECT_INIT_HINT, adaptWrangler, detectProjectShape } from './deploy-detect.js';
 import type { DeployConfig } from './deploy-config.js';
 
 function makeTmpDir(): string {
@@ -259,6 +259,53 @@ describe('deploy-detect — wrangler configs', () => {
     if (res.ok) {
       assert.deepEqual(res.shape, { type: 'worker', entry: '.vinext/worker.mjs', buildCommand: 'npm run build' });
     }
+  });
+});
+
+// ─── 2b. adaptWrangler — wrangler → .yolo/deploy.json migration ────────────
+
+describe('deploy-detect — adaptWrangler', () => {
+  it('maps a wrangler.json Worker (main + compatibility_flags) to a worker config', () => {
+    const stub = fileStub('/proj', {
+      'wrangler.json': JSON.stringify({ main: 'src/index.ts', compatibility_flags: ['nodejs_compat'] }),
+    });
+    const res = adaptWrangler('/proj', stub);
+    assert.ok(res);
+    assert.equal(res!.sourceFile, 'wrangler.json');
+    assert.deepEqual(res!.config, {
+      type: 'worker',
+      worker: { entry: 'src/index.ts' },
+      compatibilityFlags: ['nodejs_compat'],
+    });
+    assert.deepEqual(res!.warnings, []);
+  });
+
+  it('maps an assets-only wrangler.json to a static config', () => {
+    const stub = fileStub('/proj', {
+      'wrangler.json': JSON.stringify({ assets: { directory: 'public' } }),
+    });
+    const res = adaptWrangler('/proj', stub);
+    assert.ok(res);
+    assert.deepEqual(res!.config, { type: 'static', build: { outputDir: 'public' } });
+  });
+
+  it('maps a wrangler.toml Worker but WARNS that compatibility_flags are not read from toml', () => {
+    const stub = fileStub('/proj', { 'wrangler.toml': 'main = "worker.js"\n' });
+    const res = adaptWrangler('/proj', stub);
+    assert.ok(res);
+    assert.equal(res!.sourceFile, 'wrangler.toml');
+    assert.deepEqual(res!.config, { type: 'worker', worker: { entry: 'worker.js' } });
+    assert.equal(res!.warnings.length, 1);
+    assert.match(res!.warnings[0]!, /compatibility_flags.*NOT read from wrangler\.toml/);
+  });
+
+  it('returns undefined when no wrangler config is present', () => {
+    assert.equal(adaptWrangler('/proj', fileStub('/proj', {})), undefined);
+  });
+
+  it('returns undefined for a wrangler file carrying neither main nor assets', () => {
+    const stub = fileStub('/proj', { 'wrangler.json': JSON.stringify({ name: 'x' }) });
+    assert.equal(adaptWrangler('/proj', stub), undefined);
   });
 });
 

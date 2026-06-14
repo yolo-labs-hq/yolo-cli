@@ -299,9 +299,14 @@ function findWorkerEntry(cwd: string, read: ReadFileImpl, requireSignature: bool
 interface WranglerKeys {
   main?: string;
   assetsDirectory?: string;
+  /** Only resolved from the JSON forms (toml array parsing is out of scope). */
+  compatibilityFlags?: string[];
+  /** Which wrangler file the keys came from (for adapter messaging). */
+  sourceFile?: string;
 }
 
 function readWranglerConfig(cwd: string, read: ReadFileImpl): WranglerKeys | undefined {
+  const jsoncName = read(path.join(cwd, 'wrangler.jsonc')) !== undefined ? 'wrangler.jsonc' : 'wrangler.json';
   const jsoncText = read(path.join(cwd, 'wrangler.jsonc')) ?? read(path.join(cwd, 'wrangler.json'));
   if (jsoncText !== undefined) {
     const parsed = parseJsonc(jsoncText);
@@ -313,13 +318,67 @@ function readWranglerConfig(cwd: string, read: ReadFileImpl): WranglerKeys | und
         typeof (assets as Record<string, unknown>).directory === 'string'
           ? ((assets as Record<string, unknown>).directory as string)
           : undefined;
-      return { main, assetsDirectory };
+      const compatibilityFlags = Array.isArray(parsed.compatibility_flags)
+        ? (parsed.compatibility_flags.filter((f) => typeof f === 'string') as string[])
+        : undefined;
+      return {
+        main,
+        assetsDirectory,
+        ...(compatibilityFlags && compatibilityFlags.length > 0 ? { compatibilityFlags } : {}),
+        sourceFile: jsoncName,
+      };
     }
     // Unparseable wrangler file: treat as absent (fall through to toml).
   }
   const tomlText = read(path.join(cwd, 'wrangler.toml'));
-  if (tomlText !== undefined) return extractTomlKeys(tomlText);
+  if (tomlText !== undefined) return { ...extractTomlKeys(tomlText), sourceFile: 'wrangler.toml' };
   return undefined;
+}
+
+/**
+ * Adapt an existing wrangler config into the canonical `.yolo/deploy.json`
+ * shape — the migration `yolo deploy init` performs once when a project has a
+ * wrangler config but no deploy.json. Returns the deploy.json fields to merge,
+ * the source filename, what was migrated, and any honesty warnings (e.g. toml
+ * compatibility_flags aren't parsed by our minimal reader). Returns undefined
+ * when no wrangler config is present or it carries nothing adaptable.
+ */
+export function adaptWrangler(
+  cwd: string,
+  readFileImpl?: ReadFileImpl,
+): { config: Partial<DeployConfig>; sourceFile: string; migrated: string[]; warnings: string[] } | undefined {
+  const read = readFileImpl ?? defaultReadFile;
+  const w = readWranglerConfig(cwd, read);
+  if (w === undefined || w.sourceFile === undefined) return undefined;
+
+  const config: Partial<DeployConfig> = {};
+  const migrated: string[] = [];
+  const warnings: string[] = [];
+
+  if (w.main !== undefined) {
+    config.type = 'worker';
+    config.worker = { entry: w.main, ...(w.assetsDirectory !== undefined ? { assetsDir: w.assetsDirectory } : {}) };
+    migrated.push(`type=worker`, `worker.entry=${w.main}`);
+    if (w.assetsDirectory !== undefined) migrated.push(`worker.assetsDir=${w.assetsDirectory}`);
+  } else if (w.assetsDirectory !== undefined) {
+    config.type = 'static';
+    config.build = { outputDir: w.assetsDirectory };
+    migrated.push(`type=static`, `build.outputDir=${w.assetsDirectory}`);
+  }
+
+  if (w.compatibilityFlags && w.compatibilityFlags.length > 0) {
+    config.compatibilityFlags = w.compatibilityFlags;
+    migrated.push(`compatibilityFlags=[${w.compatibilityFlags.join(', ')}]`);
+  } else if (w.sourceFile === 'wrangler.toml') {
+    // The minimal toml reader extracts only top-level main/[assets].directory,
+    // not the compatibility_flags array — be honest rather than silently drop.
+    warnings.push(
+      'compatibility_flags (if any) were NOT read from wrangler.toml — add them to .yolo/deploy.json `compatibilityFlags` manually if your Worker needs them (e.g. nodejs_compat)',
+    );
+  }
+
+  if (migrated.length === 0) return undefined;
+  return { config, sourceFile: w.sourceFile, migrated, warnings };
 }
 
 /**

@@ -439,6 +439,39 @@ describe('deploy-cli — init', () => {
     assert.match(out, /committed by design; it contains no secrets/);
   });
 
+  it('adapts an existing wrangler.json into the written .yolo/deploy.json on a fresh init', async () => {
+    const io = makeIo();
+    const written: Array<{ config: Record<string, unknown> }> = [];
+    const code = await runDeployCmd(
+      ['init', '--slug', 'api'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => linked(null), // no existing deploy.json
+        // wrangler.json present on disk; auth still resolves from ENV (undefined
+        // for non-wrangler paths, mirroring the default stub).
+        readFileImpl: (p: string) =>
+          p.endsWith('wrangler.json')
+            ? JSON.stringify({ main: 'src/index.ts', compatibility_flags: ['nodejs_compat'] })
+            : undefined,
+        createProjectImpl: async () => ({ ok: true, value: { project: { id: 'hp_api', slug: 'api' } } }),
+        writeDeployConfigImpl: (_cwd, config) => {
+          written.push({ config: config as unknown as Record<string, unknown> });
+          return CONFIG_PATH;
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.equal(written.length, 1);
+    assert.deepEqual(written[0]!.config, {
+      $version: 1,
+      projectId: 'hp_api',
+      slug: 'api',
+      type: 'worker',
+      worker: { entry: 'src/index.ts' },
+      compatibilityFlags: ['nodejs_compat'],
+    });
+    assert.match(io.stdout.join(''), /note: adapted wrangler\.json → \.yolo\/deploy\.json \(.*worker\.entry=src\/index\.ts.*\)/);
+  });
+
   it('is idempotent: an existing link is left unchanged, no project created', async () => {
     const io = makeIo();
     let createCalls = 0;

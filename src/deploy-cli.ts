@@ -61,7 +61,7 @@ import {
   type D1QueryRow,
 } from './deploy-client.js';
 import { readDeployConfig, writeDeployConfig, type DeployConfig } from './deploy-config.js';
-import { detectProjectShape, type ProjectShape } from './deploy-detect.js';
+import { adaptWrangler, detectProjectShape, type ProjectShape } from './deploy-detect.js';
 import { defaultReadFile, type ReadFileImpl } from './auth-context.js';
 
 // ─── Injectable surface ───────────────────────────────────────────────────
@@ -278,6 +278,12 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
     return 0;
   }
 
+  // Fresh init in a project that has a wrangler config but no .yolo/deploy.json:
+  // migrate it onto the canonical format (init-only adaptation — the recommended
+  // setup move; the CLI reads wrangler only as a fallback). A pre-existing
+  // (shape-bearing) deploy.json is respected, so we only adapt when none exists.
+  const adapted = existing == null ? adaptWrangler(cwd, deps.readFileImpl) : undefined;
+
   const auth = resolveAuth(deps);
   if (!auth.ok) {
     io.err(`${formatFail({ kind: 'auth', message: auth.message })}\n`);
@@ -310,7 +316,7 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
             cwd,
             writeConfig,
             io,
-            { projectId, slug: str(owned!.slug) ?? takenSlug, type: parsed.type, existing },
+            { projectId, slug: str(owned!.slug) ?? takenSlug, type: parsed.type, existing, adapted },
             `OK: slug '${takenSlug}' was already yours — linked existing project ${projectId} — wrote .yolo/deploy.json`,
           );
         }
@@ -333,7 +339,7 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
     cwd,
     writeConfig,
     io,
-    { projectId, slug, type: parsed.type, existing },
+    { projectId, slug, type: parsed.type, existing, adapted },
     `OK: linked project ${projectId}${slug ? ` (slug ${slug})` : ''} — wrote .yolo/deploy.json`,
   );
 }
@@ -609,7 +615,7 @@ async function runValidateCmd(args: string[], deps: DeployCliDeps, io: DeployIo)
   if ((readFileImpl ?? defaultReadFile)(path.join(cwd, 'wrangler.toml')) !== undefined) {
     notes.push(
       'wrangler.toml found — YOLO Host reads only top-level `main` + `[assets].directory` from toml; ' +
-        'prefer `.yolo/deploy.json` (or wrangler.json) for reliable detection',
+        'run `yolo deploy init` to adapt it into `.yolo/deploy.json` (the canonical format)',
     );
   }
 
@@ -1063,11 +1069,21 @@ function writeLinkFile(
   cwd: string,
   writeConfig: typeof writeDeployConfig,
   io: DeployIo,
-  params: { projectId: string; slug?: string; type?: 'static' | 'worker'; existing?: DeployConfig | null },
+  params: {
+    projectId: string;
+    slug?: string;
+    type?: 'static' | 'worker';
+    existing?: DeployConfig | null;
+    adapted?: { config: Partial<DeployConfig>; sourceFile: string; migrated: string[]; warnings: string[] };
+  },
   message: string,
 ): number {
   const config: DeployConfig = {
     ...(params.existing ?? {}),
+    // Wrangler-adapted shape (worker/build/type/compatibilityFlags) goes BELOW
+    // existing — there is no existing on a fresh init — and ABOVE the explicit
+    // --slug/--type so an operator's explicit `--type` still wins.
+    ...(params.adapted?.config ?? {}),
     $version: 1,
     projectId: params.projectId,
     ...(params.slug ? { slug: params.slug } : {}),
@@ -1082,6 +1098,10 @@ function writeLinkFile(
     return 1;
   }
   io.out(`${message}\n`);
+  if (params.adapted) {
+    io.out(`note: adapted ${params.adapted.sourceFile} → .yolo/deploy.json (${params.adapted.migrated.join(', ')})\n`);
+    for (const w of params.adapted.warnings) io.out(`warn: ${w}\n`);
+  }
   io.out('note: .yolo/deploy.json is committed by design; it contains no secrets — commit it so future sessions, teammates, and CI ship to the same project.\n');
   return 0;
 }
