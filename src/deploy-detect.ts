@@ -296,11 +296,89 @@ function findWorkerEntry(cwd: string, read: ReadFileImpl, requireSignature: bool
 
 // ─── wrangler config extraction (minimal, no deps) ───────────────────────
 
+// Wrangler binding stanzas we recognize. We only DETECT their presence (to
+// warn) — we NEVER import them: wrangler bindings reference the user's OWN
+// Cloudflare account resources, which don't exist in YOLO Host's tenancy.
+// D1/KV/R2 are re-provisionable through our deploy.* tools; the rest are
+// unsupported on the platform.
+const PROVISIONABLE_BINDING_KEYS: Record<string, string> = {
+  d1_databases: 'D1',
+  kv_namespaces: 'KV',
+  r2_buckets: 'R2',
+};
+const UNSUPPORTED_BINDING_KEYS = [
+  'durable_objects',
+  'queues',
+  'services',
+  'service', // defensive: the canonical key is `services`, but accept singular too
+  'hyperdrive',
+  'vectorize',
+  'ai',
+  'analytics_engine_datasets',
+  'dispatch_namespaces',
+  'mtls_certificates',
+  'send_email',
+  'browser',
+  'workflows',
+  'pipelines',
+  'version_metadata',
+  'unsafe',
+  'wasm_modules',
+  'text_blobs',
+  'data_blobs',
+];
+const ALL_BINDING_KEYS = [...Object.keys(PROVISIONABLE_BINDING_KEYS), ...UNSUPPORTED_BINDING_KEYS];
+
+/**
+ * Binding stanzas present-and-non-empty in a parsed JSON wrangler config —
+ * including per-environment overrides under `env.<name>` (codex P2), since
+ * wrangler lets bindings live there with no top-level equivalent.
+ */
+function detectJsonBindingKinds(parsed: Record<string, unknown>): string[] {
+  const nonEmpty = (v: unknown) =>
+    Array.isArray(v) ? v.length > 0 : v !== null && typeof v === 'object' ? Object.keys(v).length > 0 : Boolean(v);
+  const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
+  const found = new Set<string>();
+  const scan = (obj: Record<string, unknown>) => {
+    for (const k of ALL_BINDING_KEYS) if (nonEmpty(obj[k])) found.add(k);
+  };
+  scan(parsed);
+  if (isObj(parsed.env)) for (const envCfg of Object.values(parsed.env)) if (isObj(envCfg)) scan(envCfg);
+  return [...found];
+}
+
+/**
+ * Binding stanzas present in a toml wrangler config — detected by SECTION
+ * HEADER (`[[d1_databases]]`, `[queues.producers]`, `[ai]`), not parsed, and
+ * including env-scoped sections (`[[env.production.kv_namespaces]]`). The
+ * minimal toml reader can't read the values, but it can notice the keys exist:
+ * any segment of the dotted section name that is a known binding key counts.
+ */
+function detectTomlBindingKinds(text: string): string[] {
+  const found = new Set<string>();
+  for (const raw of text.split('\n')) {
+    // Capture the full dotted section name incl. hyphenated env names
+    // (`[[env.prod-us.kv_namespaces]]`) before splitting on '.' (codex P3).
+    const m = /^\[+([A-Za-z0-9_.-]+)/.exec(raw.trim());
+    if (!m) continue;
+    const segs = m[1]!.split('.');
+    // The binding key is POSITIONAL, not "any segment": top-level `[[key]]` →
+    // segs[0]; env-scoped `[[env.<name>.key]]` → segs[2]. Scanning every
+    // segment would mis-read an env NAMED after a binding (`[env.ai.vars]`,
+    // `[env.queues.vars]`) as a binding (codex P3).
+    const key = segs[0] === 'env' ? segs[2] : segs[0];
+    if (key && ALL_BINDING_KEYS.includes(key)) found.add(key);
+  }
+  return [...found];
+}
+
 interface WranglerKeys {
   main?: string;
   assetsDirectory?: string;
   /** Only resolved from the JSON forms (toml array parsing is out of scope). */
   compatibilityFlags?: string[];
+  /** Binding stanza keys present (detected, never imported). */
+  bindingKinds?: string[];
   /** Which wrangler file the keys came from (for adapter messaging). */
   sourceFile?: string;
 }
@@ -321,17 +399,26 @@ function readWranglerConfig(cwd: string, read: ReadFileImpl): WranglerKeys | und
       const compatibilityFlags = Array.isArray(parsed.compatibility_flags)
         ? (parsed.compatibility_flags.filter((f) => typeof f === 'string') as string[])
         : undefined;
+      const bindingKinds = detectJsonBindingKinds(parsed);
       return {
         main,
         assetsDirectory,
         ...(compatibilityFlags && compatibilityFlags.length > 0 ? { compatibilityFlags } : {}),
+        ...(bindingKinds.length > 0 ? { bindingKinds } : {}),
         sourceFile: jsoncName,
       };
     }
     // Unparseable wrangler file: treat as absent (fall through to toml).
   }
   const tomlText = read(path.join(cwd, 'wrangler.toml'));
-  if (tomlText !== undefined) return { ...extractTomlKeys(tomlText), sourceFile: 'wrangler.toml' };
+  if (tomlText !== undefined) {
+    const bindingKinds = detectTomlBindingKinds(tomlText);
+    return {
+      ...extractTomlKeys(tomlText),
+      ...(bindingKinds.length > 0 ? { bindingKinds } : {}),
+      sourceFile: 'wrangler.toml',
+    };
+  }
   return undefined;
 }
 
@@ -375,6 +462,25 @@ export function adaptWrangler(
     warnings.push(
       'compatibility_flags (if any) were NOT read from wrangler.toml — add them to .yolo/deploy.json `compatibilityFlags` manually if your Worker needs them (e.g. nodejs_compat)',
     );
+  }
+
+  // Binding stanzas are NEVER imported (they reference the user's own CF
+  // account). Warn so a declared D1/KV/R2 doesn't silently leave env.<NAME>
+  // undefined at runtime, and so unsupported bindings aren't assumed to work.
+  if (w.bindingKinds && w.bindingKinds.length > 0) {
+    const provisionable = w.bindingKinds
+      .filter((k) => k in PROVISIONABLE_BINDING_KEYS)
+      .map((k) => PROVISIONABLE_BINDING_KEYS[k]);
+    const unsupported = w.bindingKinds.filter((k) => !(k in PROVISIONABLE_BINDING_KEYS));
+    if (provisionable.length > 0) {
+      warnings.push(
+        `wrangler config declares ${provisionable.join(', ')} binding(s) — NOT imported (they reference your own Cloudflare account); ` +
+          'provision them on YOLO Host with deploy.db_provision / deploy.kv_create / deploy.bucket_create so env.<NAME> exists at runtime',
+      );
+    }
+    if (unsupported.length > 0) {
+      warnings.push(`wrangler config declares ${unsupported.join(', ')} which YOLO Host does not support — dropped`);
+    }
   }
 
   if (migrated.length === 0) return undefined;
