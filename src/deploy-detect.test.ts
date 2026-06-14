@@ -126,6 +126,37 @@ describe('deploy-detect — deploy.json type wins', () => {
     if (res.ok) assert.deepEqual(res.shape, { type: 'worker', entry: 'src/index.ts' });
   });
 
+  it('a deploy.json worker INFERS the package.json build command (symmetry with static)', () => {
+    // Previously the explicit-worker branch only honored an explicit
+    // build.command, so a worker with a package.json build script did NOT
+    // auto-build (the retro asymmetry: static built, worker didn't). It now
+    // falls back to the package script like the static + wrangler branches.
+    const stub = fileStub('/proj', {
+      'src/index.ts': '// fetch handler\n',
+      'package.json': JSON.stringify({ scripts: { build: 'tsc -p .' } }),
+    });
+    const config: DeployConfig = { $version: 1, type: 'worker', worker: { entry: 'src/index.ts' } };
+    const res = detectProjectShape({ cwd: '/proj', config, readFileImpl: stub });
+    assert.equal(res.ok, true);
+    if (res.ok) assert.deepEqual(res.shape, { type: 'worker', entry: 'src/index.ts', buildCommand: 'npm run build' });
+  });
+
+  it('an explicit build.command on a worker still wins over the package.json script', () => {
+    const stub = fileStub('/proj', {
+      'dist/worker.mjs': 'export default { fetch() {} };',
+      'package.json': JSON.stringify({ scripts: { build: 'tsc' } }),
+    });
+    const config: DeployConfig = {
+      $version: 1,
+      type: 'worker',
+      worker: { entry: 'dist/worker.mjs', prebuilt: true },
+      build: { command: 'vite build' },
+    };
+    const res = detectProjectShape({ cwd: '/proj', config, readFileImpl: stub });
+    assert.equal(res.ok, true);
+    if (res.ok) assert.equal((res.shape as { buildCommand?: string }).buildCommand, 'vite build');
+  });
+
   it('static type with no resolvable output dir is detect-failed (actionable message)', () => {
     const config: DeployConfig = { $version: 1, type: 'static' };
     const res = detectProjectShape({ cwd: '/proj', config, readFileImpl: fileStub('/proj', {}) });

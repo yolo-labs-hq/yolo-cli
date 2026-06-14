@@ -141,7 +141,13 @@ export function detectProjectShape(options: DetectOptions): DetectResult {
         entry,
         ...(prebuilt && { prebuilt: true }),
         ...optional('assetsDir', config.worker?.assetsDir),
-        ...optional('buildCommand', config.build?.command),
+        // Symmetric with the static branch + the wrangler branch: fall back to
+        // the package.json build script when deploy.json omits an explicit
+        // build.command. Without this, an explicit-worker project would NOT
+        // auto-build (the asymmetry users hit — static built, worker didn't),
+        // and a `prebuilt` worker whose dist is produced by `npm run build`
+        // (no explicit build.command) would ship a missing entry.
+        ...optional('buildCommand', config.build?.command ?? pkgBuildCommand),
       },
       'deploy-json',
     );

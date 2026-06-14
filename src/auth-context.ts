@@ -75,7 +75,7 @@ export function resolveUserToken(
   return undefined;
 }
 
-function defaultReadFile(filePath: string): string | undefined {
+export function defaultReadFile(filePath: string): string | undefined {
   try {
     return fs.readFileSync(filePath, 'utf-8');
   } catch {

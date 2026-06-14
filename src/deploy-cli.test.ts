@@ -212,6 +212,76 @@ describe('deploy-cli — validate', () => {
     assert.match(io.stdout.join(''), /note:.*produced by the build/);
   });
 
+  it('a missing SOURCE worker entry is still an ERROR even with a build command (esbuild bundles it, build does not create it)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['validate'],
+      baseDeps(io, {
+        // Source worker (not prebuilt) + a package.json build script → the
+        // detected shape carries buildCommand, but the entry is bundled in
+        // place, so a typo'd missing entry must NOT be excused as "built".
+        readDeployConfigImpl: () => ({
+          ok: true as const,
+          config: { $version: 1 as const, slug: 'api', type: 'worker' as const, worker: { entry: 'src/indx.ts' } },
+          path: CONFIG_PATH,
+        }),
+        readFileImpl: (p: string) => (p.endsWith('package.json') ? JSON.stringify({ scripts: { build: 'tsc' } }) : undefined),
+        statPathImpl: () => 'missing',
+      }),
+    );
+    assert.equal(code, 1);
+    assert.match(io.stderr.join(''), /worker\.entry: entry 'src\/indx\.ts' does not exist/);
+  });
+
+  it('a missing PREBUILT worker entry with a build command is a NOTE (the build produces it)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['validate'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => ({
+          ok: true as const,
+          config: {
+            $version: 1 as const,
+            slug: 'api',
+            type: 'worker' as const,
+            worker: { entry: 'dist/worker.mjs', prebuilt: true },
+            build: { command: 'tsc' },
+          },
+          path: CONFIG_PATH,
+        }),
+        readFileImpl: () => undefined,
+        statPathImpl: () => 'missing',
+      }),
+    );
+    assert.equal(code, 0);
+    assert.match(io.stdout.join(''), /note:.*produced by the build/);
+  });
+
+  it('notes a present wrangler.toml (de-silences the minimal-toml-support gotcha)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['validate'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => workerCfg,
+        statPathImpl: () => 'file',
+        // wrangler.toml present on disk alongside a valid deploy.json.
+        readFileImpl: (p: string) => (p.endsWith('wrangler.toml') ? 'main = "src/index.ts"\n' : undefined),
+      }),
+    );
+    assert.equal(code, 0); // a note, not an error
+    assert.match(io.stdout.join(''), /note:.*wrangler\.toml found/);
+  });
+
+  it('does NOT note wrangler.toml when none is present', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['validate'],
+      baseDeps(io, { readDeployConfigImpl: () => workerCfg, statPathImpl: () => 'file', readFileImpl: () => undefined }),
+    );
+    assert.equal(code, 0);
+    assert.doesNotMatch(io.stdout.join(''), /wrangler\.toml/);
+  });
+
   it('rejects unknown flags/positionals with exit 64', async () => {
     const io = makeIo();
     assert.equal(await runDeployCmd(['validate', '--jsoon'], baseDeps(io)), 64);

@@ -62,7 +62,7 @@ import {
 } from './deploy-client.js';
 import { readDeployConfig, writeDeployConfig, type DeployConfig } from './deploy-config.js';
 import { detectProjectShape, type ProjectShape } from './deploy-detect.js';
-import type { ReadFileImpl } from './auth-context.js';
+import { defaultReadFile, type ReadFileImpl } from './auth-context.js';
 
 // ─── Injectable surface ───────────────────────────────────────────────────
 
@@ -561,11 +561,25 @@ async function runValidateCmd(args: string[], deps: DeployCliDeps, io: DeployIo)
   // the raw config command when there's no detected shape.
   const buildCmd = shape?.buildCommand ?? config?.build?.command;
   const statPath = deps.statPathImpl ?? defaultStatPath;
-  const checkPath = (rel: string, field: string, want: 'file' | 'dir', missingMsg: string) => {
+  // `producedByBuild` = is this path an OUTPUT the build command creates (a
+  // prebuilt worker module, a built assets dir) vs a SOURCE input esbuild
+  // bundles in place (a `src/index.ts` worker entry)? A missing OUTPUT with a
+  // build command pending is a note; a missing SOURCE entry is always an error
+  // — the build does not create it, so a typo must still fail validate (codex).
+  const checkPath = (
+    rel: string,
+    field: string,
+    want: 'file' | 'dir',
+    missingMsg: string,
+    producedByBuild: boolean,
+  ) => {
     const kind = statPath(path.resolve(cwd, rel));
     if (kind === 'missing') {
-      if (buildCmd) notes.push(`'${rel}' not present yet — produced by the build (\`${buildCmd}\`) at deploy time`);
-      else issues.push({ path: field, message: missingMsg });
+      if (buildCmd && producedByBuild) {
+        notes.push(`'${rel}' not present yet — produced by the build (\`${buildCmd}\`) at deploy time`);
+      } else {
+        issues.push({ path: field, message: missingMsg });
+      }
     } else if ((want === 'file' && kind !== 'file') || (want === 'dir' && kind !== 'dir')) {
       issues.push({ path: field, message: `'${rel}' is not a ${want === 'file' ? 'file' : 'directory'} (it's a ${kind})` });
     }
@@ -577,11 +591,26 @@ async function runValidateCmd(args: string[], deps: DeployCliDeps, io: DeployIo)
         'worker.entry',
         'file',
         `entry '${shape.entry}' does not exist${shape.prebuilt ? ' (prebuilt entries must be built before deploy)' : ' — build it or fix the path'}`,
+        // Only a PREBUILT worker entry is a build output; a source entry is
+        // bundled by esbuild, so a missing source entry stays a hard error.
+        shape.prebuilt === true,
       );
-      if (shape.assetsDir) checkPath(shape.assetsDir, 'worker.assetsDir', 'dir', `assets dir '${shape.assetsDir}' does not exist`);
+      if (shape.assetsDir) checkPath(shape.assetsDir, 'worker.assetsDir', 'dir', `assets dir '${shape.assetsDir}' does not exist`, true);
     } else if (shape.type === 'static') {
-      checkPath(shape.assetsDir, 'build.outputDir', 'dir', `static assets dir '${shape.assetsDir}' does not exist — run the build first`);
+      checkPath(shape.assetsDir, 'build.outputDir', 'dir', `static assets dir '${shape.assetsDir}' does not exist — run the build first`, true);
     }
+  }
+
+  // 4. wrangler.toml is read only by a minimal line-based extractor (top-level
+  //    `main` + `[assets].directory`); real-world toml — e.g. `main` sitting
+  //    under a `[table]` — is silently missed. `.yolo/deploy.json` is the
+  //    canonical format. Surface a NOTE so a present-but-unread toml isn't
+  //    silent (the retro gotcha: "wrangler.toml silently ignored").
+  if ((readFileImpl ?? defaultReadFile)(path.join(cwd, 'wrangler.toml')) !== undefined) {
+    notes.push(
+      'wrangler.toml found — YOLO Host reads only top-level `main` + `[assets].directory` from toml; ' +
+        'prefer `.yolo/deploy.json` (or wrangler.json) for reliable detection',
+    );
   }
 
   const ok = issues.length === 0;
