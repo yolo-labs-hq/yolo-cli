@@ -470,6 +470,66 @@ export async function queryD1(
   };
 }
 
+/**
+ * PUT /v1/deploy/projects/:id/slug — rename the project's primary slug.
+ * `keepOldAsRedirect` (default true) makes the old slug 308 → the new URL.
+ */
+export async function renameProject(
+  ctx: DeployContext,
+  projectId: string,
+  request: { slug: string; keepOldAsRedirect?: boolean },
+): Promise<ClientResult<unknown>> {
+  return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/slug`, { method: 'PUT', jsonBody: request });
+}
+
+/** POST /v1/deploy/projects/:id/aliases — add an alias hostname (slug). */
+export async function addAlias(
+  ctx: DeployContext,
+  projectId: string,
+  slug: string,
+): Promise<ClientResult<unknown>> {
+  return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/aliases`, { method: 'POST', jsonBody: { slug } });
+}
+
+/** DELETE /v1/deploy/projects/:id/aliases/:slug — remove an alias/redirect binding. */
+export async function removeAlias(
+  ctx: DeployContext,
+  projectId: string,
+  slug: string,
+): Promise<ClientResult<unknown>> {
+  return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/aliases/${enc(slug)}`, { method: 'DELETE' });
+}
+
+/** PUT /v1/deploy/projects/:id/redirects/:slug — 308 a slug to an external URL. */
+export async function setRedirect(
+  ctx: DeployContext,
+  projectId: string,
+  slug: string,
+  target: string,
+): Promise<ClientResult<unknown>> {
+  return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/redirects/${enc(slug)}`, {
+    method: 'PUT',
+    jsonBody: { target },
+  });
+}
+
+/**
+ * DELETE /v1/deploy/projects/:id — delete the project. A live site is refused
+ * server-side (a `not-confirmed` refusal with a hint) unless the caller passes
+ * the current slug as `confirmSlug`; a throwaway/never-shipped project deletes
+ * without confirmation.
+ */
+export async function deleteProject(
+  ctx: DeployContext,
+  projectId: string,
+  request: { confirmSlug?: string } = {},
+): Promise<ClientResult<unknown>> {
+  return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}`, {
+    method: 'DELETE',
+    ...(request.confirmSlug !== undefined ? { jsonBody: { confirmSlug: request.confirmSlug } } : {}),
+  });
+}
+
 /** GET /v1/deploy/projects/:id/logs (buffered variant). */
 export async function getLogs(
   ctx: DeployContext,

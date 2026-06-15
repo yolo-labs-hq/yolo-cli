@@ -12,6 +12,10 @@ import {
   runDeployCmd,
   parseSinceMinutes,
   parseDbQueryArgs,
+  parseRenameArgs,
+  parseAliasArgs,
+  parseRedirectArgs,
+  parseDeleteArgs,
   formatRowsTable,
   type DeployCliDeps,
   type DeployIo,
@@ -857,6 +861,186 @@ describe('deploy-cli — rollback', () => {
     );
     assert.equal(code, 2);
     assert.match(io.stderr.join(''), /FAIL \[release-not-found\]/);
+  });
+});
+
+// ─── rename / alias / redirect / delete ─────────────────────────────────────
+
+describe('deploy-cli — rename', () => {
+  it('PUTs the new slug with keepOldAsRedirect=true by default + prints the URL', async () => {
+    const io = makeIo();
+    let seen: Record<string, unknown> = {};
+    const code = await runDeployCmd(
+      ['rename', 'cooler-app'],
+      baseDeps(io, {
+        renameProjectImpl: async (_ctx, projectId, request) => {
+          seen = { projectId, ...request };
+          return { ok: true, value: { project: { slug: 'cooler-app', hostname: 'cooler-app.yolo.host' } } };
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.deepEqual(seen, { projectId: 'hp_8f3a', slug: 'cooler-app', keepOldAsRedirect: true });
+    const out = io.stdout.join('');
+    assert.match(out, /OK: renamed to slug cooler-app → https:\/\/cooler-app\.yolo\.host/);
+    assert.match(out, /old slug 'my-app' now 308/);
+  });
+
+  it('--no-redirect sets keepOldAsRedirect=false', async () => {
+    const io = makeIo();
+    let request: Record<string, unknown> = {};
+    await runDeployCmd(
+      ['rename', 'cooler-app', '--no-redirect'],
+      baseDeps(io, {
+        renameProjectImpl: async (_ctx, _projectId, req) => {
+          request = req as Record<string, unknown>;
+          return { ok: true, value: { project: { slug: 'cooler-app', hostname: 'cooler-app.yolo.host' } } };
+        },
+      }),
+    );
+    assert.equal(request.keepOldAsRedirect, false);
+  });
+
+  it('requires a new slug (exit 64)', async () => {
+    const io = makeIo();
+    assert.equal(await runDeployCmd(['rename'], baseDeps(io)), 64);
+    assert.equal(parseRenameArgs([]).ok, false);
+    const r = parseRenameArgs(['x', '--no-redirect', '--json']);
+    assert.equal(r.ok, true);
+    if (r.ok) assert.deepEqual([r.slug, r.keepOldAsRedirect, r.jsonOutput], ['x', false, true]);
+  });
+});
+
+describe('deploy-cli — alias', () => {
+  it('adds an alias via POST', async () => {
+    const io = makeIo();
+    let seen: { projectId?: string; slug?: string } = {};
+    const code = await runDeployCmd(
+      ['alias', 'beta'],
+      baseDeps(io, {
+        addAliasImpl: async (_ctx, projectId, slug) => {
+          seen = { projectId, slug };
+          return { ok: true, value: {} };
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.deepEqual(seen, { projectId: 'hp_8f3a', slug: 'beta' });
+    assert.match(io.stdout.join(''), /OK: added alias 'beta'/);
+  });
+
+  it('removes an alias via `alias rm <slug>` (DELETE)', async () => {
+    const io = makeIo();
+    let seen: { projectId?: string; slug?: string } = {};
+    const code = await runDeployCmd(
+      ['alias', 'rm', 'beta'],
+      baseDeps(io, {
+        removeAliasImpl: async (_ctx, projectId, slug) => {
+          seen = { projectId, slug };
+          return { ok: true, value: {} };
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.deepEqual(seen, { projectId: 'hp_8f3a', slug: 'beta' });
+    assert.match(io.stdout.join(''), /OK: removed alias 'beta'/);
+  });
+
+  it('requires a slug (exit 64) for both add and rm', async () => {
+    const io = makeIo();
+    assert.equal(await runDeployCmd(['alias'], baseDeps(io)), 64);
+    assert.equal(parseAliasArgs([]).ok, false);
+    assert.equal(parseAliasArgs(['rm']).ok, false);
+    const r = parseAliasArgs(['rm', 'beta']);
+    assert.equal(r.ok, true);
+    if (r.ok) assert.deepEqual([r.remove, r.slug], [true, 'beta']);
+  });
+});
+
+describe('deploy-cli — redirect', () => {
+  it('PUTs the slug → target url', async () => {
+    const io = makeIo();
+    let seen: { projectId?: string; slug?: string; url?: string } = {};
+    const code = await runDeployCmd(
+      ['redirect', 'old', 'https://example.com/new'],
+      baseDeps(io, {
+        setRedirectImpl: async (_ctx, projectId, slug, target) => {
+          seen = { projectId, slug, url: target };
+          return { ok: true, value: {} };
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.deepEqual(seen, { projectId: 'hp_8f3a', slug: 'old', url: 'https://example.com/new' });
+    assert.match(io.stdout.join(''), /OK: 'old' now 308 → https:\/\/example\.com\/new/);
+  });
+
+  it('requires both slug and url (exit 64)', async () => {
+    const io = makeIo();
+    assert.equal(await runDeployCmd(['redirect', 'only-one'], baseDeps(io)), 64);
+    assert.equal(parseRedirectArgs(['a']).ok, false);
+    assert.equal(parseRedirectArgs(['a', 'b', 'c']).ok, false);
+  });
+});
+
+describe('deploy-cli — delete', () => {
+  it('deletes a throwaway project without --confirm', async () => {
+    const io = makeIo();
+    let request: Record<string, unknown> = { sentinel: true };
+    const code = await runDeployCmd(
+      ['delete'],
+      baseDeps(io, {
+        deleteProjectImpl: async (_ctx, _projectId, req) => {
+          request = req as Record<string, unknown>;
+          return { ok: true, value: {} };
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.deepEqual(request, {});
+    assert.match(io.stdout.join(''), /OK: deleted project my-app/);
+  });
+
+  it('passes --confirm <slug> through as confirmSlug', async () => {
+    const io = makeIo();
+    let request: Record<string, unknown> = {};
+    await runDeployCmd(
+      ['delete', '--confirm', 'my-app'],
+      baseDeps(io, {
+        deleteProjectImpl: async (_ctx, _projectId, req) => {
+          request = req as Record<string, unknown>;
+          return { ok: true, value: {} };
+        },
+      }),
+    );
+    assert.deepEqual(request, { confirmSlug: 'my-app' });
+  });
+
+  it('surfaces a not-confirmed refusal (exit 2) with the backend hint', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['delete'],
+      baseDeps(io, {
+        deleteProjectImpl: async () => ({
+          ok: false,
+          kind: 'not-confirmed',
+          message: 'this is a live site',
+          hint: 'pass --confirm my-app to delete it',
+          status: 409,
+        }),
+      }),
+    );
+    assert.equal(code, 2);
+    const err = io.stderr.join('');
+    assert.match(err, /FAIL \[not-confirmed\]/);
+    assert.match(err, /hint: pass --confirm my-app/);
+  });
+
+  it('parses --confirm=<slug> and rejects bare positionals', () => {
+    const r = parseDeleteArgs(['--confirm=foo']);
+    assert.equal(r.ok, true);
+    if (r.ok) assert.equal(r.confirmSlug, 'foo');
+    assert.equal(parseDeleteArgs(['stray']).ok, false);
   });
 });
 

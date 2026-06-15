@@ -51,6 +51,11 @@ import {
   getProjectStatus,
   listProjects,
   rollbackProject,
+  renameProject,
+  addAlias,
+  removeAlias,
+  setRedirect,
+  deleteProject,
   getLogs,
   tailLogs,
   queryD1,
@@ -86,6 +91,11 @@ export interface DeployCliDeps {
   getProjectStatusImpl?: typeof getProjectStatus;
   listProjectsImpl?: typeof listProjects;
   rollbackProjectImpl?: typeof rollbackProject;
+  renameProjectImpl?: typeof renameProject;
+  addAliasImpl?: typeof addAlias;
+  removeAliasImpl?: typeof removeAlias;
+  setRedirectImpl?: typeof setRedirect;
+  deleteProjectImpl?: typeof deleteProject;
   getLogsImpl?: typeof getLogs;
   tailLogsImpl?: typeof tailLogs;
   queryD1Impl?: typeof queryD1;
@@ -100,6 +110,11 @@ const USAGE = [
   '       yolo deploy status [--json]',
   '       yolo deploy logs [--tail] [--since <dur>] [--json]',
   '       yolo deploy rollback [releaseId] [--json]',
+  '       yolo deploy rename <newslug> [--no-redirect] [--json]',
+  '       yolo deploy alias <slug> [--json]',
+  '       yolo deploy alias rm <slug> [--json]',
+  '       yolo deploy redirect <slug> <url> [--json]',
+  '       yolo deploy delete [--confirm <slug>] [--json]',
   '       yolo deploy db query "<sql>" [--json]',
 ].join('\n');
 
@@ -120,6 +135,10 @@ export async function runDeployCmd(args: string[], deps: DeployCliDeps = {}): Pr
   if (sub === 'status') return runStatusCmd(args.slice(1), deps, io);
   if (sub === 'logs') return runLogsCmd(args.slice(1), deps, io);
   if (sub === 'rollback') return runRollbackCmd(args.slice(1), deps, io);
+  if (sub === 'rename') return runRenameCmd(args.slice(1), deps, io);
+  if (sub === 'alias') return runAliasCmd(args.slice(1), deps, io);
+  if (sub === 'redirect') return runRedirectCmd(args.slice(1), deps, io);
+  if (sub === 'delete') return runDeleteCmd(args.slice(1), deps, io);
   if (sub === 'db') return runDbCmd(args.slice(1), deps, io);
   if (sub && !sub.startsWith('--')) {
     io.err(`yolo deploy: unknown subcommand '${sub}'\n${USAGE}\n`);
@@ -890,6 +909,281 @@ async function runRollbackCmd(args: string[], deps: DeployCliDeps, io: DeployIo)
   const releaseId = str(release.releaseId) ?? str(release.id) ?? parsed.releaseId ?? '(previous live)';
   const url = str(raw.url) ?? str(release.url);
   io.out(`OK: rolled back ${linked.slug ?? linked.projectId} to release ${releaseId}${url ? ` → ${url}` : ''}\n`);
+  return 0;
+}
+
+// ─── rename ───────────────────────────────────────────────────────────────
+
+interface ParsedRenameArgs {
+  ok: true;
+  slug: string;
+  keepOldAsRedirect: boolean;
+  jsonOutput: boolean;
+}
+
+export function parseRenameArgs(args: string[]): ParsedRenameArgs | ParseError {
+  let slug: string | undefined;
+  let keepOldAsRedirect = true;
+  let jsonOutput = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--json') {
+      jsonOutput = true;
+    } else if (a === '--no-redirect') {
+      keepOldAsRedirect = false;
+    } else if (a.startsWith('--')) {
+      return { ok: false, message: `unknown option: ${a}` };
+    } else if (slug === undefined) {
+      slug = a;
+    } else {
+      return { ok: false, message: `unexpected positional argument: ${a}` };
+    }
+  }
+  if (slug === undefined || slug.trim() === '') {
+    return { ok: false, message: 'a new slug is required: yolo deploy rename <newslug>' };
+  }
+  return { ok: true, slug, keepOldAsRedirect, jsonOutput };
+}
+
+async function runRenameCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Promise<number> {
+  const parsed = parseRenameArgs(args);
+  if (!parsed.ok) {
+    io.err(`yolo deploy rename: ${parsed.message}\nUsage: yolo deploy rename <newslug> [--no-redirect] [--json]\n`);
+    return 64;
+  }
+  const linked = requireLink(deps, io);
+  if (!linked.ok) return linked.exitCode;
+  const auth = resolveAuth(deps);
+  if (!auth.ok) {
+    io.err(`${formatFail({ kind: 'auth', message: auth.message })}\n`);
+    return 78;
+  }
+
+  const rename = deps.renameProjectImpl ?? renameProject;
+  const result = await rename(auth.context, linked.projectId, {
+    slug: parsed.slug,
+    keepOldAsRedirect: parsed.keepOldAsRedirect,
+  });
+  if (!result.ok) {
+    io.err(`${formatFail(result)}\n`);
+    return exitCodeForFailure(result.kind);
+  }
+  if (parsed.jsonOutput) {
+    io.out(`${JSON.stringify(result.value, null, 2)}\n`);
+    return 0;
+  }
+  const raw = (result.value && typeof result.value === 'object' ? result.value : {}) as Record<string, unknown>;
+  const project = (raw.project && typeof raw.project === 'object' ? raw.project : raw) as Record<string, unknown>;
+  const newSlug = str(project.slug) ?? parsed.slug;
+  const url = str(project.hostname) ?? str(project.url) ?? str(raw.url);
+  const newUrl = url ? (url.startsWith('http') ? url : `https://${url}`) : `https://${newSlug}`;
+  io.out(`OK: renamed to slug ${newSlug} → ${newUrl}\n`);
+  if (parsed.keepOldAsRedirect && linked.slug) {
+    io.out(`  old slug '${linked.slug}' now 308 → ${newUrl}\n`);
+  }
+  return 0;
+}
+
+// ─── alias ──────────────────────────────────────────────────────────────────
+
+interface ParsedAliasArgs {
+  ok: true;
+  remove: boolean;
+  slug: string;
+  jsonOutput: boolean;
+}
+
+export function parseAliasArgs(args: string[]): ParsedAliasArgs | ParseError {
+  let remove = false;
+  let slug: string | undefined;
+  let jsonOutput = false;
+
+  // `alias rm <slug>` — a leading `rm` positional flips to removal.
+  let rest = args;
+  if (rest[0] === 'rm') {
+    remove = true;
+    rest = rest.slice(1);
+  }
+
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i]!;
+    if (a === '--json') {
+      jsonOutput = true;
+    } else if (a.startsWith('--')) {
+      return { ok: false, message: `unknown option: ${a}` };
+    } else if (slug === undefined) {
+      slug = a;
+    } else {
+      return { ok: false, message: `unexpected positional argument: ${a}` };
+    }
+  }
+  if (slug === undefined || slug.trim() === '') {
+    return {
+      ok: false,
+      message: remove ? 'a slug is required: yolo deploy alias rm <slug>' : 'a slug is required: yolo deploy alias <slug>',
+    };
+  }
+  return { ok: true, remove, slug, jsonOutput };
+}
+
+async function runAliasCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Promise<number> {
+  const parsed = parseAliasArgs(args);
+  if (!parsed.ok) {
+    io.err(
+      `yolo deploy alias: ${parsed.message}\nUsage: yolo deploy alias <slug> [--json]\n       yolo deploy alias rm <slug> [--json]\n`,
+    );
+    return 64;
+  }
+  const linked = requireLink(deps, io);
+  if (!linked.ok) return linked.exitCode;
+  const auth = resolveAuth(deps);
+  if (!auth.ok) {
+    io.err(`${formatFail({ kind: 'auth', message: auth.message })}\n`);
+    return 78;
+  }
+
+  const result = parsed.remove
+    ? await (deps.removeAliasImpl ?? removeAlias)(auth.context, linked.projectId, parsed.slug)
+    : await (deps.addAliasImpl ?? addAlias)(auth.context, linked.projectId, parsed.slug);
+  if (!result.ok) {
+    io.err(`${formatFail(result)}\n`);
+    return exitCodeForFailure(result.kind);
+  }
+  if (parsed.jsonOutput) {
+    io.out(`${JSON.stringify(result.value, null, 2)}\n`);
+    return 0;
+  }
+  if (parsed.remove) {
+    io.out(`OK: removed alias '${parsed.slug}' from ${linked.slug ?? linked.projectId}\n`);
+  } else {
+    io.out(`OK: added alias '${parsed.slug}' to ${linked.slug ?? linked.projectId}\n`);
+  }
+  return 0;
+}
+
+// ─── redirect ───────────────────────────────────────────────────────────────
+
+interface ParsedRedirectArgs {
+  ok: true;
+  slug: string;
+  url: string;
+  jsonOutput: boolean;
+}
+
+export function parseRedirectArgs(args: string[]): ParsedRedirectArgs | ParseError {
+  const positionals: string[] = [];
+  let jsonOutput = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--json') {
+      jsonOutput = true;
+    } else if (a.startsWith('--')) {
+      return { ok: false, message: `unknown option: ${a}` };
+    } else {
+      positionals.push(a);
+    }
+  }
+  if (positionals.length < 2) {
+    return { ok: false, message: 'a slug and a target URL are required: yolo deploy redirect <slug> <url>' };
+  }
+  if (positionals.length > 2) {
+    return { ok: false, message: `unexpected positional argument: ${positionals[2]}` };
+  }
+  return { ok: true, slug: positionals[0]!, url: positionals[1]!, jsonOutput };
+}
+
+async function runRedirectCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Promise<number> {
+  const parsed = parseRedirectArgs(args);
+  if (!parsed.ok) {
+    io.err(`yolo deploy redirect: ${parsed.message}\nUsage: yolo deploy redirect <slug> <url> [--json]\n`);
+    return 64;
+  }
+  const linked = requireLink(deps, io);
+  if (!linked.ok) return linked.exitCode;
+  const auth = resolveAuth(deps);
+  if (!auth.ok) {
+    io.err(`${formatFail({ kind: 'auth', message: auth.message })}\n`);
+    return 78;
+  }
+
+  const redirect = deps.setRedirectImpl ?? setRedirect;
+  const result = await redirect(auth.context, linked.projectId, parsed.slug, parsed.url);
+  if (!result.ok) {
+    io.err(`${formatFail(result)}\n`);
+    return exitCodeForFailure(result.kind);
+  }
+  if (parsed.jsonOutput) {
+    io.out(`${JSON.stringify(result.value, null, 2)}\n`);
+    return 0;
+  }
+  io.out(`OK: '${parsed.slug}' now 308 → ${parsed.url}\n`);
+  return 0;
+}
+
+// ─── delete ─────────────────────────────────────────────────────────────────
+
+interface ParsedDeleteArgs {
+  ok: true;
+  confirmSlug?: string;
+  jsonOutput: boolean;
+}
+
+export function parseDeleteArgs(args: string[]): ParsedDeleteArgs | ParseError {
+  let confirmSlug: string | undefined;
+  let jsonOutput = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--json') {
+      jsonOutput = true;
+    } else if (a === '--confirm') {
+      const v = args[++i];
+      if (!v || v.startsWith('--')) return { ok: false, message: '--confirm requires the current slug as its value' };
+      confirmSlug = v;
+    } else if (a.startsWith('--confirm=')) {
+      confirmSlug = a.slice('--confirm='.length);
+    } else if (a.startsWith('--')) {
+      return { ok: false, message: `unknown option: ${a}` };
+    } else {
+      return { ok: false, message: `unexpected positional argument: ${a}` };
+    }
+  }
+  return { ok: true, confirmSlug, jsonOutput };
+}
+
+async function runDeleteCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Promise<number> {
+  const parsed = parseDeleteArgs(args);
+  if (!parsed.ok) {
+    io.err(`yolo deploy delete: ${parsed.message}\nUsage: yolo deploy delete [--confirm <slug>] [--json]\n`);
+    return 64;
+  }
+  const linked = requireLink(deps, io);
+  if (!linked.ok) return linked.exitCode;
+  const auth = resolveAuth(deps);
+  if (!auth.ok) {
+    io.err(`${formatFail({ kind: 'auth', message: auth.message })}\n`);
+    return 78;
+  }
+
+  const del = deps.deleteProjectImpl ?? deleteProject;
+  const result = await del(
+    auth.context,
+    linked.projectId,
+    parsed.confirmSlug !== undefined ? { confirmSlug: parsed.confirmSlug } : {},
+  );
+  if (!result.ok) {
+    // A live site is refused with `not-confirmed` + a hint — surfaced verbatim
+    // by formatFail (the backend's message tells the operator to pass --confirm).
+    io.err(`${formatFail(result)}\n`);
+    return exitCodeForFailure(result.kind);
+  }
+  if (parsed.jsonOutput) {
+    io.out(`${JSON.stringify(result.value, null, 2)}\n`);
+    return 0;
+  }
+  io.out(`OK: deleted project ${linked.slug ?? linked.projectId}\n`);
   return 0;
 }
 
