@@ -56,6 +56,7 @@ import {
   removeAlias,
   setRedirect,
   deleteProject,
+  cloneProject,
   getLogs,
   tailLogs,
   queryD1,
@@ -96,6 +97,7 @@ export interface DeployCliDeps {
   removeAliasImpl?: typeof removeAlias;
   setRedirectImpl?: typeof setRedirect;
   deleteProjectImpl?: typeof deleteProject;
+  cloneProjectImpl?: typeof cloneProject;
   getLogsImpl?: typeof getLogs;
   tailLogsImpl?: typeof tailLogs;
   queryD1Impl?: typeof queryD1;
@@ -115,6 +117,7 @@ const USAGE = [
   '       yolo deploy alias rm <slug> [--json]',
   '       yolo deploy redirect <slug> <url> [--json]',
   '       yolo deploy delete [--confirm <slug>] [--json]',
+  '       yolo deploy clone [--name <name>] [--slug <slug>] [--json]',
   '       yolo deploy db query "<sql>" [--json]',
 ].join('\n');
 
@@ -139,6 +142,7 @@ export async function runDeployCmd(args: string[], deps: DeployCliDeps = {}): Pr
   if (sub === 'alias') return runAliasCmd(args.slice(1), deps, io);
   if (sub === 'redirect') return runRedirectCmd(args.slice(1), deps, io);
   if (sub === 'delete') return runDeleteCmd(args.slice(1), deps, io);
+  if (sub === 'clone') return runCloneCmd(args.slice(1), deps, io);
   if (sub === 'db') return runDbCmd(args.slice(1), deps, io);
   if (sub && !sub.startsWith('--')) {
     io.err(`yolo deploy: unknown subcommand '${sub}'\n${USAGE}\n`);
@@ -1184,6 +1188,99 @@ async function runDeleteCmd(args: string[], deps: DeployCliDeps, io: DeployIo): 
     return 0;
   }
   io.out(`OK: deleted project ${linked.slug ?? linked.projectId}\n`);
+  return 0;
+}
+
+// ─── clone ──────────────────────────────────────────────────────────────────
+//
+// Duplicate the linked project's config (env + secrets + fresh D1/KV/R2
+// bindings) into a new EMPTY project. No release is copied — re-ship the clone
+// to populate it. Optional --name/--slug name the clone; the backend derives
+// defaults otherwise.
+
+interface ParsedCloneArgs {
+  ok: true;
+  name?: string;
+  slug?: string;
+  jsonOutput: boolean;
+}
+
+export function parseCloneArgs(args: string[]): ParsedCloneArgs | ParseError {
+  let name: string | undefined;
+  let slug: string | undefined;
+  let jsonOutput = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--json') {
+      jsonOutput = true;
+    } else if (a === '--name') {
+      const v = args[++i];
+      if (!v || v.startsWith('--')) return { ok: false, message: '--name requires a value' };
+      name = v;
+    } else if (a.startsWith('--name=')) {
+      name = a.slice('--name='.length);
+    } else if (a === '--slug') {
+      const v = args[++i];
+      if (!v || v.startsWith('--')) return { ok: false, message: '--slug requires a value' };
+      slug = v;
+    } else if (a.startsWith('--slug=')) {
+      slug = a.slice('--slug='.length);
+    } else if (a.startsWith('--')) {
+      return { ok: false, message: `unknown option: ${a}` };
+    } else {
+      return { ok: false, message: `unexpected positional argument: ${a}` };
+    }
+  }
+  return { ok: true, name, slug, jsonOutput };
+}
+
+async function runCloneCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Promise<number> {
+  const parsed = parseCloneArgs(args);
+  if (!parsed.ok) {
+    io.err(`yolo deploy clone: ${parsed.message}\nUsage: yolo deploy clone [--name <name>] [--slug <slug>] [--json]\n`);
+    return 64;
+  }
+  const linked = requireLink(deps, io);
+  if (!linked.ok) return linked.exitCode;
+  const auth = resolveAuth(deps);
+  if (!auth.ok) {
+    io.err(`${formatFail({ kind: 'auth', message: auth.message })}\n`);
+    return 78;
+  }
+
+  const clone = deps.cloneProjectImpl ?? cloneProject;
+  const result = await clone(auth.context, linked.projectId, {
+    ...(parsed.name !== undefined ? { name: parsed.name } : {}),
+    ...(parsed.slug !== undefined ? { slug: parsed.slug } : {}),
+  });
+  if (!result.ok) {
+    io.err(`${formatFail(result)}\n`);
+    return exitCodeForFailure(result.kind);
+  }
+  if (parsed.jsonOutput) {
+    io.out(`${JSON.stringify(result.value, null, 2)}\n`);
+    return 0;
+  }
+  const raw = (result.value && typeof result.value === 'object' ? result.value : {}) as Record<string, unknown>;
+  const project = (raw.project && typeof raw.project === 'object' ? raw.project : raw) as Record<string, unknown>;
+  const newSlug = str(project.slug) ?? parsed.slug;
+  const newId = str(project.id) ?? str(project.projectId);
+  const url = str(project.hostname) ?? str(project.url);
+  const newUrl = url ? (url.startsWith('http') ? url : `https://${url}`) : newSlug ? `https://${newSlug}` : undefined;
+  io.out(
+    `OK: cloned ${linked.slug ?? linked.projectId} → ${newSlug ?? '(new project)'}${newUrl ? ` (${newUrl})` : ''}\n`,
+  );
+  // The clone is a separate, EMPTY project (no release). This directory is still
+  // linked to the SOURCE in .yolo/deploy.json, so a plain `yolo deploy` here would
+  // ship to the source, not the clone — and `yolo deploy link` refuses to repoint
+  // an existing link. So don't say "re-ship"; print the explicit relink step
+  // (codex P2 r5) the user must run to start shipping code into the clone.
+  io.out(
+    `The clone is empty. To ship into it, link a checkout to ${newId ?? 'the new project'}:\n` +
+      `  yolo deploy link --project-id ${newId ?? '<clone-id>'}` +
+      `   (in a fresh directory, or after removing this directory's .yolo/deploy.json)\n`,
+  );
   return 0;
 }
 

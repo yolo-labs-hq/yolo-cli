@@ -16,6 +16,7 @@ import {
   parseAliasArgs,
   parseRedirectArgs,
   parseDeleteArgs,
+  parseCloneArgs,
   formatRowsTable,
   type DeployCliDeps,
   type DeployIo,
@@ -1041,6 +1042,101 @@ describe('deploy-cli — delete', () => {
     assert.equal(r.ok, true);
     if (r.ok) assert.equal(r.confirmSlug, 'foo');
     assert.equal(parseDeleteArgs(['stray']).ok, false);
+  });
+});
+
+describe('deploy-cli — clone', () => {
+  it('clones the linked project with no flags (empty body)', async () => {
+    const io = makeIo();
+    let request: Record<string, unknown> = { sentinel: true };
+    let calledProjectId: string | undefined;
+    const code = await runDeployCmd(
+      ['clone'],
+      baseDeps(io, {
+        cloneProjectImpl: async (_ctx, projectId, req) => {
+          calledProjectId = projectId;
+          request = req as Record<string, unknown>;
+          return {
+            ok: true,
+            value: { project: { id: 'hp_clone1', slug: 'my-app-copy', hostname: 'my-app-copy.yolo.host' }, sourceSlug: 'my-app', resourcesCloned: 2, secretsCloned: 1 },
+          };
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.equal(calledProjectId, 'hp_8f3a');
+    assert.deepEqual(request, {});
+    const out = io.stdout.join('');
+    assert.match(out, /OK: cloned my-app → my-app-copy/);
+    assert.match(out, /my-app-copy\.yolo\.host/);
+    // The clone is empty + this dir stays linked to the source, so the message
+    // must give the explicit relink step, not advise a (mis-targeted) re-ship.
+    assert.doesNotMatch(out, /re-ship to populate it/);
+    assert.match(out, /yolo deploy link --project-id hp_clone1/);
+  });
+
+  it('passes --name and --slug through verbatim', async () => {
+    const io = makeIo();
+    let request: Record<string, unknown> = {};
+    await runDeployCmd(
+      ['clone', '--name', 'My Copy', '--slug', 'my-copy'],
+      baseDeps(io, {
+        cloneProjectImpl: async (_ctx, _projectId, req) => {
+          request = req as Record<string, unknown>;
+          return { ok: true, value: { project: { slug: 'my-copy' }, sourceSlug: 'my-app', resourcesCloned: 0, secretsCloned: 0 } };
+        },
+      }),
+    );
+    assert.deepEqual(request, { name: 'My Copy', slug: 'my-copy' });
+  });
+
+  it('surfaces a slug-taken refusal (exit 2) with the backend hint', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['clone', '--slug', 'taken'],
+      baseDeps(io, {
+        cloneProjectImpl: async () => ({
+          ok: false,
+          kind: 'slug-taken',
+          message: 'that slug is in use',
+          hint: 'pick another --slug',
+          status: 409,
+        }),
+      }),
+    );
+    assert.equal(code, 2);
+    const err = io.stderr.join('');
+    assert.match(err, /FAIL \[slug-taken\]/);
+    assert.match(err, /hint: pick another --slug/);
+  });
+
+  it('emits the raw JSON envelope under --json', async () => {
+    const io = makeIo();
+    await runDeployCmd(
+      ['clone', '--json'],
+      baseDeps(io, {
+        cloneProjectImpl: async () => ({
+          ok: true,
+          value: { project: { slug: 'my-app-copy' }, sourceSlug: 'my-app', resourcesCloned: 3, secretsCloned: 2 },
+        }),
+      }),
+    );
+    const parsed = JSON.parse(io.stdout.join(''));
+    assert.equal(parsed.sourceSlug, 'my-app');
+    assert.equal(parsed.resourcesCloned, 3);
+    assert.equal(parsed.secretsCloned, 2);
+  });
+
+  it('parses --name=/--slug= forms and rejects bare positionals + dangling flags', () => {
+    const r = parseCloneArgs(['--name=Foo', '--slug=foo']);
+    assert.equal(r.ok, true);
+    if (r.ok) {
+      assert.equal(r.name, 'Foo');
+      assert.equal(r.slug, 'foo');
+    }
+    assert.equal(parseCloneArgs(['stray']).ok, false);
+    assert.equal(parseCloneArgs(['--name']).ok, false);
+    assert.equal(parseCloneArgs(['--slug']).ok, false);
   });
 });
 

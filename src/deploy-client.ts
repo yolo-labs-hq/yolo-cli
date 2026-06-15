@@ -530,6 +530,28 @@ export async function deleteProject(
   });
 }
 
+/**
+ * POST /v1/deploy/projects/:id/clone — duplicate a project's config (env +
+ * secrets + fresh D1/KV/R2 bindings) into a new EMPTY project. No release is
+ * copied — the clone must be re-shipped to populate it. Optional `name`/`slug`
+ * name the clone; the backend derives defaults otherwise. Returns
+ * `{ project, sourceSlug, resourcesCloned, secretsCloned }`. 4xx refusal
+ * reasons (slug-taken, hosting-disabled, …) pass through as the failure `kind`.
+ */
+export async function cloneProject(
+  ctx: DeployContext,
+  projectId: string,
+  request: { name?: string; slug?: string } = {},
+): Promise<ClientResult<unknown>> {
+  return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/clone`, {
+    method: 'POST',
+    jsonBody: {
+      ...(request.name !== undefined ? { name: request.name } : {}),
+      ...(request.slug !== undefined ? { slug: request.slug } : {}),
+    },
+  });
+}
+
 /** GET /v1/deploy/projects/:id/logs (buffered variant). */
 export async function getLogs(
   ctx: DeployContext,
