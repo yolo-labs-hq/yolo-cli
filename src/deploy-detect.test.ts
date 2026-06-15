@@ -13,7 +13,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-import { DETECT_INIT_HINT, detectProjectShape } from './deploy-detect.js';
+import { DETECT_INIT_HINT, adaptWrangler, detectProjectShape } from './deploy-detect.js';
 import type { DeployConfig } from './deploy-config.js';
 
 function makeTmpDir(): string {
@@ -126,6 +126,37 @@ describe('deploy-detect — deploy.json type wins', () => {
     if (res.ok) assert.deepEqual(res.shape, { type: 'worker', entry: 'src/index.ts' });
   });
 
+  it('a deploy.json worker INFERS the package.json build command (symmetry with static)', () => {
+    // Previously the explicit-worker branch only honored an explicit
+    // build.command, so a worker with a package.json build script did NOT
+    // auto-build (the retro asymmetry: static built, worker didn't). It now
+    // falls back to the package script like the static + wrangler branches.
+    const stub = fileStub('/proj', {
+      'src/index.ts': '// fetch handler\n',
+      'package.json': JSON.stringify({ scripts: { build: 'tsc -p .' } }),
+    });
+    const config: DeployConfig = { $version: 1, type: 'worker', worker: { entry: 'src/index.ts' } };
+    const res = detectProjectShape({ cwd: '/proj', config, readFileImpl: stub });
+    assert.equal(res.ok, true);
+    if (res.ok) assert.deepEqual(res.shape, { type: 'worker', entry: 'src/index.ts', buildCommand: 'npm run build' });
+  });
+
+  it('an explicit build.command on a worker still wins over the package.json script', () => {
+    const stub = fileStub('/proj', {
+      'dist/worker.mjs': 'export default { fetch() {} };',
+      'package.json': JSON.stringify({ scripts: { build: 'tsc' } }),
+    });
+    const config: DeployConfig = {
+      $version: 1,
+      type: 'worker',
+      worker: { entry: 'dist/worker.mjs', prebuilt: true },
+      build: { command: 'vite build' },
+    };
+    const res = detectProjectShape({ cwd: '/proj', config, readFileImpl: stub });
+    assert.equal(res.ok, true);
+    if (res.ok) assert.equal((res.shape as { buildCommand?: string }).buildCommand, 'vite build');
+  });
+
   it('static type with no resolvable output dir is detect-failed (actionable message)', () => {
     const config: DeployConfig = { $version: 1, type: 'static' };
     const res = detectProjectShape({ cwd: '/proj', config, readFileImpl: fileStub('/proj', {}) });
@@ -228,6 +259,159 @@ describe('deploy-detect — wrangler configs', () => {
     if (res.ok) {
       assert.deepEqual(res.shape, { type: 'worker', entry: '.vinext/worker.mjs', buildCommand: 'npm run build' });
     }
+  });
+});
+
+// ─── 2b. adaptWrangler — wrangler → .yolo/deploy.json migration ────────────
+
+describe('deploy-detect — adaptWrangler', () => {
+  it('maps a wrangler.json Worker (main + compatibility_flags) to a worker config', () => {
+    const stub = fileStub('/proj', {
+      'wrangler.json': JSON.stringify({ main: 'src/index.ts', compatibility_flags: ['nodejs_compat'] }),
+    });
+    const res = adaptWrangler('/proj', stub);
+    assert.ok(res);
+    assert.equal(res!.sourceFile, 'wrangler.json');
+    assert.deepEqual(res!.config, {
+      type: 'worker',
+      worker: { entry: 'src/index.ts' },
+      compatibilityFlags: ['nodejs_compat'],
+    });
+    assert.deepEqual(res!.warnings, []);
+  });
+
+  it('maps an assets-only wrangler.json to a static config', () => {
+    const stub = fileStub('/proj', {
+      'wrangler.json': JSON.stringify({ assets: { directory: 'public' } }),
+    });
+    const res = adaptWrangler('/proj', stub);
+    assert.ok(res);
+    assert.deepEqual(res!.config, { type: 'static', build: { outputDir: 'public' } });
+  });
+
+  it('maps a wrangler.toml Worker but WARNS that compatibility_flags are not read from toml', () => {
+    const stub = fileStub('/proj', { 'wrangler.toml': 'main = "worker.js"\n' });
+    const res = adaptWrangler('/proj', stub);
+    assert.ok(res);
+    assert.equal(res!.sourceFile, 'wrangler.toml');
+    assert.deepEqual(res!.config, { type: 'worker', worker: { entry: 'worker.js' } });
+    assert.equal(res!.warnings.length, 1);
+    assert.match(res!.warnings[0]!, /compatibility_flags.*NOT read from wrangler\.toml/);
+  });
+
+  it('warns about provisionable bindings (D1/KV/R2) declared in wrangler.json — NOT imported', () => {
+    const stub = fileStub('/proj', {
+      'wrangler.json': JSON.stringify({
+        main: 'src/index.ts',
+        d1_databases: [{ binding: 'DB', database_id: 'abc' }],
+        r2_buckets: [{ binding: 'BUCKET', bucket_name: 'x' }],
+      }),
+    });
+    const res = adaptWrangler('/proj', stub);
+    assert.ok(res);
+    // The bindings are NOT in the migrated config — only a warning.
+    assert.equal((res!.config as { bindings?: unknown }).bindings, undefined);
+    const warn = res!.warnings.join('\n');
+    assert.match(warn, /declares D1, R2 binding\(s\) — NOT imported/);
+    assert.match(warn, /deploy\.db_provision/);
+  });
+
+  it('warns that unsupported bindings (durable_objects/queues) are dropped', () => {
+    const stub = fileStub('/proj', {
+      'wrangler.json': JSON.stringify({
+        main: 'src/index.ts',
+        durable_objects: { bindings: [{ name: 'DO', class_name: 'Counter' }] },
+        queues: { producers: [{ binding: 'Q', queue: 'jobs' }] },
+      }),
+    });
+    const res = adaptWrangler('/proj', stub);
+    assert.ok(res);
+    assert.match(res!.warnings.join('\n'), /declares durable_objects, queues which YOLO Host does not support — dropped/);
+  });
+
+  it('detects binding stanzas from wrangler.toml section headers', () => {
+    const stub = fileStub('/proj', {
+      'wrangler.toml': 'main = "worker.js"\n\n[[kv_namespaces]]\nbinding = "CACHE"\nid = "abc"\n\n[[queues.producers]]\nbinding = "Q"\n',
+    });
+    const res = adaptWrangler('/proj', stub);
+    assert.ok(res);
+    const warn = res!.warnings.join('\n');
+    assert.match(warn, /declares KV binding\(s\)/);
+    assert.match(warn, /declares queues which YOLO Host does not support/);
+  });
+
+  it('warns about newer/less-common runtime bindings (workflows, version_metadata, unsafe)', () => {
+    const stub = fileStub('/proj', {
+      'wrangler.json': JSON.stringify({
+        main: 'src/index.ts',
+        workflows: [{ binding: 'WF', name: 'w', class_name: 'W' }],
+        version_metadata: { binding: 'META' },
+        unsafe: { bindings: [{ name: 'X', type: 'ratelimit' }] },
+      }),
+    });
+    const res = adaptWrangler('/proj', stub);
+    assert.ok(res);
+    const warn = res!.warnings.join('\n');
+    assert.match(warn, /workflows/);
+    assert.match(warn, /version_metadata/);
+    assert.match(warn, /unsafe/);
+    assert.match(warn, /does not support/);
+  });
+
+  it('detects env-scoped JSON bindings (env.production.d1_databases)', () => {
+    const stub = fileStub('/proj', {
+      'wrangler.json': JSON.stringify({
+        main: 'src/index.ts',
+        env: { production: { d1_databases: [{ binding: 'DB' }] } },
+      }),
+    });
+    const res = adaptWrangler('/proj', stub);
+    assert.ok(res);
+    assert.match(res!.warnings.join('\n'), /declares D1 binding\(s\)/);
+  });
+
+  it('detects env-scoped toml binding sections ([[env.production.kv_namespaces]])', () => {
+    const stub = fileStub('/proj', {
+      'wrangler.toml': 'main = "worker.js"\n\n[[env.production.kv_namespaces]]\nbinding = "CACHE"\n',
+    });
+    const res = adaptWrangler('/proj', stub);
+    assert.ok(res);
+    assert.match(res!.warnings.join('\n'), /declares KV binding\(s\)/);
+  });
+
+  it('detects binding sections under a HYPHENATED env name ([[env.prod-us.kv_namespaces]])', () => {
+    const stub = fileStub('/proj', {
+      'wrangler.toml': 'main = "worker.js"\n\n[[env.prod-us.kv_namespaces]]\nbinding = "CACHE"\n',
+    });
+    const res = adaptWrangler('/proj', stub);
+    assert.ok(res);
+    assert.match(res!.warnings.join('\n'), /declares KV binding\(s\)/);
+  });
+
+  it('does not warn about bindings when none are declared', () => {
+    const stub = fileStub('/proj', { 'wrangler.json': JSON.stringify({ main: 'src/index.ts' }) });
+    const res = adaptWrangler('/proj', stub);
+    assert.ok(res);
+    assert.equal(res!.warnings.length, 0);
+  });
+
+  it('does NOT treat a toml env NAMED after a binding as a binding ([env.ai.vars])', () => {
+    const stub = fileStub('/proj', {
+      'wrangler.toml': 'main = "worker.js"\n\n[env.ai.vars]\nLOG_LEVEL = "debug"\n',
+    });
+    const res = adaptWrangler('/proj', stub);
+    assert.ok(res);
+    // `ai` here is the environment name, not an AI binding — no binding warning.
+    assert.doesNotMatch(res!.warnings.join('\n'), /does not support/);
+  });
+
+  it('returns undefined when no wrangler config is present', () => {
+    assert.equal(adaptWrangler('/proj', fileStub('/proj', {})), undefined);
+  });
+
+  it('returns undefined for a wrangler file carrying neither main nor assets', () => {
+    const stub = fileStub('/proj', { 'wrangler.json': JSON.stringify({ name: 'x' }) });
+    assert.equal(adaptWrangler('/proj', stub), undefined);
   });
 });
 

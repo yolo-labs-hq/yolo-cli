@@ -61,6 +61,39 @@ export interface DeployContext {
   readFileImpl?: ReadFileImpl;
   /** Test-injectable fetch. Defaults to `globalThis.fetch`. */
   fetchImpl?: DeployFetchLike;
+  /**
+   * Bounded auto-retry for TRANSIENT transport faults on the ship legs.
+   * Absent ⇒ no retry (single attempt). See `withRetry`.
+   */
+  retry?: RetryConfig;
+}
+
+/**
+ * Retry policy for transient ship-leg failures (kind 'network' — 5xx, CF 522,
+ * or a transport error). Deterministic outcomes (4xx refusals, auth,
+ * invalid-response, awaiting-approval) are NEVER retried.
+ *
+ * Applied to ship/start (mints a fresh `shp_…` session each call — a
+ * superseded one just expires on its TTL) and the assets leg (content-
+ * addressed, idempotent). Deliberately NOT applied to finalize: it is single-
+ * shot, so a retry after a lost-response success would mask a live release as
+ * `upload-expired` (see `finalizeShip`).
+ */
+export interface RetryConfig {
+  /** Total attempts INCLUDING the first. Default 3. */
+  maxAttempts?: number;
+  /** Base backoff in ms; doubles each retry (600 → 1200). Default 600. */
+  baseDelayMs?: number;
+  /** Injectable sleep (tests pass a no-op). Default setTimeout-based. */
+  sleepImpl?: (ms: number) => Promise<void>;
+  /** Notified just before each retry sleep — e.g. to emit a progress line. */
+  onRetry?: (info: {
+    leg: string;
+    attempt: number;
+    maxAttempts: number;
+    delayMs: number;
+    failure: DeployClientFailure;
+  }) => void;
 }
 
 export type DeployContextResult =
@@ -150,27 +183,29 @@ export async function startShip(
   projectId: string,
   request: StartShipRequest,
 ): Promise<ClientResult<StartShipResponse>> {
-  const result = await jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/ship/start`, {
-    method: 'POST',
-    jsonBody: request,
-  });
-  if (!result.ok) return result;
-  const value = result.value as Partial<StartShipResponse> | null;
-  if (!value || typeof value.shipId !== 'string' || !Array.isArray(value.missing)) {
+  return withRetry(ctx, 'ship/start', async () => {
+    const result = await jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/ship/start`, {
+      method: 'POST',
+      jsonBody: request,
+    });
+    if (!result.ok) return result;
+    const value = result.value as Partial<StartShipResponse> | null;
+    if (!value || typeof value.shipId !== 'string' || !Array.isArray(value.missing)) {
+      return {
+        ok: false,
+        kind: 'invalid-response',
+        message: 'ship/start response missing shipId / missing buckets',
+      };
+    }
     return {
-      ok: false,
-      kind: 'invalid-response',
-      message: 'ship/start response missing shipId / missing buckets',
+      ok: true,
+      value: {
+        shipId: value.shipId,
+        missing: value.missing as string[][],
+        caps: (value.caps ?? { maxFileBytes: 0, maxTotalBytes: 0, maxFiles: 0 }) as ShipCaps,
+      },
     };
-  }
-  return {
-    ok: true,
-    value: {
-      shipId: value.shipId,
-      missing: value.missing as string[][],
-      caps: (value.caps ?? { maxFileBytes: 0, maxTotalBytes: 0, maxFiles: 0 }) as ShipCaps,
-    },
-  };
+  });
 }
 
 export interface AssetUploadFile {
@@ -186,10 +221,12 @@ export async function uploadAssetBucket(
   shipId: string,
   files: AssetUploadFile[],
 ): Promise<ClientResult<unknown>> {
-  return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/ship/${enc(shipId)}/assets`, {
-    method: 'POST',
-    jsonBody: { files },
-  });
+  return withRetry(ctx, 'assets', () =>
+    jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/ship/${enc(shipId)}/assets`, {
+      method: 'POST',
+      jsonBody: { files },
+    }),
+  );
 }
 
 export interface WorkerModuleUpload {
@@ -236,6 +273,13 @@ export async function finalizeShip(
   shipId: string,
   modules: WorkerModuleUpload[] = [],
 ): Promise<FinalizeShipResult> {
+  // NOT auto-retried (unlike ship/start + assets). finalize is single-shot per
+  // ship session: if the first request reached the server and created the
+  // release but the response was lost to a transient 5xx/522, a blind retry
+  // hits the open→finalized CAS and returns a deterministic 410 upload-expired
+  // — masking a deploy that actually SUCCEEDED. So a transient finalize fault
+  // surfaces as kind 'network' (exit 4); the operator checks `yolo deploy
+  // status` before rerunning rather than auto-looping into a misleading error.
   const token = currentToken(ctx);
   if (!token) return missingTokenFailure();
   const fetchImpl = resolveFetch(ctx);
@@ -340,6 +384,34 @@ export async function getProjectStatus(
   return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}`, { method: 'GET' });
 }
 
+/** One project as returned by GET /v1/deploy/projects (the caller's own). */
+export interface DeployProjectSummary {
+  projectId?: string;
+  slug?: string;
+  type?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * GET /v1/deploy/projects — the caller's OWN hosting projects (owner-scoped
+ * server-side). Used by `yolo deploy init`/`link` to reconcile a slug-taken
+ * error: if the taken slug is one the caller already owns, link to it instead
+ * of failing.
+ */
+export async function listProjects(
+  ctx: DeployContext,
+): Promise<ClientResult<DeployProjectSummary[]>> {
+  const result = await jsonLeg(ctx, '/deploy/projects', { method: 'GET' });
+  if (!result.ok) return result;
+  const raw = (result.value && typeof result.value === 'object' ? result.value : {}) as Record<string, unknown>;
+  const projects = Array.isArray(result.value)
+    ? (result.value as DeployProjectSummary[])
+    : Array.isArray(raw.projects)
+      ? (raw.projects as DeployProjectSummary[])
+      : [];
+  return { ok: true, value: projects };
+}
+
 /** POST /v1/deploy/projects/:id/rollback */
 export async function rollbackProject(
   ctx: DeployContext,
@@ -396,6 +468,88 @@ export async function queryD1(
     ok: true,
     value: { ...value, results, meta: value.meta && typeof value.meta === 'object' ? (value.meta as Record<string, unknown>) : undefined },
   };
+}
+
+/**
+ * PUT /v1/deploy/projects/:id/slug — rename the project's primary slug.
+ * `keepOldAsRedirect` (default true) makes the old slug 308 → the new URL.
+ */
+export async function renameProject(
+  ctx: DeployContext,
+  projectId: string,
+  request: { slug: string; keepOldAsRedirect?: boolean },
+): Promise<ClientResult<unknown>> {
+  return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/slug`, { method: 'PUT', jsonBody: request });
+}
+
+/** POST /v1/deploy/projects/:id/aliases — add an alias hostname (slug). */
+export async function addAlias(
+  ctx: DeployContext,
+  projectId: string,
+  slug: string,
+): Promise<ClientResult<unknown>> {
+  return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/aliases`, { method: 'POST', jsonBody: { slug } });
+}
+
+/** DELETE /v1/deploy/projects/:id/aliases/:slug — remove an alias/redirect binding. */
+export async function removeAlias(
+  ctx: DeployContext,
+  projectId: string,
+  slug: string,
+): Promise<ClientResult<unknown>> {
+  return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/aliases/${enc(slug)}`, { method: 'DELETE' });
+}
+
+/** PUT /v1/deploy/projects/:id/redirects/:slug — 308 a slug to an external URL. */
+export async function setRedirect(
+  ctx: DeployContext,
+  projectId: string,
+  slug: string,
+  target: string,
+): Promise<ClientResult<unknown>> {
+  return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/redirects/${enc(slug)}`, {
+    method: 'PUT',
+    jsonBody: { target },
+  });
+}
+
+/**
+ * DELETE /v1/deploy/projects/:id — delete the project. A live site is refused
+ * server-side (a `not-confirmed` refusal with a hint) unless the caller passes
+ * the current slug as `confirmSlug`; a throwaway/never-shipped project deletes
+ * without confirmation.
+ */
+export async function deleteProject(
+  ctx: DeployContext,
+  projectId: string,
+  request: { confirmSlug?: string } = {},
+): Promise<ClientResult<unknown>> {
+  return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}`, {
+    method: 'DELETE',
+    ...(request.confirmSlug !== undefined ? { jsonBody: { confirmSlug: request.confirmSlug } } : {}),
+  });
+}
+
+/**
+ * POST /v1/deploy/projects/:id/clone — duplicate a project's config (env +
+ * secrets + fresh D1/KV/R2 bindings) into a new EMPTY project. No release is
+ * copied — the clone must be re-shipped to populate it. Optional `name`/`slug`
+ * name the clone; the backend derives defaults otherwise. Returns
+ * `{ project, sourceSlug, resourcesCloned, secretsCloned }`. 4xx refusal
+ * reasons (slug-taken, hosting-disabled, …) pass through as the failure `kind`.
+ */
+export async function cloneProject(
+  ctx: DeployContext,
+  projectId: string,
+  request: { name?: string; slug?: string } = {},
+): Promise<ClientResult<unknown>> {
+  return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/clone`, {
+    method: 'POST',
+    jsonBody: {
+      ...(request.name !== undefined ? { name: request.name } : {}),
+      ...(request.slug !== undefined ? { slug: request.slug } : {}),
+    },
+  });
 }
 
 /** GET /v1/deploy/projects/:id/logs (buffered variant). */
@@ -467,6 +621,43 @@ export async function tailLogs(
 }
 
 // ─── Internals ────────────────────────────────────────────────────────────
+
+/**
+ * Run a ship leg with bounded-backoff retry on TRANSIENT transport faults.
+ *
+ * Retries only `{ ok:false, kind:'network' }` (5xx / CF 522 / transport error
+ * — see `mapErrorResponse`). Every other result — success, a 4xx refusal,
+ * auth, invalid-response, or awaiting-approval — returns immediately. The leg
+ * `fn` re-resolves the token per call, so a retry can't ride a token that
+ * expired mid-ship.
+ */
+async function withRetry<T extends { ok: boolean; kind?: string }>(
+  ctx: DeployContext,
+  leg: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const cfg = ctx.retry;
+  // Opt-in: a context with no `retry` config runs exactly once (no retry).
+  if (!cfg) return fn();
+  const maxAttempts = Math.max(1, cfg.maxAttempts ?? 3);
+  const baseDelayMs = cfg.baseDelayMs ?? 600;
+  const sleep = cfg.sleepImpl ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  let attempt = 0;
+  for (;;) {
+    attempt++;
+    const result = await fn();
+    if (result.ok || result.kind !== 'network' || attempt >= maxAttempts) return result;
+    const delayMs = baseDelayMs * 2 ** (attempt - 1);
+    cfg.onRetry?.({
+      leg,
+      attempt,
+      maxAttempts,
+      delayMs,
+      failure: result as unknown as DeployClientFailure,
+    });
+    await sleep(delayMs);
+  }
+}
 
 /**
  * Re-resolve the user token (rotation file → YOLO_API_TOKEN env). Called at

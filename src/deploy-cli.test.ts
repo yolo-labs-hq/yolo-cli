@@ -12,6 +12,11 @@ import {
   runDeployCmd,
   parseSinceMinutes,
   parseDbQueryArgs,
+  parseRenameArgs,
+  parseAliasArgs,
+  parseRedirectArgs,
+  parseDeleteArgs,
+  parseCloneArgs,
   formatRowsTable,
   type DeployCliDeps,
   type DeployIo,
@@ -112,6 +117,194 @@ describe('deploy-cli — usage & dispatch', () => {
     const code = await runDeployCmd(['--help'], baseDeps(io));
     assert.equal(code, 0);
     assert.match(io.stdout.join(''), /yolo deploy init/);
+  });
+});
+
+// ─── validate ─────────────────────────────────────────────────────────────
+
+describe('deploy-cli — validate', () => {
+  const workerCfg = {
+    ok: true as const,
+    config: { $version: 1 as const, projectId: 'hp_1', slug: 'app', type: 'worker' as const, worker: { entry: 'src/index.ts' } },
+    path: CONFIG_PATH,
+  };
+
+  it('passes a valid worker config whose entry exists (exit 0)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['validate'],
+      baseDeps(io, { readDeployConfigImpl: () => workerCfg, statPathImpl: () => 'file' }),
+    );
+    assert.equal(code, 0);
+    assert.match(io.stdout.join(''), /OK: deploy config is valid/);
+    assert.match(io.stdout.join(''), /entry: src\/index\.ts/);
+  });
+
+  it('fails when the worker entry does not exist (exit 1)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['validate'],
+      baseDeps(io, { readDeployConfigImpl: () => workerCfg, statPathImpl: () => 'missing' }),
+    );
+    assert.equal(code, 1);
+    assert.match(io.stderr.join(''), /FAIL: deploy config is not valid/);
+    assert.match(io.stderr.join(''), /worker\.entry: entry 'src\/index\.ts' does not exist/);
+  });
+
+  it('fails when the worker entry is a directory, not a file (exit 1)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['validate'],
+      baseDeps(io, { readDeployConfigImpl: () => workerCfg, statPathImpl: () => 'dir' }),
+    );
+    assert.equal(code, 1);
+    assert.match(io.stderr.join(''), /worker\.entry: 'src\/index\.ts' is not a file \(it's a dir\)/);
+  });
+
+  it('reports schema errors with their path (exit 1)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['validate'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => ({
+          ok: false as const,
+          kind: 'invalid' as const,
+          path: CONFIG_PATH,
+          message: 'invalid deploy config',
+          errors: [{ path: '$version', message: 'must be the number 1, got 2' }],
+        }),
+      }),
+    );
+    assert.equal(code, 1);
+    assert.match(io.stderr.join(''), /\$version: must be the number 1, got 2/);
+  });
+
+  it('passes a static project with a build command even if the output dir is missing (note, exit 0)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['validate'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => ({
+          ok: true as const,
+          config: { $version: 1 as const, slug: 's', type: 'static' as const, build: { command: 'npm run build', outputDir: 'dist' } },
+          path: CONFIG_PATH,
+        }),
+        statPathImpl: () => 'missing', // dist not built yet
+      }),
+    );
+    assert.equal(code, 0);
+    assert.match(io.stdout.join(''), /note:.*produced by the build/);
+  });
+
+  it('passes a static project whose build command is INFERRED from package.json (note, exit 0)', async () => {
+    const io = makeIo();
+    const pkgJson = JSON.stringify({ scripts: { build: 'vite build' } });
+    const code = await runDeployCmd(
+      ['validate'],
+      baseDeps(io, {
+        // No explicit build.command — detection infers `npm run build` from the
+        // package.json build script, so the missing dist/ is a note, not error.
+        readDeployConfigImpl: () => ({
+          ok: true as const,
+          config: { $version: 1 as const, slug: 's', type: 'static' as const, build: { outputDir: 'dist' } },
+          path: CONFIG_PATH,
+        }),
+        readFileImpl: (p: string) => (p.endsWith('package.json') ? pkgJson : undefined),
+        statPathImpl: () => 'missing',
+      }),
+    );
+    assert.equal(code, 0);
+    assert.match(io.stdout.join(''), /note:.*produced by the build/);
+  });
+
+  it('a missing SOURCE worker entry is still an ERROR even with a build command (esbuild bundles it, build does not create it)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['validate'],
+      baseDeps(io, {
+        // Source worker (not prebuilt) + a package.json build script → the
+        // detected shape carries buildCommand, but the entry is bundled in
+        // place, so a typo'd missing entry must NOT be excused as "built".
+        readDeployConfigImpl: () => ({
+          ok: true as const,
+          config: { $version: 1 as const, slug: 'api', type: 'worker' as const, worker: { entry: 'src/indx.ts' } },
+          path: CONFIG_PATH,
+        }),
+        readFileImpl: (p: string) => (p.endsWith('package.json') ? JSON.stringify({ scripts: { build: 'tsc' } }) : undefined),
+        statPathImpl: () => 'missing',
+      }),
+    );
+    assert.equal(code, 1);
+    assert.match(io.stderr.join(''), /worker\.entry: entry 'src\/indx\.ts' does not exist/);
+  });
+
+  it('a missing PREBUILT worker entry with a build command is a NOTE (the build produces it)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['validate'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => ({
+          ok: true as const,
+          config: {
+            $version: 1 as const,
+            slug: 'api',
+            type: 'worker' as const,
+            worker: { entry: 'dist/worker.mjs', prebuilt: true },
+            build: { command: 'tsc' },
+          },
+          path: CONFIG_PATH,
+        }),
+        readFileImpl: () => undefined,
+        statPathImpl: () => 'missing',
+      }),
+    );
+    assert.equal(code, 0);
+    assert.match(io.stdout.join(''), /note:.*produced by the build/);
+  });
+
+  it('notes a present wrangler.toml (de-silences the minimal-toml-support gotcha)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['validate'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => workerCfg,
+        statPathImpl: () => 'file',
+        // wrangler.toml present on disk alongside a valid deploy.json.
+        readFileImpl: (p: string) => (p.endsWith('wrangler.toml') ? 'main = "src/index.ts"\n' : undefined),
+      }),
+    );
+    assert.equal(code, 0); // a note, not an error
+    assert.match(io.stdout.join(''), /note:.*wrangler\.toml found/);
+  });
+
+  it('does NOT note wrangler.toml when none is present', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['validate'],
+      baseDeps(io, { readDeployConfigImpl: () => workerCfg, statPathImpl: () => 'file', readFileImpl: () => undefined }),
+    );
+    assert.equal(code, 0);
+    assert.doesNotMatch(io.stdout.join(''), /wrangler\.toml/);
+  });
+
+  it('rejects unknown flags/positionals with exit 64', async () => {
+    const io = makeIo();
+    assert.equal(await runDeployCmd(['validate', '--jsoon'], baseDeps(io)), 64);
+    assert.match(io.stderr.join(''), /unexpected argument/);
+    const io2 = makeIo();
+    assert.equal(await runDeployCmd(['validate', './dist'], baseDeps(io2)), 64);
+  });
+
+  it('--json emits a machine-readable result and exits 1 on failure', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['validate', '--json'],
+      baseDeps(io, { readDeployConfigImpl: () => workerCfg, statPathImpl: () => 'missing' }),
+    );
+    assert.equal(code, 1);
+    const parsed = JSON.parse(io.stdout.join('').trim());
+    assert.equal(parsed.ok, false);
+    assert.ok(parsed.issues.some((i: { path?: string }) => i.path === 'worker.entry'));
   });
 });
 
@@ -251,6 +444,39 @@ describe('deploy-cli — init', () => {
     assert.match(out, /committed by design; it contains no secrets/);
   });
 
+  it('adapts an existing wrangler.json into the written .yolo/deploy.json on a fresh init', async () => {
+    const io = makeIo();
+    const written: Array<{ config: Record<string, unknown> }> = [];
+    const code = await runDeployCmd(
+      ['init', '--slug', 'api'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => linked(null), // no existing deploy.json
+        // wrangler.json present on disk; auth still resolves from ENV (undefined
+        // for non-wrangler paths, mirroring the default stub).
+        readFileImpl: (p: string) =>
+          p.endsWith('wrangler.json')
+            ? JSON.stringify({ main: 'src/index.ts', compatibility_flags: ['nodejs_compat'] })
+            : undefined,
+        createProjectImpl: async () => ({ ok: true, value: { project: { id: 'hp_api', slug: 'api' } } }),
+        writeDeployConfigImpl: (_cwd, config) => {
+          written.push({ config: config as unknown as Record<string, unknown> });
+          return CONFIG_PATH;
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.equal(written.length, 1);
+    assert.deepEqual(written[0]!.config, {
+      $version: 1,
+      projectId: 'hp_api',
+      slug: 'api',
+      type: 'worker',
+      worker: { entry: 'src/index.ts' },
+      compatibilityFlags: ['nodejs_compat'],
+    });
+    assert.match(io.stdout.join(''), /note: adapted wrangler\.json → \.yolo\/deploy\.json \(.*worker\.entry=src\/index\.ts.*\)/);
+  });
+
   it('is idempotent: an existing link is left unchanged, no project created', async () => {
     const io = makeIo();
     let createCalls = 0;
@@ -268,17 +494,69 @@ describe('deploy-cli — init', () => {
     assert.match(io.stdout.join(''), /already linked to project hp_8f3a/);
   });
 
-  it('passes a slug-taken refusal through with exit 2', async () => {
+  it('passes a slug-taken refusal through with exit 2 when the slug is NOT one we own', async () => {
     const io = makeIo();
     const code = await runDeployCmd(
       ['init', '--slug', 'taken'],
       baseDeps(io, {
         readDeployConfigImpl: () => linked(null),
         createProjectImpl: async () => ({ ok: false, kind: 'slug-taken', message: "slug 'taken' is in use", status: 409 }),
+        // We own other projects, but none with slug 'taken' → genuinely taken.
+        listProjectsImpl: async () => ({ ok: true, value: [{ id: 'hp_other', slug: 'something-else' }] }),
       }),
     );
     assert.equal(code, 2);
     assert.match(io.stderr.join(''), /FAIL \[slug-taken\]/);
+  });
+
+  it('reconciles a slug-taken when the slug is ALREADY OURS — links to it (exit 0)', async () => {
+    const io = makeIo();
+    const written: Array<{ cwd: string; config: Record<string, unknown> }> = [];
+    const code = await runDeployCmd(
+      ['init', '--slug', 'sushi-rescue'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => linked(null),
+        createProjectImpl: async () => ({ ok: false, kind: 'slug-taken', message: "slug 'sushi-rescue' is in use", status: 409 }),
+        listProjectsImpl: async () => ({
+          ok: true,
+          value: [{ id: 'hp_sushi', slug: 'sushi-rescue' }],
+        }),
+        writeDeployConfigImpl: (cwd, config) => {
+          written.push({ cwd, config: config as unknown as Record<string, unknown> });
+          return CONFIG_PATH;
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.equal(written.length, 1);
+    assert.deepEqual(written[0]!.config, { $version: 1, projectId: 'hp_sushi', slug: 'sushi-rescue' });
+    assert.match(io.stdout.join(''), /was already yours — linked existing project hp_sushi/);
+  });
+
+  it('reconciles a slug-taken with NO --slug, using the server-derived slug from detail', async () => {
+    const io = makeIo();
+    const written: Array<{ config: Record<string, unknown> }> = [];
+    const code = await runDeployCmd(
+      ['init'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => linked(null),
+        // bare init derives a slug server-side; the refusal carries it in detail.
+        createProjectImpl: async () => ({
+          ok: false,
+          kind: 'slug-taken',
+          message: 'in use',
+          status: 409,
+          detail: { slug: 'derived-slug' },
+        }),
+        listProjectsImpl: async () => ({ ok: true, value: [{ id: 'hp_d', slug: 'derived-slug' }] }),
+        writeDeployConfigImpl: (_cwd, config) => {
+          written.push({ config: config as unknown as Record<string, unknown> });
+          return CONFIG_PATH;
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.deepEqual(written[0]!.config, { $version: 1, projectId: 'hp_d', slug: 'derived-slug' });
   });
 
   it('rejects a bad --type with exit 64', async () => {
@@ -295,6 +573,146 @@ describe('deploy-cli — init', () => {
     );
     assert.equal(code, 78);
     assert.match(io.stderr.join(''), /FAIL \[auth\]/);
+  });
+});
+
+// ─── link ──────────────────────────────────────────────────────────────────
+
+describe('deploy-cli — link', () => {
+  it('requires --project-id or --slug (exit 64)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(['link'], baseDeps(io, { readDeployConfigImpl: () => linked(null) }));
+    assert.equal(code, 64);
+    assert.match(io.stderr.join(''), /--project-id <id> or --slug <slug>/);
+  });
+
+  it('rejects --project-id and --slug together (exit 64)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['link', '--project-id', 'hp_a', '--slug', 'slug-for-b'],
+      baseDeps(io, { readDeployConfigImpl: () => linked(null) }),
+    );
+    assert.equal(code, 64);
+    assert.match(io.stderr.join(''), /not both/);
+  });
+
+  it('links by --project-id (ownership verified via status) and writes the file', async () => {
+    const io = makeIo();
+    const written: Array<{ config: Record<string, unknown> }> = [];
+    const code = await runDeployCmd(
+      ['link', '--project-id', 'hp_sushi'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => linked(null),
+        getProjectStatusImpl: async (_ctx, projectId) => {
+          assert.equal(projectId, 'hp_sushi');
+          return { ok: true, value: { project: { id: 'hp_sushi', slug: 'sushi-rescue' } } };
+        },
+        writeDeployConfigImpl: (_cwd, config) => {
+          written.push({ config: config as unknown as Record<string, unknown> });
+          return CONFIG_PATH;
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.deepEqual(written[0]!.config, { $version: 1, projectId: 'hp_sushi', slug: 'sushi-rescue' });
+    assert.match(io.stdout.join(''), /linked project hp_sushi \(slug sushi-rescue\)/);
+  });
+
+  it('links by --slug via the owned-project lookup', async () => {
+    const io = makeIo();
+    const written: Array<{ config: Record<string, unknown> }> = [];
+    const code = await runDeployCmd(
+      ['link', '--slug', 'sushi-rescue'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => linked(null),
+        listProjectsImpl: async () => ({ ok: true, value: [{ id: 'hp_sushi', slug: 'sushi-rescue' }] }),
+        writeDeployConfigImpl: (_cwd, config) => {
+          written.push({ config: config as unknown as Record<string, unknown> });
+          return CONFIG_PATH;
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.deepEqual(written[0]!.config, { $version: 1, projectId: 'hp_sushi', slug: 'sushi-rescue' });
+  });
+
+  it('errors when no owned project has the given slug', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['link', '--slug', 'ghost'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => linked(null),
+        listProjectsImpl: async () => ({ ok: true, value: [] }),
+      }),
+    );
+    assert.notEqual(code, 0);
+    assert.match(io.stderr.join(''), /no hosting project you own has slug 'ghost'/);
+  });
+
+  it('propagates a list FAILURE (network) rather than reporting not-found', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['link', '--slug', 'sushi-rescue'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => linked(null),
+        listProjectsImpl: async () => ({ ok: false, kind: 'network', message: 'server error (HTTP 503)' }),
+      }),
+    );
+    assert.equal(code, 4); // transient transport — retryable, not "not found"
+    assert.match(io.stderr.join(''), /FAIL \[network\]/);
+    assert.doesNotMatch(io.stderr.join(''), /no hosting project you own/);
+  });
+
+  it('refuses to repoint an existing link at a different project', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['link', '--project-id', 'hp_new'],
+      baseDeps(io, {
+        // default baseDeps readDeployConfigImpl is linked to hp_8f3a
+        getProjectStatusImpl: async () => ({ ok: true, value: { project: { id: 'hp_new', slug: 'new' } } }),
+      }),
+    );
+    assert.notEqual(code, 0);
+    assert.match(io.stderr.join(''), /already linked to project hp_8f3a/);
+  });
+
+  it('is a no-op when already linked to the same project (no new --type)', async () => {
+    const io = makeIo();
+    let wrote = false;
+    const code = await runDeployCmd(
+      ['link', '--project-id', 'hp_8f3a'],
+      baseDeps(io, {
+        getProjectStatusImpl: async () => ({ ok: true, value: { project: { id: 'hp_8f3a', slug: 'my-app' } } }),
+        writeDeployConfigImpl: () => {
+          wrote = true;
+          return CONFIG_PATH;
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.equal(wrote, false);
+    assert.match(io.stdout.join(''), /already linked to project hp_8f3a/);
+  });
+
+  it('honors a new --type when already linked to the same project', async () => {
+    const io = makeIo();
+    const written: Array<{ config: Record<string, unknown> }> = [];
+    const code = await runDeployCmd(
+      ['link', '--project-id', 'hp_8f3a', '--type', 'worker'],
+      baseDeps(io, {
+        // default baseDeps is linked to hp_8f3a, slug my-app, no type
+        getProjectStatusImpl: async () => ({ ok: true, value: { project: { id: 'hp_8f3a', slug: 'my-app' } } }),
+        writeDeployConfigImpl: (_cwd, config) => {
+          written.push({ config: config as unknown as Record<string, unknown> });
+          return CONFIG_PATH;
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.equal(written.length, 1);
+    assert.equal(written[0]!.config.type, 'worker');
+    assert.equal(written[0]!.config.projectId, 'hp_8f3a');
+    assert.match(io.stdout.join(''), /set type worker/);
   });
 });
 
@@ -444,6 +862,281 @@ describe('deploy-cli — rollback', () => {
     );
     assert.equal(code, 2);
     assert.match(io.stderr.join(''), /FAIL \[release-not-found\]/);
+  });
+});
+
+// ─── rename / alias / redirect / delete ─────────────────────────────────────
+
+describe('deploy-cli — rename', () => {
+  it('PUTs the new slug with keepOldAsRedirect=true by default + prints the URL', async () => {
+    const io = makeIo();
+    let seen: Record<string, unknown> = {};
+    const code = await runDeployCmd(
+      ['rename', 'cooler-app'],
+      baseDeps(io, {
+        renameProjectImpl: async (_ctx, projectId, request) => {
+          seen = { projectId, ...request };
+          return { ok: true, value: { project: { slug: 'cooler-app', hostname: 'cooler-app.yolo.host' } } };
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.deepEqual(seen, { projectId: 'hp_8f3a', slug: 'cooler-app', keepOldAsRedirect: true });
+    const out = io.stdout.join('');
+    assert.match(out, /OK: renamed to slug cooler-app → https:\/\/cooler-app\.yolo\.host/);
+    assert.match(out, /old slug 'my-app' now 308/);
+  });
+
+  it('--no-redirect sets keepOldAsRedirect=false', async () => {
+    const io = makeIo();
+    let request: Record<string, unknown> = {};
+    await runDeployCmd(
+      ['rename', 'cooler-app', '--no-redirect'],
+      baseDeps(io, {
+        renameProjectImpl: async (_ctx, _projectId, req) => {
+          request = req as Record<string, unknown>;
+          return { ok: true, value: { project: { slug: 'cooler-app', hostname: 'cooler-app.yolo.host' } } };
+        },
+      }),
+    );
+    assert.equal(request.keepOldAsRedirect, false);
+  });
+
+  it('requires a new slug (exit 64)', async () => {
+    const io = makeIo();
+    assert.equal(await runDeployCmd(['rename'], baseDeps(io)), 64);
+    assert.equal(parseRenameArgs([]).ok, false);
+    const r = parseRenameArgs(['x', '--no-redirect', '--json']);
+    assert.equal(r.ok, true);
+    if (r.ok) assert.deepEqual([r.slug, r.keepOldAsRedirect, r.jsonOutput], ['x', false, true]);
+  });
+});
+
+describe('deploy-cli — alias', () => {
+  it('adds an alias via POST', async () => {
+    const io = makeIo();
+    let seen: { projectId?: string; slug?: string } = {};
+    const code = await runDeployCmd(
+      ['alias', 'beta'],
+      baseDeps(io, {
+        addAliasImpl: async (_ctx, projectId, slug) => {
+          seen = { projectId, slug };
+          return { ok: true, value: {} };
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.deepEqual(seen, { projectId: 'hp_8f3a', slug: 'beta' });
+    assert.match(io.stdout.join(''), /OK: added alias 'beta'/);
+  });
+
+  it('removes an alias via `alias rm <slug>` (DELETE)', async () => {
+    const io = makeIo();
+    let seen: { projectId?: string; slug?: string } = {};
+    const code = await runDeployCmd(
+      ['alias', 'rm', 'beta'],
+      baseDeps(io, {
+        removeAliasImpl: async (_ctx, projectId, slug) => {
+          seen = { projectId, slug };
+          return { ok: true, value: {} };
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.deepEqual(seen, { projectId: 'hp_8f3a', slug: 'beta' });
+    assert.match(io.stdout.join(''), /OK: removed alias 'beta'/);
+  });
+
+  it('requires a slug (exit 64) for both add and rm', async () => {
+    const io = makeIo();
+    assert.equal(await runDeployCmd(['alias'], baseDeps(io)), 64);
+    assert.equal(parseAliasArgs([]).ok, false);
+    assert.equal(parseAliasArgs(['rm']).ok, false);
+    const r = parseAliasArgs(['rm', 'beta']);
+    assert.equal(r.ok, true);
+    if (r.ok) assert.deepEqual([r.remove, r.slug], [true, 'beta']);
+  });
+});
+
+describe('deploy-cli — redirect', () => {
+  it('PUTs the slug → target url', async () => {
+    const io = makeIo();
+    let seen: { projectId?: string; slug?: string; url?: string } = {};
+    const code = await runDeployCmd(
+      ['redirect', 'old', 'https://example.com/new'],
+      baseDeps(io, {
+        setRedirectImpl: async (_ctx, projectId, slug, target) => {
+          seen = { projectId, slug, url: target };
+          return { ok: true, value: {} };
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.deepEqual(seen, { projectId: 'hp_8f3a', slug: 'old', url: 'https://example.com/new' });
+    assert.match(io.stdout.join(''), /OK: 'old' now 308 → https:\/\/example\.com\/new/);
+  });
+
+  it('requires both slug and url (exit 64)', async () => {
+    const io = makeIo();
+    assert.equal(await runDeployCmd(['redirect', 'only-one'], baseDeps(io)), 64);
+    assert.equal(parseRedirectArgs(['a']).ok, false);
+    assert.equal(parseRedirectArgs(['a', 'b', 'c']).ok, false);
+  });
+});
+
+describe('deploy-cli — delete', () => {
+  it('deletes a throwaway project without --confirm', async () => {
+    const io = makeIo();
+    let request: Record<string, unknown> = { sentinel: true };
+    const code = await runDeployCmd(
+      ['delete'],
+      baseDeps(io, {
+        deleteProjectImpl: async (_ctx, _projectId, req) => {
+          request = req as Record<string, unknown>;
+          return { ok: true, value: {} };
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.deepEqual(request, {});
+    assert.match(io.stdout.join(''), /OK: deleted project my-app/);
+  });
+
+  it('passes --confirm <slug> through as confirmSlug', async () => {
+    const io = makeIo();
+    let request: Record<string, unknown> = {};
+    await runDeployCmd(
+      ['delete', '--confirm', 'my-app'],
+      baseDeps(io, {
+        deleteProjectImpl: async (_ctx, _projectId, req) => {
+          request = req as Record<string, unknown>;
+          return { ok: true, value: {} };
+        },
+      }),
+    );
+    assert.deepEqual(request, { confirmSlug: 'my-app' });
+  });
+
+  it('surfaces a not-confirmed refusal (exit 2) with the backend hint', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['delete'],
+      baseDeps(io, {
+        deleteProjectImpl: async () => ({
+          ok: false,
+          kind: 'not-confirmed',
+          message: 'this is a live site',
+          hint: 'pass --confirm my-app to delete it',
+          status: 409,
+        }),
+      }),
+    );
+    assert.equal(code, 2);
+    const err = io.stderr.join('');
+    assert.match(err, /FAIL \[not-confirmed\]/);
+    assert.match(err, /hint: pass --confirm my-app/);
+  });
+
+  it('parses --confirm=<slug> and rejects bare positionals', () => {
+    const r = parseDeleteArgs(['--confirm=foo']);
+    assert.equal(r.ok, true);
+    if (r.ok) assert.equal(r.confirmSlug, 'foo');
+    assert.equal(parseDeleteArgs(['stray']).ok, false);
+  });
+});
+
+describe('deploy-cli — clone', () => {
+  it('clones the linked project with no flags (empty body)', async () => {
+    const io = makeIo();
+    let request: Record<string, unknown> = { sentinel: true };
+    let calledProjectId: string | undefined;
+    const code = await runDeployCmd(
+      ['clone'],
+      baseDeps(io, {
+        cloneProjectImpl: async (_ctx, projectId, req) => {
+          calledProjectId = projectId;
+          request = req as Record<string, unknown>;
+          return {
+            ok: true,
+            value: { project: { id: 'hp_clone1', slug: 'my-app-copy', hostname: 'my-app-copy.yolo.host' }, sourceSlug: 'my-app', resourcesCloned: 2, secretsCloned: 1 },
+          };
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.equal(calledProjectId, 'hp_8f3a');
+    assert.deepEqual(request, {});
+    const out = io.stdout.join('');
+    assert.match(out, /OK: cloned my-app → my-app-copy/);
+    assert.match(out, /my-app-copy\.yolo\.host/);
+    // The clone is empty + this dir stays linked to the source, so the message
+    // must give the explicit relink step, not advise a (mis-targeted) re-ship.
+    assert.doesNotMatch(out, /re-ship to populate it/);
+    assert.match(out, /yolo deploy link --project-id hp_clone1/);
+  });
+
+  it('passes --name and --slug through verbatim', async () => {
+    const io = makeIo();
+    let request: Record<string, unknown> = {};
+    await runDeployCmd(
+      ['clone', '--name', 'My Copy', '--slug', 'my-copy'],
+      baseDeps(io, {
+        cloneProjectImpl: async (_ctx, _projectId, req) => {
+          request = req as Record<string, unknown>;
+          return { ok: true, value: { project: { slug: 'my-copy' }, sourceSlug: 'my-app', resourcesCloned: 0, secretsCloned: 0 } };
+        },
+      }),
+    );
+    assert.deepEqual(request, { name: 'My Copy', slug: 'my-copy' });
+  });
+
+  it('surfaces a slug-taken refusal (exit 2) with the backend hint', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['clone', '--slug', 'taken'],
+      baseDeps(io, {
+        cloneProjectImpl: async () => ({
+          ok: false,
+          kind: 'slug-taken',
+          message: 'that slug is in use',
+          hint: 'pick another --slug',
+          status: 409,
+        }),
+      }),
+    );
+    assert.equal(code, 2);
+    const err = io.stderr.join('');
+    assert.match(err, /FAIL \[slug-taken\]/);
+    assert.match(err, /hint: pick another --slug/);
+  });
+
+  it('emits the raw JSON envelope under --json', async () => {
+    const io = makeIo();
+    await runDeployCmd(
+      ['clone', '--json'],
+      baseDeps(io, {
+        cloneProjectImpl: async () => ({
+          ok: true,
+          value: { project: { slug: 'my-app-copy' }, sourceSlug: 'my-app', resourcesCloned: 3, secretsCloned: 2 },
+        }),
+      }),
+    );
+    const parsed = JSON.parse(io.stdout.join(''));
+    assert.equal(parsed.sourceSlug, 'my-app');
+    assert.equal(parsed.resourcesCloned, 3);
+    assert.equal(parsed.secretsCloned, 2);
+  });
+
+  it('parses --name=/--slug= forms and rejects bare positionals + dangling flags', () => {
+    const r = parseCloneArgs(['--name=Foo', '--slug=foo']);
+    assert.equal(r.ok, true);
+    if (r.ok) {
+      assert.equal(r.name, 'Foo');
+      assert.equal(r.slug, 'foo');
+    }
+    assert.equal(parseCloneArgs(['stray']).ok, false);
+    assert.equal(parseCloneArgs(['--name']).ok, false);
+    assert.equal(parseCloneArgs(['--slug']).ok, false);
   });
 });
 
