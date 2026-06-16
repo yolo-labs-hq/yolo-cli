@@ -154,6 +154,10 @@ function collectBundleFiles(
 
   const walk = (abs: string): string | null => {
     for (const entry of fs.readdirSync(abs, { withFileTypes: true })) {
+      // Skip dotfiles/dotdirs entirely — the bundle is served PUBLICLY, so a
+      // stray .env/.npmrc/.git from the project dir must never be uploaded (the
+      // server's sanitizeBundlePath also rejects dot-leading paths). codex Round-3 P1.
+      if (entry.name.startsWith('.')) continue;
       const childAbs = path.join(abs, entry.name);
       if (entry.isDirectory()) {
         if (SKIP_DIRS.has(entry.name)) continue;
