@@ -16,12 +16,31 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { resolveUserToken } from './auth-context.js';
 import { validateManifest, isRuntimeManifest } from './tileapp-validator.js';
 import { resolveBundleDir } from './tileapp-developer.js';
 
 export type FetchLike = typeof fetch;
+
+/** Run a command (podman build/save), streaming output. Injectable for tests. */
+export type ExecLike = (file: string, args: string[]) => Promise<{ code: number | null; stderr: string }>;
+function defaultExec(file: string, args: string[]): Promise<{ code: number | null; stderr: string }> {
+  return new Promise((resolve) => {
+    let proc;
+    try {
+      proc = spawn(file, args, { stdio: ['ignore', 'inherit', 'pipe'] });
+    } catch (err) {
+      return resolve({ code: null, stderr: (err as Error).message });
+    }
+    let stderr = '';
+    proc.stderr?.on('data', (d) => { stderr += d; process.stderr.write(d); });
+    proc.on('error', (err) => resolve({ code: null, stderr: stderr + err.message }));
+    proc.on('close', (code) => resolve({ code, stderr }));
+  });
+}
 
 export type CmdResult =
   | { ok: true; output: string }
@@ -136,7 +155,11 @@ export function runTileAppInit(opts: InitOptions): CmdResult {
 export interface PublishPersonalOptions {
   manifestPath: string;
   bundleDir?: string;
+  /** Runtime apps: build context + Dockerfile (default: the manifest's dir). */
+  context?: string;
+  dockerfile?: string;
   fetchImpl?: FetchLike;
+  execImpl?: ExecLike;
   env?: Record<string, string | undefined>;
 }
 
@@ -197,17 +220,32 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
   const read = readManifest(opts.manifestPath);
   if (!read.ok) return { ok: false, kind: 'io', message: read.message };
 
-  // Local schema lint (the server re-validates authoritatively after stamping).
-  const v = validateManifest(read.manifest);
-  if (v.errors.length > 0) {
-    return { ok: false, kind: 'validation', message: `manifest invalid:\n  - ${v.errors.join('\n  - ')}` };
+  // Guard non-object manifests (JSON `null`/array/scalar) BEFORE dereferencing —
+  // the runtime branch + id read below assume an object (the strict validator
+  // only runs on the pure-UI path).
+  if (typeof read.manifest !== 'object' || read.manifest === null || Array.isArray(read.manifest)) {
+    return { ok: false, kind: 'validation', message: 'manifest must be a JSON object' };
   }
   const localId = typeof read.manifest.id === 'string' ? read.manifest.id : '';
   if (!LOCAL_ID_RE.test(localId)) {
     return { ok: false, kind: 'validation', message: `manifest "id" must be a lowercase kebab-case slug, 2-32 chars (got '${localId}')` };
   }
+
+  // Runtime app (has `runtime`/`image`): build the image in-pod + mediated push.
+  // Branch BEFORE the strict pure-UI lint, since a runtime manifest legitimately
+  // omits `image` (the server fills it from the actual pushed digest).
   if (isRuntimeManifest(read.manifest)) {
-    return { ok: false, kind: 'validation', message: 'personal apps support pure-UI (static bundle) only today — remove `runtime`/`image`. Runtime personal apps are not yet available.' };
+    return publishRuntime({
+      manifest: read.manifest, localId, manifestPath: opts.manifestPath,
+      context: opts.context, dockerfile: opts.dockerfile,
+      auth, env, fetchImpl: opts.fetchImpl ?? fetch, execImpl: opts.execImpl ?? defaultExec,
+    });
+  }
+
+  // Pure-UI path: strict schema lint (the server re-validates authoritatively).
+  const v = validateManifest(read.manifest);
+  if (v.errors.length > 0) {
+    return { ok: false, kind: 'validation', message: `manifest invalid:\n  - ${v.errors.join('\n  - ')}` };
   }
 
   // Resolve + collect the static bundle BEFORE registering, so a bad bundle
@@ -253,4 +291,93 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
     ok: true,
     output: `Published ${appId} (${collected.files.length} file${collected.files.length === 1 ? '' : 's'}, ${collected.totalBytes} bytes)\n  next: install it + add a tile from the workspace (or via the studio.install_app / studio.create_app_tile MCP tools).`,
   };
+}
+
+// ── publish (runtime / mediated push) ────────────────────────────────────────
+
+interface RuntimePublishParams {
+  manifest: Record<string, unknown>;
+  localId: string;
+  manifestPath: string;
+  context?: string;
+  dockerfile?: string;
+  auth: { commonApiUrl: string; userToken: string };
+  env: Record<string, string | undefined>;
+  fetchImpl: FetchLike;
+  execImpl: ExecLike;
+}
+
+/**
+ * Build the app image in-pod with podman, `save` it to an OCI archive in the
+ * workspace, and hand it to common-api's MEDIATED push endpoint — common-api
+ * mints the registry token + chooses the destination and directs container-api
+ * to push it. We never see a registry credential and never choose the dest.
+ */
+async function publishRuntime(p: RuntimePublishParams): Promise<CmdResult> {
+  const { manifest, localId } = p;
+  const version = typeof manifest.version === 'string' ? manifest.version : '';
+  if (!version) return { ok: false, kind: 'validation', message: 'manifest.version is required for a runtime app' };
+
+  const manifestDir = path.dirname(path.resolve(p.manifestPath));
+  const context = p.context ? path.resolve(p.context) : manifestDir;
+  const dockerfile = p.dockerfile ? path.resolve(p.dockerfile) : path.join(context, 'Dockerfile');
+  try { if (!fs.statSync(dockerfile).isFile()) return { ok: false, kind: 'io', message: `Dockerfile not found: ${dockerfile}` }; }
+  catch { return { ok: false, kind: 'io', message: `Dockerfile not found: ${dockerfile}` }; }
+
+  const localTag = `localhost/tileapp-${localId}:${version}`;
+  // Archive goes to a LOCAL temp file — common-api does the push, so it never
+  // needs to be in the workspace / reachable by another in-pod process.
+  const archiveTmp = path.join(os.tmpdir(), `tileapp-build-${localId}-${version}-${Date.now()}.tar`);
+
+  process.stdout.write(`Building ${localTag} …\n`);
+  const build = await p.execImpl('podman', ['build', '-t', localTag, '-f', dockerfile, context]);
+  if (build.code !== 0) return { ok: false, kind: 'io', message: `podman build failed (code ${build.code}): ${build.stderr.trim().slice(0, 600)}` };
+
+  // From here on archiveTmp may exist (even partially on a failed save), so the
+  // finally always reaps it — not just on the upload path.
+  try {
+    process.stdout.write(`Exporting OCI archive …\n`);
+    const save = await p.execImpl('podman', ['save', '--format', 'oci-archive', '-o', archiveTmp, localTag]);
+    if (save.code !== 0) return { ok: false, kind: 'io', message: `podman save failed (code ${save.code}): ${save.stderr.trim().slice(0, 600)}` };
+
+    // Strip any `image` the author put in — common-api computes ref + the actual
+    // pushed digest and fills it in. `runtime` is carried through. The manifest
+    // travels in a header; the body is the raw archive (streamed, never buffered).
+    const sentManifest = { ...manifest };
+    delete (sentManifest as Record<string, unknown>).image;
+    const manifestHeader = Buffer.from(JSON.stringify({ id: localId, manifest: sentManifest })).toString('base64');
+    // The manifest rides in a header (the body is the archive). Keep it well
+    // under HTTP header limits — a runtime manifest is small; if you've packed in
+    // large store-listing metadata (screenshots/changelog), trim it.
+    if (Buffer.byteLength(manifestHeader) > 7000) {
+      return { ok: false, kind: 'validation', message: 'manifest is too large to publish as a runtime app — remove bulky fields (screenshots/changelog) or shorten description/permissions' };
+    }
+
+
+    let size = 0;
+    try { size = fs.statSync(archiveTmp).size; } catch { /* server validates the upload */ }
+    process.stdout.write(`Uploading + pushing (mediated, ${size} bytes) …\n`);
+    const res = await p.fetchImpl(`${apiBase(p.auth.commonApiUrl)}/tileapps/personal/publish-image`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/octet-stream',
+        authorization: `Bearer ${p.auth.userToken}`,
+        'x-tileapp-manifest': manifestHeader,
+      },
+      body: fs.createReadStream(archiveTmp),
+      // Node/undici requires duplex for a streaming request body.
+      duplex: 'half',
+    } as Parameters<FetchLike>[1]);
+    if (!res.ok) return { ok: false, kind: 'http', message: `publish-image failed: HTTP ${res.status} — ${await safeText(res)}` };
+    const json = (await res.json()) as { appId?: string; ref?: string; tag?: string; digest?: string };
+    if (!json.appId) return { ok: false, kind: 'http', message: 'publish-image response missing appId' };
+    return {
+      ok: true,
+      output: `Published runtime app ${json.appId}\n  image: ${json.ref}:${json.tag}@${json.digest}\n  next: install it + add a tile (studio.install_app / studio.create_app_tile).`,
+    };
+  } catch (e) {
+    return { ok: false, kind: 'http', message: `publish-image request failed: ${(e as Error).message}` };
+  } finally {
+    try { fs.unlinkSync(archiveTmp); } catch { /* best effort */ }
+  }
 }
