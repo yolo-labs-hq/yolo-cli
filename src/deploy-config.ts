@@ -19,8 +19,12 @@
  * Validation is lenient on PRESENCE (only `$version` is required —
  * `init` may write a partial link before detection fills the rest) but
  * strict on TYPES: a present field with the wrong shape is a structured
- * error, never silently coerced. Unknown top-level keys are tolerated
- * (forward compat) but not round-tripped by the canonical writer.
+ * error, never silently coerced. Unknown keys are tolerated (forward
+ * compat — a newer deploy.json must not be rejected by an older CLI) and
+ * dropped by the canonical writer, but they are NO LONGER SILENT: each is
+ * returned as a non-fatal `warning` so a misspelled or unsupported field
+ * (e.g. `compatibilityDate`, which the platform fixes and does not read)
+ * surfaces in `yolo deploy validate` instead of misleading the author.
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -87,12 +91,13 @@ export interface DeployConfigValidationError {
 }
 
 export type ValidateDeployConfigResult =
-  | { ok: true; config: DeployConfig }
+  /** `warnings` carries non-fatal advisories (e.g. unknown/ignored fields); always present on success, may be empty. */
+  | { ok: true; config: DeployConfig; warnings: DeployConfigValidationError[] }
   | { ok: false; errors: DeployConfigValidationError[] };
 
 export type ReadDeployConfigResult =
-  /** `config: null` ⇒ no `.yolo/deploy.json` exists (not an error — first-ship case). */
-  | { ok: true; config: DeployConfig | null; path: string }
+  /** `config: null` ⇒ no `.yolo/deploy.json` exists (not an error — first-ship case). `warnings` ⇒ non-fatal advisories. */
+  | { ok: true; config: DeployConfig | null; path: string; warnings: DeployConfigValidationError[] }
   | {
       ok: false;
       kind: 'malformed' | 'invalid';
@@ -131,8 +136,8 @@ export function readDeployConfig(
 ): ReadDeployConfigResult {
   const filePath = deployConfigPath(cwd);
   const text = readFileImpl(filePath);
-  if (text === undefined) return { ok: true, config: null, path: filePath };
-  if (text.trim() === '') return { ok: true, config: null, path: filePath };
+  if (text === undefined) return { ok: true, config: null, path: filePath, warnings: [] };
+  if (text.trim() === '') return { ok: true, config: null, path: filePath, warnings: [] };
 
   let parsed: unknown;
   try {
@@ -159,7 +164,7 @@ export function readDeployConfig(
       errors: validated.errors,
     };
   }
-  return { ok: true, config: validated.config, path: filePath };
+  return { ok: true, config: validated.config, path: filePath, warnings: validated.warnings };
 }
 
 /**
@@ -273,7 +278,33 @@ export function validateDeployConfig(value: unknown): ValidateDeployConfigResult
   }
 
   if (errors.length > 0) return { ok: false, errors };
-  return { ok: true, config: obj as unknown as DeployConfig };
+  return { ok: true, config: obj as unknown as DeployConfig, warnings: collectUnknownKeyWarnings(obj) };
+}
+
+// Known schema keys per level. Unknown keys are tolerated (forward compat) but
+// surfaced as warnings so a silently-ignored field doesn't mislead the author.
+// `bindings[]` entries intentionally allow extra keys (provisioning hints), so
+// they're excluded here.
+const KNOWN_TOP_KEYS = new Set(['$version', 'projectId', 'slug', 'type', 'build', 'worker', 'compatibilityFlags', 'bindings']);
+const KNOWN_BUILD_KEYS = new Set(['command', 'outputDir']);
+const KNOWN_WORKER_KEYS = new Set(['entry', 'prebuilt', 'assetsDir']);
+
+function collectUnknownKeyWarnings(obj: Record<string, unknown>): DeployConfigValidationError[] {
+  const warnings: DeployConfigValidationError[] = [];
+  const note = (path: string, key: string) => {
+    // A targeted hint for the field a field report saw silently swallowed: the
+    // Worker compatibility DATE is platform-fixed and not read from deploy.json
+    // (only compatibilityFlags is) — see release-service `COMPATIBILITY_DATE`.
+    const message =
+      key === 'compatibilityDate'
+        ? "unknown field 'compatibilityDate' — ignored. The Worker compatibility date is fixed by the platform and is not configurable via deploy.json; use 'compatibilityFlags' for runtime flags (e.g. [\"nodejs_compat\"])."
+        : `unknown field '${key}' — ignored (not part of the deploy.json schema; check for a typo)`;
+    warnings.push({ path, message });
+  };
+  for (const k of Object.keys(obj)) if (!KNOWN_TOP_KEYS.has(k)) note(k, k);
+  if (isPlainObject(obj.build)) for (const k of Object.keys(obj.build)) if (!KNOWN_BUILD_KEYS.has(k)) note(`build.${k}`, k);
+  if (isPlainObject(obj.worker)) for (const k of Object.keys(obj.worker)) if (!KNOWN_WORKER_KEYS.has(k)) note(`worker.${k}`, k);
+  return warnings;
 }
 
 // ─── Internals ────────────────────────────────────────────────────────────

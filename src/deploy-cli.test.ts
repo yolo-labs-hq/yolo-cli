@@ -61,7 +61,7 @@ const SHIP_PENDING: DeployShipResult = {
 const CONFIG_PATH = '/proj/.yolo/deploy.json';
 
 function linked(config: { $version: 1; projectId?: string; slug?: string } | null) {
-  return { ok: true as const, config, path: CONFIG_PATH };
+  return { ok: true as const, config, path: CONFIG_PATH, warnings: [] };
 }
 
 function baseDeps(io: DeployIo, overrides: Partial<DeployCliDeps> = {}): DeployCliDeps {
@@ -127,6 +127,7 @@ describe('deploy-cli — validate', () => {
     ok: true as const,
     config: { $version: 1 as const, projectId: 'hp_1', slug: 'app', type: 'worker' as const, worker: { entry: 'src/index.ts' } },
     path: CONFIG_PATH,
+    warnings: [],
   };
 
   it('passes a valid worker config whose entry exists (exit 0)', async () => {
@@ -179,6 +180,24 @@ describe('deploy-cli — validate', () => {
     assert.match(io.stderr.join(''), /\$version: must be the number 1, got 2/);
   });
 
+  it('echoes a non-fatal warning for an unknown/ignored deploy.json field but still passes (exit 0)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['validate'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => ({
+          ok: true as const,
+          config: { $version: 1 as const, projectId: 'hp_1', slug: 's', type: 'static' as const, build: { command: 'npm run build', outputDir: 'dist' } },
+          path: CONFIG_PATH,
+          warnings: [{ path: 'compatibilityDate', message: "unknown field 'compatibilityDate' — ignored. The Worker compatibility date is fixed by the platform and is not configurable via deploy.json; use 'compatibilityFlags' for runtime flags (e.g. [\"nodejs_compat\"])." }],
+        }),
+        statPathImpl: () => 'dir',
+      }),
+    );
+    assert.equal(code, 0);
+    assert.match(io.stdout.join(''), /warn: compatibilityDate: .*fixed by the platform/);
+  });
+
   it('passes a static project with a build command even if the output dir is missing (note, exit 0)', async () => {
     const io = makeIo();
     const code = await runDeployCmd(
@@ -188,6 +207,7 @@ describe('deploy-cli — validate', () => {
           ok: true as const,
           config: { $version: 1 as const, slug: 's', type: 'static' as const, build: { command: 'npm run build', outputDir: 'dist' } },
           path: CONFIG_PATH,
+          warnings: [],
         }),
         statPathImpl: () => 'missing', // dist not built yet
       }),
@@ -208,6 +228,7 @@ describe('deploy-cli — validate', () => {
           ok: true as const,
           config: { $version: 1 as const, slug: 's', type: 'static' as const, build: { outputDir: 'dist' } },
           path: CONFIG_PATH,
+          warnings: [],
         }),
         readFileImpl: (p: string) => (p.endsWith('package.json') ? pkgJson : undefined),
         statPathImpl: () => 'missing',
@@ -229,6 +250,7 @@ describe('deploy-cli — validate', () => {
           ok: true as const,
           config: { $version: 1 as const, slug: 'api', type: 'worker' as const, worker: { entry: 'src/indx.ts' } },
           path: CONFIG_PATH,
+          warnings: [],
         }),
         readFileImpl: (p: string) => (p.endsWith('package.json') ? JSON.stringify({ scripts: { build: 'tsc' } }) : undefined),
         statPathImpl: () => 'missing',
@@ -253,6 +275,7 @@ describe('deploy-cli — validate', () => {
             build: { command: 'tsc' },
           },
           path: CONFIG_PATH,
+          warnings: [],
         }),
         readFileImpl: () => undefined,
         statPathImpl: () => 'missing',
@@ -330,6 +353,39 @@ describe('deploy-cli — bare ship', () => {
     const out = io.stdout.join('');
     assert.ok(out.includes('deploy: finalize ok\n'), 'progress goes to stdout without --json');
     assert.ok(out.includes('OK: shipped my-app release rel_0192 → https://my-app.yolo.host (staging)\n'));
+  });
+
+  it('prints a boot-failure warning (stderr) when the ship succeeded but the Worker did not boot (exit 0)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      [],
+      baseDeps(io, {
+        runShipImpl: async () => ({
+          ...SHIP_SUCCESS,
+          bootCheck: { status: 522, detail: 'The deployed Worker failed to boot — Cloudflare returned 522, the script did not instantiate.' },
+        }),
+      }),
+    );
+    assert.equal(code, 0); // still a success — the release is staged
+    assert.ok(io.stdout.join('').includes('OK: shipped'), 'success line still printed');
+    assert.match(io.stderr.join(''), /warn:.*failed to boot.*522/);
+  });
+
+  it('--json carries bootCheck and emits no human warn line', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['--json'],
+      baseDeps(io, {
+        runShipImpl: async () => ({
+          ...SHIP_SUCCESS,
+          bootCheck: { status: 522, detail: 'boot failed' },
+        }),
+      }),
+    );
+    assert.equal(code, 0);
+    const payload = JSON.parse(io.stdout.join(''));
+    assert.deepEqual(payload.bootCheck, { status: 522, detail: 'boot failed' });
+    assert.equal(io.stderr.join('').includes('warn:'), false);
   });
 
   it('--env prod and --dry-run thread through to the orchestrator', async () => {

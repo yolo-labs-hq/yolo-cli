@@ -217,6 +217,12 @@ async function runShipCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
 
   if (result.ok) {
     io.out(parsed.jsonOutput ? `${formatJsonResult(result)}\n` : `${formatShipSuccess(result)}\n`);
+    // The ship SUCCEEDED, but the backend's post-ship probe found the live Worker
+    // didn't boot (522). Surface it (stderr, human mode) so a "deployed but dead"
+    // release isn't mistaken for a clean ship — `--json` already carries bootCheck.
+    if (!parsed.jsonOutput && result.bootCheck) {
+      io.err(`warn: ${result.bootCheck.detail}\n`);
+    }
     return 0;
   }
   if (result.kind === 'awaiting-approval' && 'approvalId' in result) {
@@ -550,6 +556,10 @@ async function runValidateCmd(args: string[], deps: DeployCliDeps, io: DeployIo)
   const readConfig = deps.readDeployConfigImpl ?? readDeployConfig;
 
   const issues: Array<{ path?: string; message: string }> = [];
+  // Non-fatal advisories — e.g. an unknown/ignored deploy.json field. These do
+  // NOT fail validation (forward compat), but `validate` echoes them so a
+  // silently-dropped field (the `compatibilityDate` field-report case) surfaces.
+  const warnings: Array<{ path?: string; message: string }> = [];
 
   // 1. Parse + schema-validate .yolo/deploy.json (absent is allowed — detection
   //    can still infer the shape; surfaced as a hint, not an error).
@@ -565,6 +575,7 @@ async function runValidateCmd(args: string[], deps: DeployCliDeps, io: DeployIo)
   } else {
     config = readResult.config;
     configMissing = config === null;
+    for (const w of readResult.warnings) warnings.push({ path: w.path, message: w.message });
   }
 
   // 2. Resolve the project shape (static-vs-worker, entry/assets), only if the
@@ -645,16 +656,19 @@ async function runValidateCmd(args: string[], deps: DeployCliDeps, io: DeployIo)
   const ok = issues.length === 0;
 
   if (jsonOutput) {
-    io.out(`${JSON.stringify({ ok, configMissing, config, shape, issues, notes })}\n`);
+    io.out(`${JSON.stringify({ ok, configMissing, config, shape, issues, warnings, notes })}\n`);
     return ok ? 0 : 1;
   }
 
   if (!ok) {
     io.err('FAIL: deploy config is not valid\n');
     for (const it of issues) io.err(`  - ${it.path ? `${it.path}: ` : ''}${it.message}\n`);
+    for (const w of warnings) io.err(`  warn: ${w.path ? `${w.path}: ` : ''}${w.message}\n`);
     if (configMissing) io.err("  hint: run 'yolo deploy init' to create .yolo/deploy.json\n");
     return 1;
   }
+
+  for (const w of warnings) io.out(`warn: ${w.path ? `${w.path}: ` : ''}${w.message}\n`);
 
   io.out('OK: deploy config is valid\n');
   if (config) {

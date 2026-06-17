@@ -90,6 +90,12 @@ export interface DeployShipSuccess {
   shipId?: string;
   releaseId?: string;
   url?: string;
+  /**
+   * Present only when the backend's post-ship probe found the deployed Worker
+   * failed to boot (Cloudflare 522). The ship still SUCCEEDED (the release is
+   * staged/live); this is an advisory that the live URL won't serve until fixed.
+   */
+  bootCheck?: { status: number; detail: string };
 }
 
 /** The T3 prod gate outcome — NOT an error; never blind-retried (exit 3). */
@@ -289,6 +295,9 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
   }
   progress('deploy: finalize ok');
 
+  const bootCheck = parseBootCheck(finalized.value.bootCheck);
+  if (bootCheck) progress(`deploy: warn — deployed Worker failed to boot (HTTP ${bootCheck.status})`);
+
   return {
     ok: true,
     dryRun: false,
@@ -296,7 +305,16 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
     shipId,
     releaseId: finalized.value.releaseId,
     url: finalized.value.url,
+    ...(bootCheck ? { bootCheck } : {}),
   };
+}
+
+/** Narrow the backend's optional `bootCheck` envelope; ignore anything malformed. */
+function parseBootCheck(raw: unknown): { status: number; detail: string } | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.status !== 'number' || typeof r.detail !== 'string') return undefined;
+  return { status: r.status, detail: r.detail };
 }
 
 // ─── Exit codes (spec §5 — EXACT) ─────────────────────────────────────────
