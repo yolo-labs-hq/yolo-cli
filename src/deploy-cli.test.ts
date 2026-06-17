@@ -848,24 +848,85 @@ describe('deploy-cli — logs', () => {
     assert.match(io.stdout.join(''), /\[2026-06-13T00:00:00Z\] info hello/);
   });
 
-  it('--tail degrades honestly to the buffered fetch with a notice (codex P2 r3 — no streaming route yet)', async () => {
+  it('--tail long-polls the live buffer, prints new lines, and threads the cursor', async () => {
     const io = makeIo();
+    const calls: Array<{ cursor?: string }> = [];
     let buffered = 0;
     const code = await runDeployCmd(
-      ['logs', '--tail', '--json'],
+      ['logs', '--tail'],
       baseDeps(io, {
         getLogsImpl: async () => {
           buffered += 1;
-          return { ok: true, value: { entries: [], note: 'stub' } };
+          return { ok: true, value: { entries: [] } };
         },
-        tailLogsImpl: async () => {
-          throw new Error('tail leg must NOT be called until the streaming route exists');
+        tailMaxIterations: 2,
+        pollTailImpl: async (_ctx, _projectId, opts) => {
+          calls.push({ cursor: (opts as { cursor?: string }).cursor });
+          return calls.length === 1
+            ? { ok: true, value: { events: [{ timestamp: '2026-06-17T00:00:00Z', level: 'error', message: 'boom' }], cursor: 'c1' } }
+            : { ok: true, value: { events: [], cursor: 'c1', note: 'no-new-events' } };
         },
       }),
     );
     assert.equal(code, 0);
-    assert.equal(buffered, 1);
-    assert.match(io.stderr.join(''), /--tail is not available yet/);
+    assert.equal(buffered, 0); // --tail must NOT fall through to the buffered fetch
+    assert.deepEqual(calls, [{ cursor: undefined }, { cursor: 'c1' }]); // cursor threaded
+    assert.match(io.stdout.join(''), /error boom/);
+  });
+
+  it('--tail --json emits NDJSON to stdout (machine-readable contract preserved)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['logs', '--tail', '--json'],
+      baseDeps(io, {
+        tailMaxIterations: 1,
+        pollTailImpl: async () => ({
+          ok: true,
+          value: { events: [{ timestamp: '2026-06-17T00:00:00Z', level: 'error', message: 'boom' }], cursor: 'c1' },
+        }),
+      }),
+    );
+    assert.equal(code, 0);
+    // stdout is a parseable JSON object per line — NOT the human "error boom" format
+    const lines = io.stdout.join('').trim().split('\n').filter(Boolean);
+    assert.deepEqual(JSON.parse(lines[0]!), { timestamp: '2026-06-17T00:00:00Z', level: 'error', message: 'boom' });
+    assert.equal(io.stdout.join('').includes('error boom'), false);
+  });
+
+  it('--tail falls back to the buffered logs fetch when live tail is disabled (no silent empty)', async () => {
+    const io = makeIo();
+    let buffered = 0;
+    const code = await runDeployCmd(
+      ['logs', '--tail'],
+      baseDeps(io, {
+        tailMaxIterations: 5,
+        pollTailImpl: async () => ({ ok: true, value: { events: [], cursor: null, note: 'tail-disabled' } }),
+        getLogsImpl: async () => {
+          buffered += 1;
+          return { ok: true, value: { entries: [{ timestamp: '2026-06-17T00:00:00Z', level: 'info', message: 'recent' }] } };
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.equal(buffered, 1); // degraded to the buffered fetch
+    assert.match(io.stderr.join(''), /live tail is not enabled/);
+    assert.match(io.stdout.join(''), /info recent/); // recent buffered entry shown
+  });
+
+  it('--tail stops cleanly on a terminal target note (no-live-release) without a buffered fallback', async () => {
+    const io = makeIo();
+    let buffered = 0;
+    const code = await runDeployCmd(
+      ['logs', '--tail'],
+      baseDeps(io, {
+        tailMaxIterations: 5,
+        pollTailImpl: async () => ({ ok: true, value: { events: [], cursor: null, note: 'no-live-release' } }),
+        getLogsImpl: async () => { buffered += 1; return { ok: true, value: { entries: [] } }; },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.equal(buffered, 0); // genuinely-terminal target note → stop, no fallback
+    assert.match(io.stderr.join(''), /tail stopped — no-live-release/);
   });
 
   it('rejects an invalid --since with exit 64', async () => {

@@ -565,59 +565,32 @@ export async function getLogs(
   return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/logs${qs ? `?${qs}` : ''}`, { method: 'GET' });
 }
 
+export interface TailPollResult {
+  events: Array<Record<string, unknown>>;
+  cursor: string | null;
+  note?: string;
+}
+
 /**
- * GET /v1/deploy/projects/:id/logs?tail=true — streams NDJSON from the
- * response body; `onLine` is invoked once per complete (non-empty) line.
- * Resolves when the stream ends (server hangup) or errors.
+ * GET /v1/deploy/projects/:id/tail — ONE long-poll over the live-tail buffer
+ * (signal C). The server waits up to ~`waitMs` for new lines and returns them
+ * plus a `cursor`; the `--tail` loop calls this repeatedly, threading the cursor
+ * so there are no gaps or duplicates. Long-poll (not an infinite stream) so it
+ * survives proxy/ingress idle timeouts.
  */
-export async function tailLogs(
+export async function pollTail(
   ctx: DeployContext,
   projectId: string,
-  options: { sinceMinutes?: number } = {},
-  onLine: (line: string) => void,
-): Promise<ClientResult<void>> {
-  const token = currentToken(ctx);
-  if (!token) return missingTokenFailure();
-  const fetchImpl = resolveFetch(ctx);
-  if (!fetchImpl) return noFetchFailure();
-
-  const params = new URLSearchParams({ tail: 'true' });
-  if (options.sinceMinutes !== undefined) params.set('sinceMinutes', String(options.sinceMinutes));
-  const url = `${stripTrailingSlash(ctx.commonApiUrl)}/v1/deploy/projects/${enc(projectId)}/logs?${params.toString()}`;
-
-  let response;
-  try {
-    response = await fetchImpl(url, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${token}`, Accept: 'application/x-ndjson' },
-    });
-  } catch (err) {
-    return networkFailure(err);
-  }
-  if (!response.ok) return mapErrorResponse(response);
-  const stream = response.body;
-  if (!stream) {
-    return { ok: false, kind: 'network', message: 'log stream unavailable (response has no body)' };
-  }
-
-  const decoder = new TextDecoder();
-  let buffered = '';
-  try {
-    for await (const chunk of stream) {
-      buffered += decoder.decode(chunk, { stream: true });
-      let newline;
-      while ((newline = buffered.indexOf('\n')) !== -1) {
-        const line = buffered.slice(0, newline).replace(/\r$/, '').trim();
-        buffered = buffered.slice(newline + 1);
-        if (line) onLine(line);
-      }
-    }
-  } catch (err) {
-    return networkFailure(err);
-  }
-  const rest = (buffered + decoder.decode()).trim();
-  if (rest) onLine(rest);
-  return { ok: true, value: undefined };
+  options: { releaseId?: string; cursor?: string; waitMs?: number } = {},
+): Promise<ClientResult<TailPollResult>> {
+  const params = new URLSearchParams();
+  if (options.releaseId !== undefined) params.set('releaseId', options.releaseId);
+  if (options.cursor !== undefined) params.set('cursor', options.cursor);
+  if (options.waitMs !== undefined) params.set('waitMs', String(options.waitMs));
+  const qs = params.toString();
+  return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/tail${qs ? `?${qs}` : ''}`, {
+    method: 'GET',
+  }) as Promise<ClientResult<TailPollResult>>;
 }
 
 // ─── Internals ────────────────────────────────────────────────────────────
