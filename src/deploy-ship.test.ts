@@ -26,7 +26,7 @@ const CONFIG: DeployConfig = { $version: 1, projectId: 'hp_8f3a', slug: 'my-app'
 const CONFIG_PATH = '/proj/.yolo/deploy.json';
 
 function linked(config: DeployConfig | null): ReadDeployConfigResult {
-  return { ok: true, config, path: CONFIG_PATH };
+  return { ok: true, config, path: CONFIG_PATH, warnings: [] };
 }
 
 const STATIC_SHAPE: ProjectShape = { type: 'static', assetsDir: 'dist' };
@@ -164,6 +164,37 @@ describe('deploy-ship — happy path (static)', () => {
 
     // Pure static → finalize with zero modules.
     assert.deepEqual(recorded.finalizeCalls, [{ shipId: 'shp_77', modules: [] }]);
+  });
+
+  it('surfaces a bootCheck from the finalize response into the success result + a progress warn', async () => {
+    const { deps } = makeDeps({
+      finalizeShipImpl: async () => ({
+        ok: true,
+        value: {
+          releaseId: 'rel_0192',
+          url: 'https://my-app.yolo.host',
+          status: 'live',
+          bootCheck: { ok: false, status: 522, detail: 'Worker failed to boot (522).' },
+        },
+      }),
+    });
+    const { lines, promise } = runShip(deps);
+    const result = await promise;
+    assert.equal(result.ok, true);
+    if (result.ok) assert.deepEqual(result.bootCheck, { status: 522, detail: 'Worker failed to boot (522).' });
+    assert.ok(lines.some((l) => /warn — deployed Worker failed to boot \(HTTP 522\)/.test(l)));
+  });
+
+  it('ignores a malformed bootCheck envelope (no field on the result)', async () => {
+    const { deps } = makeDeps({
+      finalizeShipImpl: async () => ({
+        ok: true,
+        value: { releaseId: 'rel_0192', url: 'https://my-app.yolo.host', status: 'live', bootCheck: { nope: true } },
+      }),
+    });
+    const result = await runShip(deps).promise;
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal(result.bootCheck, undefined);
   });
 
   it('runs the build command first and streams prefixed output', async () => {

@@ -160,6 +160,43 @@ describe('deploy-config — validateDeployConfig', () => {
     });
     assert.equal(res.ok, true);
   });
+
+  it('returns no warnings for a clean, fully-known config', () => {
+    const res = validateDeployConfig({
+      $version: 1,
+      projectId: 'hp_1',
+      type: 'worker',
+      worker: { entry: 'x.js', prebuilt: true },
+      compatibilityFlags: ['nodejs_compat'],
+      bindings: [{ kind: 'd1', binding: 'DB', databaseName: 'app-db' }],
+    });
+    assert.equal(res.ok, true);
+    if (res.ok) assert.deepEqual(res.warnings, []);
+  });
+
+  it('warns (non-fatally) on unknown top-level / build / worker keys — forward compat keeps ok:true', () => {
+    const res = validateDeployConfig({
+      $version: 1,
+      typo: true,
+      build: { command: 'npm run build', oops: 1 },
+      worker: { entry: 'x.js', nope: 'x' },
+    });
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      assert.deepEqual(res.warnings.map((w) => w.path).sort(), ['build.oops', 'typo', 'worker.nope']);
+      for (const w of res.warnings) assert.match(w.message, /unknown field .* ignored/);
+    }
+  });
+
+  it('gives a targeted hint for the platform-fixed `compatibilityDate` field (field-report case)', () => {
+    const res = validateDeployConfig({ $version: 1, compatibilityDate: '2024-09-01' });
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      assert.equal(res.warnings.length, 1);
+      assert.equal(res.warnings[0]!.path, 'compatibilityDate');
+      assert.match(res.warnings[0]!.message, /fixed by the platform.*compatibilityFlags/);
+    }
+  });
 });
 
 // ─── writeDeployConfig ────────────────────────────────────────────────────
