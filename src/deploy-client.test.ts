@@ -17,7 +17,7 @@ import {
   getProjectStatus,
   rollbackProject,
   getLogs,
-  tailLogs,
+  pollTail,
   queryD1,
   type DeployContext,
   type DeployFetchLike,
@@ -389,24 +389,17 @@ describe('deploy-client — thin wrappers', () => {
     assert.equal(calls[0]!.url, 'https://api.example.com/v1/deploy/projects/hp_9/logs?sinceMinutes=120&limit=50');
   });
 
-  it('tailLogs streams NDJSON lines from the response body', async () => {
-    const { fetch, calls } = makeFetchStub({
-      streamLines: ['{"level":"info","message":"a"}\n{"level":"err', 'or","message":"b"}\n', '{"message":"tail-no-newline"}'],
-    });
-    const lines: string[] = [];
-    const result = await tailLogs(makeContext(fetch), 'hp_9', { sinceMinutes: 30 }, (line) => lines.push(line));
+  it('pollTail GETs /tail with cursor + waitMs and returns events/cursor', async () => {
+    const { fetch, calls } = makeFetchStub({ jsonBody: { events: [{ message: 'x' }], cursor: 'c2' } });
+    const result = await pollTail(makeContext(fetch), 'hp_9', { cursor: 'c1', waitMs: 20000, releaseId: 'rel_2' });
     assert.equal(result.ok, true);
-    assert.equal(calls[0]!.url, 'https://api.example.com/v1/deploy/projects/hp_9/logs?tail=true&sinceMinutes=30');
-    assert.deepEqual(lines, [
-      '{"level":"info","message":"a"}',
-      '{"level":"error","message":"b"}',
-      '{"message":"tail-no-newline"}',
-    ]);
+    if (result.ok) assert.equal(result.value.cursor, 'c2');
+    assert.equal(calls[0]!.url, 'https://api.example.com/v1/deploy/projects/hp_9/tail?releaseId=rel_2&cursor=c1&waitMs=20000');
   });
 
-  it('tailLogs maps a 4xx onto the structured failure (no stream)', async () => {
+  it('pollTail maps a 4xx onto the structured failure', async () => {
     const { fetch } = makeFetchStub({ ok: false, status: 403, jsonBody: { ok: false, reason: 'hosting-disabled', message: 'off' } });
-    const result = await tailLogs(makeContext(fetch), 'hp_9', {}, () => undefined);
+    const result = await pollTail(makeContext(fetch), 'hp_9', {});
     assert.equal(result.ok, false);
     if (!result.ok) assert.equal(result.kind, 'hosting-disabled');
   });

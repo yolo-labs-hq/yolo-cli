@@ -58,7 +58,7 @@ import {
   deleteProject,
   cloneProject,
   getLogs,
-  tailLogs,
+  pollTail,
   queryD1,
   type DeployClientFailure,
   type DeployContext,
@@ -99,8 +99,10 @@ export interface DeployCliDeps {
   deleteProjectImpl?: typeof deleteProject;
   cloneProjectImpl?: typeof cloneProject;
   getLogsImpl?: typeof getLogs;
-  tailLogsImpl?: typeof tailLogs;
+  pollTailImpl?: typeof pollTail;
   queryD1Impl?: typeof queryD1;
+  /** Test seam — cap the `--tail` poll loop (default Infinity = run until killed). */
+  tailMaxIterations?: number;
   shipDeps?: DeployShipDeps;
 }
 
@@ -819,12 +821,43 @@ async function runLogsCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
   }
 
   if (parsed.tail) {
-    // Honest degradation (codex P2 r3): the backend logs route is a buffered
-    // Phase-1 stub — there is no NDJSON stream to tail yet. A tail that
-    // silently exits after one buffered response would read as "no more
-    // logs"; say what's happening and fall through to the buffered fetch.
-    // tailLogs (deploy-client) stays for when the streaming route lands.
-    io.err('deploy: --tail is not available yet (log streaming lands with Phase 3 observability); showing recent entries instead\n');
+    // Live tail (signal C): long-poll the /tail buffer, threading the cursor so
+    // there are no gaps. Loops until killed (Ctrl-C) — or `tailMaxIterations` in
+    // tests. Transient failures stop with the mapped exit code.
+    const pollImpl = deps.pollTailImpl ?? pollTail;
+    const maxIters = deps.tailMaxIterations ?? Infinity;
+    io.err('deploy: tailing live logs (Ctrl-C to stop)…\n');
+    let cursor: string | undefined;
+    let fellBack = false;
+    for (let i = 0; i < maxIters; i++) {
+      const res = await pollImpl(auth.context, linked.projectId, cursor !== undefined ? { cursor } : {});
+      if (!res.ok) {
+        io.err(`${formatFail(res)}\n`);
+        return exitCodeForFailure(res.kind);
+      }
+      const { events, cursor: next, note } = res.value;
+      // Under --json, stdout stays machine-readable: one JSON object per line
+      // (NDJSON — the natural streaming shape). Notices already go to stderr.
+      for (const entry of events) {
+        io.out(parsed.jsonOutput ? `${JSON.stringify(entry)}\n` : `${formatLogEntry(entry)}\n`);
+      }
+      if (next !== null && next !== undefined) cursor = next;
+      if (note === 'tail-disabled') {
+        // Live tail isn't enabled on this deployment — DON'T leave the user with
+        // nothing; fall back to the buffered fetch below (the pre-5c behavior).
+        io.err('deploy: live tail is not enabled on this deployment; showing recent buffered logs instead\n');
+        fellBack = true;
+        break;
+      }
+      if (note === 'no-live-release' || note === 'release-not-found') {
+        io.err(`deploy: tail stopped — ${note}\n`);
+        return 0;
+      }
+      // 'no-new-events' just means the server's wait elapsed quietly — keep going.
+    }
+    // Normal tail completion (loop exhausted / killed) returns here; only a
+    // `tail-disabled` fall-back continues to the buffered logs path below.
+    if (!fellBack) return 0;
   }
 
   const logsImpl = deps.getLogsImpl ?? getLogs;
