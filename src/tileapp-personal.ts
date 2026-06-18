@@ -343,6 +343,44 @@ async function publishRuntime(p: RuntimePublishParams): Promise<CmdResult> {
   const version = typeof manifest.version === 'string' ? manifest.version : '';
   if (!version) return { ok: false, kind: 'validation', message: 'manifest.version is required for a runtime app' };
 
+  // PRE-FLIGHT manifest validation BEFORE the (expensive) build + multi-MB
+  // upload — so a trivial manifest error (a missing `ui` block, bad surface,
+  // etc.) fails locally in milliseconds instead of after a full image build,
+  // push, and a server 400 (dogfood feedback 2026-06-18). A runtime manifest
+  // legitimately OMITS `image` (the server fills it from the pushed digest), so
+  // we drop ONLY that one expected error; every other field is validated exactly
+  // as the server will, surfacing all problems at once.
+  // SCOPE: this mirrors the shared manifest SCHEMA validator (catches the common
+  // dogfood errors — missing ui/surface/displayName — before the build). It does
+  // NOT duplicate common-api's personal-specific gates (the runtime.exec ban,
+  // per-permission tier/grantability rules) — those stay server-authoritative to
+  // avoid CLI↔server validator drift, so a manifest that passes here can still be
+  // rejected server-side. Acceptable: this strictly improves on the prior
+  // no-preflight behavior and never false-rejects.
+  // Validate with `image` STRIPPED: the publish-image path ignores any
+  // author-supplied image and the server fills ref/tag/digest from the actual
+  // pushed image, so a placeholder/partial `image` block (e.g. `image: {}`)
+  // must NOT trip a local image.ref/tag failure. Stripping it also leaves the
+  // "runtime requires either `image` or exec" error, which we filter (the push
+  // supplies the image). Everything else (ui, surface, …) is validated as the
+  // server will, surfacing all problems at once before the build.
+  const { image: _serverFilledImage, ...rest } = manifest;
+  const forValidation = {
+    ...rest,
+    // The server OVERWRITES publisher with `personal:<ownerId>` before validating
+    // (the author's value is ignored entirely), so ALWAYS stamp a valid
+    // placeholder here — an absent OR empty-string author publisher must not
+    // cause a false local rejection that the server wouldn't.
+    publisher: 'personal',
+  };
+  const v = validateManifest(forValidation);
+  if (!v.ok) {
+    const real = v.errors.filter((e) => !e.startsWith('runtime requires either `image`'));
+    if (real.length > 0) {
+      return { ok: false, kind: 'validation', message: `manifest invalid (fix before build):\n  - ${real.join('\n  - ')}` };
+    }
+  }
+
   const manifestDir = path.dirname(path.resolve(p.manifestPath));
   const context = p.context ? path.resolve(p.context) : manifestDir;
   const dockerfile = p.dockerfile ? path.resolve(p.dockerfile) : path.join(context, 'Dockerfile');
@@ -356,14 +394,14 @@ async function publishRuntime(p: RuntimePublishParams): Promise<CmdResult> {
 
   process.stdout.write(`Building ${localTag} …\n`);
   const build = await p.execImpl('podman', ['build', '-t', localTag, '-f', dockerfile, context]);
-  if (build.code !== 0) return { ok: false, kind: 'io', message: `podman build failed (code ${build.code}): ${build.stderr.trim().slice(0, 600)}` };
+  if (build.code !== 0) return { ok: false, kind: 'io', message: `podman build failed (code ${build.code}): ${build.stderr.trim().slice(-4000)}` };
 
   // From here on archiveTmp may exist (even partially on a failed save), so the
   // finally always reaps it — not just on the upload path.
   try {
     process.stdout.write(`Exporting OCI archive …\n`);
     const save = await p.execImpl('podman', ['save', '--format', 'oci-archive', '-o', archiveTmp, localTag]);
-    if (save.code !== 0) return { ok: false, kind: 'io', message: `podman save failed (code ${save.code}): ${save.stderr.trim().slice(0, 600)}` };
+    if (save.code !== 0) return { ok: false, kind: 'io', message: `podman save failed (code ${save.code}): ${save.stderr.trim().slice(-4000)}` };
 
     // Strip any `image` the author put in — common-api computes ref + the actual
     // pushed digest and fills it in. `runtime` is carried through. The manifest

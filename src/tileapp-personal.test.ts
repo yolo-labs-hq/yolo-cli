@@ -128,6 +128,67 @@ describe('yolo tileapp publish --personal (runtime / mediated push)', () => {
   };
   const DIGEST = 'sha256:' + 'a'.repeat(64);
 
+  it('pre-flight rejects an invalid runtime manifest (missing ui) BEFORE building', async () => {
+    const cwd = tmpDir();
+    const dir = path.join(cwd, 'rt');
+    fs.mkdirSync(dir);
+    // Runtime manifest missing the required `ui` block (the dogfood case).
+    const manifest = {
+      id: 'svc', version: '1.0.0', displayName: 'Svc', publisher: 'personal',
+      description: 'd', surface: { kind: 'iframe', entry: 'index.html' },
+      runtime: { port: 8080 }, permissions: { required: [] },
+    };
+    fs.writeFileSync(path.join(dir, 'tileapp.json'), JSON.stringify(manifest));
+    fs.writeFileSync(path.join(dir, 'Dockerfile'), 'FROM scratch\n');
+    const calls: string[][] = [];
+    const r = await runTileAppPublishPersonal({
+      manifestPath: path.join(dir, 'tileapp.json'), env: ENV,
+      execImpl: writingExec(calls), fetchImpl: stubFetch(() => ({ status: 201, body: {} })),
+    });
+    assert.equal(r.ok, false);
+    assert.equal((r as any).kind, 'validation');
+    assert.match((r as any).message, /ui must have/);
+    // The expensive build/push must NOT have run.
+    assert.equal(calls.length, 0);
+  });
+
+  it('pre-flight tolerates a runtime manifest with no `publisher` (server stamps it)', async () => {
+    const cwd = tmpDir();
+    const dir = path.join(cwd, 'rt');
+    fs.mkdirSync(dir);
+    const manifest = {
+      id: 'svc', version: '1.0.0', displayName: 'Svc', // no publisher — server stamps it
+      description: 'd', ui: { icon: 'x', color: '#fff', label: 'S' },
+      surface: { kind: 'iframe', entry: 'index.html' },
+      runtime: { port: 8080 }, permissions: { required: [] },
+    };
+    fs.writeFileSync(path.join(dir, 'tileapp.json'), JSON.stringify(manifest));
+    fs.writeFileSync(path.join(dir, 'Dockerfile'), 'FROM scratch\n');
+    const calls: string[][] = [];
+    const fetchImpl = stubFetch((url, init) => {
+      const body = init?.body as any;
+      if (body && typeof body.on === 'function') { body.on('error', () => {}); body.resume?.(); }
+      return { status: 201, body: { appId: 'pa-x-svc', ref: 'reg/owner/svc', tag: '1.0.0', digest: DIGEST } };
+    });
+    const r = await runTileAppPublishPersonal({ manifestPath: path.join(dir, 'tileapp.json'), env: ENV, execImpl: writingExec(calls), fetchImpl });
+    assert.equal(r.ok, true, r.ok ? '' : (r as any).message);
+    assert.ok(calls.some((c) => c[0] === 'podman' && c[1] === 'build'), 'build should have run despite no publisher');
+  });
+
+  it('pre-flight tolerates a runtime manifest with no `image` (server fills it)', async () => {
+    // scaffoldRuntime's manifest omits image; the build proceeds (exec called).
+    const { manifestPath } = scaffoldRuntime();
+    const calls: string[][] = [];
+    const fetchImpl = stubFetch((url, init) => {
+      const body = init?.body as any;
+      if (body && typeof body.on === 'function') { body.on('error', () => {}); body.resume?.(); }
+      return { status: 201, body: { appId: 'pa-x-svc', ref: 'reg/owner/svc', tag: '1.0.0', digest: DIGEST } };
+    });
+    const r = await runTileAppPublishPersonal({ manifestPath, env: ENV, execImpl: writingExec(calls), fetchImpl });
+    assert.equal(r.ok, true, r.ok ? '' : (r as any).message);
+    assert.ok(calls.some((c) => c[0] === 'podman' && c[1] === 'build'), 'build should have run');
+  });
+
   it('builds, saves an OCI archive, and streams it to the mediated publish-image endpoint', async () => {
     const { manifestPath } = scaffoldRuntime();
     const calls: string[][] = [];
