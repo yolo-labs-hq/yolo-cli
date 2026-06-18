@@ -193,6 +193,8 @@ function printHelp(): void {
       '                                            + mediated-push to your registry namespace.',
       '    [--bundle-dir <dir>]                    Pure-UI: override the static-bundle directory to upload.',
       '    [--context <dir>] [--dockerfile <f>]    Runtime: build context + Dockerfile (default: the manifest dir).',
+      '    [--builder auto|podman|skopeo]          Runtime build engine. auto (default): skopeo assembler for RUN-less',
+      '                                            Dockerfiles (no container engine — works in-pod), else podman.',
       '  tileapp publish <manifest> [opts]         Submit a SIGNED manifest for marketplace review (POST /v1/publisher/publish).',
       '    [--channel beta|stable]                 Target channel (default: stable).',
       '    [--image-digest <d>]                    Consistency check: must equal the signed manifest image.digest.',
@@ -822,7 +824,7 @@ function tileAppUsage(sub: 'sign' | 'publish' | 'validate' | 'dev' | 'init', mes
   const usage: Record<string, string> = {
     init: 'Usage: yolo tileapp init <name>   (scaffolds ./<name>/tileapp.json + index.html)\n',
     sign: 'Usage: yolo tileapp sign <manifest.json> --publisher <id> [--key <keyId>] [--stdout]\n',
-    publish: 'Usage: yolo tileapp publish <manifest.json> --personal [--bundle-dir <dir>] [--context <dir>] [--dockerfile <f>]   (personal app)\n'
+    publish: 'Usage: yolo tileapp publish <manifest.json> --personal [--bundle-dir <dir>] [--context <dir>] [--dockerfile <f>] [--builder auto|podman|skopeo]   (personal app)\n'
       + '   or: yolo tileapp publish <manifest.json> [--channel beta|stable] [--image-digest <d>]   (marketplace)\n',
     validate: 'Usage: yolo tileapp validate <manifest.json> [--bundle-dir <dir>]\n',
     dev: 'Usage: yolo tileapp dev <manifest.json> [--port N] [--host H] [--bundle-dir <dir>] [--deny]\n',
@@ -858,6 +860,7 @@ async function runTileAppPublishCmd(args: string[]): Promise<number> {
   let bundleDir: string | undefined;
   let context: string | undefined;
   let dockerfile: string | undefined;
+  let builder: 'auto' | 'podman' | 'skopeo' | undefined;
   let personal = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
@@ -865,6 +868,11 @@ async function runTileAppPublishCmd(args: string[]): Promise<number> {
     else if (a === '--bundle-dir') { bundleDir = args[++i]; if (bundleDir === undefined) return tileAppUsage('publish', '--bundle-dir requires a value'); }
     else if (a === '--context') { context = args[++i]; if (context === undefined) return tileAppUsage('publish', '--context requires a value'); }
     else if (a === '--dockerfile') { dockerfile = args[++i]; if (dockerfile === undefined) return tileAppUsage('publish', '--dockerfile requires a value'); }
+    else if (a === '--builder') {
+      const v = args[++i];
+      if (v !== 'auto' && v !== 'podman' && v !== 'skopeo') return tileAppUsage('publish', `invalid --builder '${v ?? ''}' (expected auto|podman|skopeo)`);
+      builder = v;
+    }
     else if (a === '--channel') {
       const v = args[++i];
       if (v !== 'beta' && v !== 'stable') return tileAppUsage('publish', `invalid --channel '${v ?? ''}' (expected beta|stable)`);
@@ -879,12 +887,12 @@ async function runTileAppPublishCmd(args: string[]): Promise<number> {
   // bundle (no signing/review). Distinct from the marketplace publish below.
   if (personal) {
     const { runTileAppPublishPersonal, exitCodeForFailure } = await import('./tileapp-personal.js');
-    const result = await runTileAppPublishPersonal({ manifestPath, bundleDir, context, dockerfile });
+    const result = await runTileAppPublishPersonal({ manifestPath, bundleDir, context, dockerfile, builder });
     if (result.ok) { process.stdout.write(`${result.output}\n`); return 0; }
     process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
     return exitCodeForFailure(result.kind);
   }
-  if (bundleDir || context || dockerfile) return tileAppUsage('publish', '--bundle-dir/--context/--dockerfile are only valid with --personal');
+  if (bundleDir || context || dockerfile || builder) return tileAppUsage('publish', '--bundle-dir/--context/--dockerfile/--builder are only valid with --personal');
 
   const result = await runTileAppPublish({ manifestPath, channel, imageDigest });
   if (result.ok) { process.stdout.write(`${result.output}\n`); return 0; }

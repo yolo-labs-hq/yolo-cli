@@ -22,6 +22,9 @@ import { spawn } from 'node:child_process';
 import { resolveUserToken } from './auth-context.js';
 import { validateManifest, isRuntimeManifest } from './tileapp-validator.js';
 import { resolveBundleDir } from './tileapp-developer.js';
+import { parseDockerfile, assembleOciArchive } from './tileapp-oci-assembler.js';
+
+export type Builder = 'auto' | 'podman' | 'skopeo';
 
 export type FetchLike = typeof fetch;
 
@@ -183,6 +186,9 @@ export interface PublishPersonalOptions {
   /** Runtime apps: build context + Dockerfile (default: the manifest's dir). */
   context?: string;
   dockerfile?: string;
+  /** Runtime build engine: 'auto' (default) uses the skopeo assembler for
+   *  RUN-less Dockerfiles + podman otherwise; 'skopeo'/'podman' force one. */
+  builder?: Builder;
   fetchImpl?: FetchLike;
   execImpl?: ExecLike;
   env?: Record<string, string | undefined>;
@@ -262,7 +268,7 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
   if (isRuntimeManifest(read.manifest)) {
     return publishRuntime({
       manifest: read.manifest, localId, manifestPath: opts.manifestPath,
-      context: opts.context, dockerfile: opts.dockerfile,
+      context: opts.context, dockerfile: opts.dockerfile, builder: opts.builder,
       auth, env, fetchImpl: opts.fetchImpl ?? fetch, execImpl: opts.execImpl ?? defaultExec,
     });
   }
@@ -326,6 +332,7 @@ interface RuntimePublishParams {
   manifestPath: string;
   context?: string;
   dockerfile?: string;
+  builder?: Builder;
   auth: { commonApiUrl: string; userToken: string };
   env: Record<string, string | undefined>;
   fetchImpl: FetchLike;
@@ -392,16 +399,39 @@ async function publishRuntime(p: RuntimePublishParams): Promise<CmdResult> {
   // needs to be in the workspace / reachable by another in-pod process.
   const archiveTmp = path.join(os.tmpdir(), `tileapp-build-${localId}-${version}-${Date.now()}.tar`);
 
-  process.stdout.write(`Building ${localTag} …\n`);
-  const build = await p.execImpl('podman', ['build', '-t', localTag, '-f', dockerfile, context]);
-  if (build.code !== 0) return { ok: false, kind: 'io', message: `podman build failed (code ${build.code}): ${build.stderr.trim().slice(-4000)}` };
+  const parsed = parseDockerfile(fs.readFileSync(dockerfile, 'utf-8'));
+  const builder: Builder = p.builder ?? 'auto';
+  let ociTmpDir: string | null = null;
 
-  // From here on archiveTmp may exist (even partially on a failed save), so the
-  // finally always reaps it — not just on the upload path.
+  // archiveTmp (and the assembler's ociTmpDir, when used) may exist even on a
+  // partial failure past this point, so the finally always reaps both.
   try {
-    process.stdout.write(`Exporting OCI archive …\n`);
-    const save = await p.execImpl('podman', ['save', '--format', 'oci-archive', '-o', archiveTmp, localTag]);
-    if (save.code !== 0) return { ok: false, kind: 'io', message: `podman save failed (code ${save.code}): ${save.stderr.trim().slice(-4000)}` };
+    // Produce `archiveTmp` (an oci-archive) via the selected builder.
+    if (builder === 'podman' || (builder === 'auto' && !parsed.assemblable)) {
+      if (builder === 'auto') {
+        process.stdout.write(`Dockerfile needs a full container build (${parsed.unsupported.join('; ')}) — using podman.\n`);
+      }
+      process.stdout.write(`Building ${localTag} …\n`);
+      const build = await p.execImpl('podman', ['build', '-t', localTag, '-f', dockerfile, context]);
+      if (build.code !== 0) return { ok: false, kind: 'io', message: `podman build failed (code ${build.code}): ${build.stderr.trim().slice(-4000)}` };
+      process.stdout.write(`Exporting OCI archive …\n`);
+      const save = await p.execImpl('podman', ['save', '--format', 'oci-archive', '-o', archiveTmp, localTag]);
+      if (save.code !== 0) return { ok: false, kind: 'io', message: `podman save failed (code ${save.code}): ${save.stderr.trim().slice(-4000)}` };
+    } else {
+      // skopeo assembler — no container engine (works under the in-pod Kata
+      // uid_map/fuse limits that break rootless podman, PERSONAL_TILE_APPS §7.1 #2).
+      if (!parsed.assemblable) {
+        return { ok: false, kind: 'validation', message: `--builder skopeo can't assemble this Dockerfile (it needs a full container build): ${parsed.unsupported.join('; ')}` };
+      }
+      ociTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `tileapp-oci-${localId}-`));
+      process.stdout.write(`Assembling ${localTag} via skopeo (no container engine) …\n`);
+      const asm = await assembleOciArchive({
+        baseRef: parsed.from!, contextDir: context, parsed,
+        ociLayoutDir: ociTmpDir, outArchivePath: archiveTmp, tag: version,
+        exec: p.execImpl, log: (m) => process.stdout.write(`${m}\n`),
+      });
+      if (!asm.ok) return { ok: false, kind: asm.kind, message: asm.message };
+    }
 
     // Strip any `image` the author put in — common-api computes ref + the actual
     // pushed digest and fills it in. `runtime` is carried through. The manifest
@@ -442,5 +472,6 @@ async function publishRuntime(p: RuntimePublishParams): Promise<CmdResult> {
     return { ok: false, kind: 'http', message: `publish-image request failed: ${(e as Error).message}` };
   } finally {
     try { fs.unlinkSync(archiveTmp); } catch { /* best effort */ }
+    if (ociTmpDir) { try { fs.rmSync(ociTmpDir, { recursive: true, force: true }); } catch { /* best effort */ } }
   }
 }

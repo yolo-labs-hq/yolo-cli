@@ -170,7 +170,7 @@ describe('yolo tileapp publish --personal (runtime / mediated push)', () => {
       if (body && typeof body.on === 'function') { body.on('error', () => {}); body.resume?.(); }
       return { status: 201, body: { appId: 'pa-x-svc', ref: 'reg/owner/svc', tag: '1.0.0', digest: DIGEST } };
     });
-    const r = await runTileAppPublishPersonal({ manifestPath: path.join(dir, 'tileapp.json'), env: ENV, execImpl: writingExec(calls), fetchImpl });
+    const r = await runTileAppPublishPersonal({ manifestPath: path.join(dir, 'tileapp.json'), env: ENV, execImpl: writingExec(calls), fetchImpl, builder: 'podman' });
     assert.equal(r.ok, true, r.ok ? '' : (r as any).message);
     assert.ok(calls.some((c) => c[0] === 'podman' && c[1] === 'build'), 'build should have run despite no publisher');
   });
@@ -184,7 +184,7 @@ describe('yolo tileapp publish --personal (runtime / mediated push)', () => {
       if (body && typeof body.on === 'function') { body.on('error', () => {}); body.resume?.(); }
       return { status: 201, body: { appId: 'pa-x-svc', ref: 'reg/owner/svc', tag: '1.0.0', digest: DIGEST } };
     });
-    const r = await runTileAppPublishPersonal({ manifestPath, env: ENV, execImpl: writingExec(calls), fetchImpl });
+    const r = await runTileAppPublishPersonal({ manifestPath, env: ENV, execImpl: writingExec(calls), fetchImpl, builder: 'podman' });
     assert.equal(r.ok, true, r.ok ? '' : (r as any).message);
     assert.ok(calls.some((c) => c[0] === 'podman' && c[1] === 'build'), 'build should have run');
   });
@@ -203,7 +203,7 @@ describe('yolo tileapp publish --personal (runtime / mediated push)', () => {
       if (body && typeof body.on === 'function') { body.on('error', () => {}); body.resume?.(); }
       return { status: 201, body: { appId: 'pa-x-svc', ref: 'reg/owner/svc', tag: '1.0.0', digest: DIGEST } };
     });
-    const r = await runTileAppPublishPersonal({ manifestPath, env: ENV, execImpl: writingExec(calls), fetchImpl });
+    const r = await runTileAppPublishPersonal({ manifestPath, env: ENV, execImpl: writingExec(calls), fetchImpl, builder: 'podman' });
     assert.equal(r.ok, true, r.ok ? '' : (r as any).message);
     assert.ok(calls.some((c) => c[0] === 'podman' && c[1] === 'build'), 'podman build called');
     assert.ok(calls.some((c) => c[0] === 'podman' && c[1] === 'save'), 'podman save called');
@@ -234,9 +234,33 @@ describe('yolo tileapp publish --personal (runtime / mediated push)', () => {
   it('surfaces a build failure', async () => {
     const { manifestPath } = scaffoldRuntime();
     const execImpl = async (_file: string, args: string[]) => (args[0] === 'build' ? { code: 1, stderr: 'boom' } : { code: 0, stderr: '' });
-    const r = await runTileAppPublishPersonal({ manifestPath, env: ENV, execImpl, fetchImpl: stubFetch(() => ({ status: 200, body: {} })) });
+    const r = await runTileAppPublishPersonal({ manifestPath, env: ENV, execImpl, fetchImpl: stubFetch(() => ({ status: 200, body: {} })), builder: 'podman' });
     assert.equal(r.ok, false);
     assert.equal((r as any).kind, 'io');
     assert.match((r as any).message, /build failed/);
+  });
+
+  it('auto builder routes a RUN-less Dockerfile to the skopeo assembler (not podman)', async () => {
+    const { manifestPath } = scaffoldRuntime();
+    // Use a real base so the assembler hits the skopeo PULL path (scratch skips it).
+    fs.writeFileSync(path.join(path.dirname(manifestPath), 'Dockerfile'), 'FROM alpine:3\nCOPY . /app');
+    const seen: string[] = [];
+    // Fail at the skopeo base-pull so we bail early; we only care WHICH engine ran.
+    const execImpl = async (file: string) => { seen.push(file); return { code: 1, stderr: 'pull failed' }; };
+    const r = await runTileAppPublishPersonal({ manifestPath, env: ENV, execImpl, fetchImpl: stubFetch(() => ({ status: 200, body: {} })) });
+    assert.equal(r.ok, false);
+    assert.equal(seen[0], 'skopeo', 'auto should use skopeo for a RUN-less Dockerfile');
+    assert.ok(!seen.includes('podman'), 'podman must not be invoked');
+    assert.match((r as any).message, /skopeo pull/);
+  });
+
+  it('--builder skopeo rejects a RUN-ful Dockerfile before any exec', async () => {
+    const { manifestPath } = scaffoldRuntime();
+    fs.writeFileSync(path.join(path.dirname(manifestPath), 'Dockerfile'), 'FROM alpine\nRUN apk add curl\nCOPY . /app');
+    const seen: string[] = [];
+    const r = await runTileAppPublishPersonal({ manifestPath, env: ENV, builder: 'skopeo', execImpl: async (f) => { seen.push(f); return { code: 0, stderr: '' }; }, fetchImpl: stubFetch(() => ({ status: 200, body: {} })) });
+    assert.equal(r.ok, false);
+    assert.equal((r as any).kind, 'validation');
+    assert.equal(seen.length, 0, 'no build engine should run for an unassemblable Dockerfile under --builder skopeo');
   });
 });
