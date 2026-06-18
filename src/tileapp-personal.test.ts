@@ -40,7 +40,13 @@ describe('yolo tileapp init', () => {
     const manifest = JSON.parse(fs.readFileSync(path.join(cwd, 'my-widget', 'tileapp.json'), 'utf-8'));
     assert.equal(manifest.id, 'my-widget');
     assert.equal(manifest.surface.entry, 'index.html');
-    assert.ok(fs.existsSync(path.join(cwd, 'my-widget', 'index.html')));
+    const indexHtml = fs.readFileSync(path.join(cwd, 'my-widget', 'index.html'), 'utf-8');
+    assert.ok(indexHtml.includes('index.html') || indexHtml.length > 0);
+    // Scaffolds a separate app.js (CSP forbids inline <script>) + references it.
+    assert.ok(fs.existsSync(path.join(cwd, 'my-widget', 'app.js')), 'app.js should be scaffolded');
+    assert.match(indexHtml, /<script src="app\.js"/);
+    // And surfaces the CSP constraint (no inline script / no eval) at scaffold time.
+    assert.match(indexHtml, /script-src 'self'/);
   });
 
   it('rejects a bad name and an existing dir', () => {

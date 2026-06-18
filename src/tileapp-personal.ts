@@ -115,6 +115,17 @@ export function runTileAppInit(opts: InitOptions): CmdResult {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>${title}</title>
+  <!--
+    ⚠️ CONTENT-SECURITY-POLICY — read this before you build.
+    Tile-app bundles are served with \`script-src 'self'\`. That means:
+      • NO inline <script> — put ALL your JavaScript in app.js (loaded below).
+      • NO eval() / new Function() — they are blocked. If your app needs to
+        evaluate expressions (a calculator, grapher, template engine, …), write
+        a real tokenizer/parser in app.js; you cannot shortcut with eval.
+      • NO network — no CDN scripts, remote fonts, or fetch() to other origins.
+        Keep the app fully self-contained (only the files in this folder).
+    Inline <style> is fine; CSS may also live in a bundled .css file.
+  -->
   <style>
     body { font: 15px/1.5 system-ui, sans-serif; margin: 0; display: grid; place-items: center;
            height: 100vh; color: #e5e7eb; background: #111827; }
@@ -122,31 +133,45 @@ export function runTileAppInit(opts: InitOptions): CmdResult {
 </head>
 <body>
   <main>
-    <h1>${title} 🧩</h1>
-    <p>Your personal tile-app is live. Edit <code>index.html</code> and re-run
+    <h1>${title}</h1>
+    <p id="status">Loading…</p>
+    <p>Edit <code>index.html</code> + <code>app.js</code>, then re-run
        <code>yolo tileapp publish tileapp.json --personal</code>.</p>
   </main>
-  <!--
-    To call host capabilities (LLM, MCP tools, files), add @yololabs/app-sdk:
-      import { createTileApp } from './vendor/app-sdk/index.js';
-      const app = createTileApp();
-      const res = await app.call('llm', 'complete', { prompt: '...' });
-    Vendor the SDK's browser build alongside this file and request any
-    permissions you need in tileapp.json's permissions.required/optional.
-  -->
+  <!-- All JS lives in app.js (the CSP forbids inline scripts). type="module" so
+       you can \`import\` the app-sdk (a same-origin module is allowed under 'self'). -->
+  <script src="app.js" type="module"></script>
 </body>
 </html>
+`;
+  const appJs = `// ${title} — personal tile-app logic.
+//
+// ⚠️ CSP: served under \`script-src 'self'\` → eval() and new Function() are
+// BLOCKED, and there is no network. If you need to evaluate user input (e.g. a
+// calculator/grapher), write a real parser here (tokenizer → shunting-yard →
+// RPN eval) rather than reaching for eval. Keep everything self-contained.
+//
+// To call HOST capabilities (LLM, MCP tools, files), vendor @yololabs/app-sdk's
+// browser build into ./vendor/app-sdk/ and request matching permissions in
+// tileapp.json (permissions.required / optional):
+//   import { createTileApp } from './vendor/app-sdk/index.js';
+//   const app = createTileApp();
+//   const res = await app.call('llm', 'complete', { prompt: '...' });
+
+const status = document.getElementById('status');
+if (status) status.textContent = 'Ready — edit app.js to build your app.';
 `;
   try {
     fs.mkdirSync(dir, { recursive: false });
     fs.writeFileSync(path.join(dir, 'tileapp.json'), `${JSON.stringify(manifest, null, 2)}\n`);
     fs.writeFileSync(path.join(dir, 'index.html'), indexHtml);
+    fs.writeFileSync(path.join(dir, 'app.js'), appJs);
   } catch (e) {
     return { ok: false, kind: 'io', message: `scaffold failed: ${(e as Error).message}` };
   }
   return {
     ok: true,
-    output: `Created ${name}/ (tileapp.json + index.html)\n  next: cd ${name} && yolo tileapp publish tileapp.json --personal`,
+    output: `Created ${name}/ (tileapp.json + index.html + app.js)\n  note: bundle CSP is \`script-src 'self'\` — keep JS in app.js (no inline <script>, no eval, no network)\n  next: cd ${name} && yolo tileapp publish tileapp.json --personal`,
   };
 }
 
