@@ -421,6 +421,22 @@ export async function rollbackProject(
   return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/rollback`, { method: 'POST', jsonBody: request });
 }
 
+/** POST /v1/deploy/projects/:id/unpublish — take a live project offline (reversible). */
+export async function unpublishProject(
+  ctx: DeployContext,
+  projectId: string,
+): Promise<ClientResult<unknown>> {
+  return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/unpublish`, { method: 'POST' });
+}
+
+/** POST /v1/deploy/projects/:id/republish — bring an offline project back online. */
+export async function republishProject(
+  ctx: DeployContext,
+  projectId: string,
+): Promise<ClientResult<unknown>> {
+  return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/republish`, { method: 'POST' });
+}
+
 export interface D1QueryRow {
   [column: string]: unknown;
 }

@@ -51,6 +51,8 @@ import {
   getProjectStatus,
   listProjects,
   rollbackProject,
+  unpublishProject,
+  republishProject,
   renameProject,
   addAlias,
   removeAlias,
@@ -92,6 +94,8 @@ export interface DeployCliDeps {
   getProjectStatusImpl?: typeof getProjectStatus;
   listProjectsImpl?: typeof listProjects;
   rollbackProjectImpl?: typeof rollbackProject;
+  unpublishProjectImpl?: typeof unpublishProject;
+  republishProjectImpl?: typeof republishProject;
   renameProjectImpl?: typeof renameProject;
   addAliasImpl?: typeof addAlias;
   removeAliasImpl?: typeof removeAlias;
@@ -114,6 +118,8 @@ const USAGE = [
   '       yolo deploy status [--json]',
   '       yolo deploy logs [--tail] [--since <dur>] [--json]',
   '       yolo deploy rollback [releaseId] [--json]',
+  '       yolo deploy offline [--json]',
+  '       yolo deploy publish [--json]',
   '       yolo deploy rename <newslug> [--no-redirect] [--json]',
   '       yolo deploy alias <slug> [--json]',
   '       yolo deploy alias rm <slug> [--json]',
@@ -140,6 +146,8 @@ export async function runDeployCmd(args: string[], deps: DeployCliDeps = {}): Pr
   if (sub === 'status') return runStatusCmd(args.slice(1), deps, io);
   if (sub === 'logs') return runLogsCmd(args.slice(1), deps, io);
   if (sub === 'rollback') return runRollbackCmd(args.slice(1), deps, io);
+  if (sub === 'offline') return runOfflineCmd(args.slice(1), deps, io);
+  if (sub === 'publish') return runPublishCmd(args.slice(1), deps, io);
   if (sub === 'rename') return runRenameCmd(args.slice(1), deps, io);
   if (sub === 'alias') return runAliasCmd(args.slice(1), deps, io);
   if (sub === 'redirect') return runRedirectCmd(args.slice(1), deps, io);
@@ -960,6 +968,75 @@ async function runRollbackCmd(args: string[], deps: DeployCliDeps, io: DeployIo)
   const releaseId = str(release.releaseId) ?? str(release.id) ?? parsed.releaseId ?? '(previous live)';
   const url = str(raw.url) ?? str(release.url);
   io.out(`OK: rolled back ${linked.slug ?? linked.projectId} to release ${releaseId}${url ? ` → ${url}` : ''}\n`);
+  return 0;
+}
+
+/** Shared parser for the no-positional-arg deploy subcommands (offline/publish): only `--json`. */
+function parseJsonOnlyArgs(args: string[]): { ok: true; jsonOutput: boolean } | ParseError {
+  let jsonOutput = false;
+  for (const a of args) {
+    if (a === '--json') jsonOutput = true;
+    else if (a.startsWith('--')) return { ok: false, message: `unknown option: ${a}` };
+    else return { ok: false, message: `unexpected positional argument: ${a}` };
+  }
+  return { ok: true, jsonOutput };
+}
+
+async function runOfflineCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Promise<number> {
+  const parsed = parseJsonOnlyArgs(args);
+  if (!parsed.ok) {
+    io.err(`yolo deploy offline: ${parsed.message}\nUsage: yolo deploy offline [--json]\n`);
+    return 64;
+  }
+  const linked = requireLink(deps, io);
+  if (!linked.ok) return linked.exitCode;
+  const auth = resolveAuth(deps);
+  if (!auth.ok) {
+    io.err(`${formatFail({ kind: 'auth', message: auth.message })}\n`);
+    return 78;
+  }
+
+  const unpublish = deps.unpublishProjectImpl ?? unpublishProject;
+  const result = await unpublish(auth.context, linked.projectId);
+  if (!result.ok) {
+    io.err(`${formatFail(result)}\n`);
+    return exitCodeForFailure(result.kind);
+  }
+  if (parsed.jsonOutput) {
+    io.out(`${JSON.stringify(result.value, null, 2)}\n`);
+    return 0;
+  }
+  io.out(`OK: took ${linked.slug ?? linked.projectId} offline (release kept — run 'yolo deploy publish' to bring it back)\n`);
+  return 0;
+}
+
+async function runPublishCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Promise<number> {
+  const parsed = parseJsonOnlyArgs(args);
+  if (!parsed.ok) {
+    io.err(`yolo deploy publish: ${parsed.message}\nUsage: yolo deploy publish [--json]\n`);
+    return 64;
+  }
+  const linked = requireLink(deps, io);
+  if (!linked.ok) return linked.exitCode;
+  const auth = resolveAuth(deps);
+  if (!auth.ok) {
+    io.err(`${formatFail({ kind: 'auth', message: auth.message })}\n`);
+    return 78;
+  }
+
+  const republish = deps.republishProjectImpl ?? republishProject;
+  const result = await republish(auth.context, linked.projectId);
+  if (!result.ok) {
+    io.err(`${formatFail(result)}\n`);
+    return exitCodeForFailure(result.kind);
+  }
+  if (parsed.jsonOutput) {
+    io.out(`${JSON.stringify(result.value, null, 2)}\n`);
+    return 0;
+  }
+  const raw = (result.value && typeof result.value === 'object' ? result.value : {}) as Record<string, unknown>;
+  const url = str(raw.url);
+  io.out(`OK: published ${linked.slug ?? linked.projectId}${url ? ` → ${url}` : ''}\n`);
   return 0;
 }
 
