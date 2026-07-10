@@ -66,6 +66,9 @@ describe('tileapp-validator', () => {
   it('parsePermissionShape decomposes namespaces and rejects junk', () => {
     assert.equal(parsePermissionShape('fs.read:workspace')?.namespace, 'fs');
     assert.equal(parsePermissionShape('llm.invoke:claude')?.action, 'invoke');
+    // Bare provider-agnostic llm.invoke parses (arg optional).
+    assert.equal(parsePermissionShape('llm.invoke')?.namespace, 'llm');
+    assert.equal(parsePermissionShape('llm.invoke')?.arg, undefined);
     assert.equal(parsePermissionShape('fs.delete:x'), null);
     assert.equal(parsePermissionShape(''), null);
   });

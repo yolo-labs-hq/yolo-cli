@@ -59,7 +59,11 @@ export function parsePermissionShape(raw: string): ParsedPermission | null {
       if (action || !arg) return null; // arg = McpScope (membership checked server-side)
       return { raw, namespace: 'mcp', arg };
     case 'llm':
-      if (action !== 'invoke' || !arg) return null;
+      // llm.invoke — provider-agnostic (the router picks the model). A legacy
+      // `llm.invoke:<provider>` still parses; the provider is advisory only. Head
+      // must be EXACTLY `llm.invoke`: bare is valid, but `llm.invoke:` and extra
+      // segments `llm.invoke.foo` are rejected.
+      if (head !== 'llm.invoke' || arg === '') return null;
       return { raw, namespace: 'llm', action, arg };
     case 'media':
       if (action !== 'upload' && action !== 'download') return null;
