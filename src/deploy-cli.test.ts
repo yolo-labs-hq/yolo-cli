@@ -479,10 +479,12 @@ describe('deploy-cli — init', () => {
     const code = await runDeployCmd(
       ['init', '--slug', 'my-app', '--type', 'static'],
       baseDeps(io, {
+        env: { ...ENV, WORKSPACE_ID: 'ws-current' },
         readDeployConfigImpl: () => linked(null),
         createProjectImpl: async (_ctx, request) => {
           assert.equal(request.name, 'my-app');
           assert.equal(request.slug, 'my-app');
+          assert.equal(request.workspaceId, 'ws-current');
           return { ok: true, value: { project: { id: 'hp_8f3a', slug: 'my-app' } } };
         },
         writeDeployConfigImpl: (cwd, config) => {

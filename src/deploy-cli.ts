@@ -333,6 +333,11 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
   const created = await create(auth.context, {
     name: parsed.slug ?? path.basename(cwd),
     ...(parsed.slug ? { slug: parsed.slug } : {}),
+    // Session pods provide WORKSPACE_ID. Persisting it on the hosting project
+    // lets server-side deploy lifecycle events route back to the workspace
+    // (and therefore to VibeAssist event watchers). Local CLI use remains
+    // unchanged because the field is optional.
+    ...(deps.env?.WORKSPACE_ID ? { workspaceId: deps.env.WORKSPACE_ID } : {}),
   });
   if (!created.ok) {
     // create-or-LINK: a `slug-taken` on a slug the caller ALREADY OWNS means a
