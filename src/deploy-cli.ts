@@ -71,6 +71,7 @@ import {
 import { readDeployConfig, writeDeployConfig, type DeployConfig } from './deploy-config.js';
 import { adaptWrangler, detectProjectShape, type ProjectShape } from './deploy-detect.js';
 import { collectNodeBuiltinsFromText } from './deploy-bundle.js';
+import { runDeployDev, type DevServerOptions } from './deploy-dev.js';
 import { defaultReadFile, type ReadFileImpl } from './auth-context.js';
 
 // ─── Injectable surface ───────────────────────────────────────────────────
@@ -109,6 +110,8 @@ export interface DeployCliDeps {
   /** Test seam — cap the `--tail` poll loop (default Infinity = run until killed). */
   tailMaxIterations?: number;
   shipDeps?: DeployShipDeps;
+  /** Test seams for `deploy dev` (server start / stop-wait / config / bundle). */
+  devDeps?: Partial<DevServerOptions>;
 }
 
 const USAGE = [
@@ -117,6 +120,7 @@ const USAGE = [
   '       yolo deploy link (--project-id <id> | --slug <slug>) [--type <static|worker>]',
   '       yolo deploy validate [--json]',
   '       yolo deploy doctor [--json]',
+  '       yolo deploy dev [--port <n>] [--host <h>] [--var KEY=VALUE ...]',
   '       yolo deploy status [--json]',
   '       yolo deploy logs [--tail] [--since <dur>] [--json]',
   '       yolo deploy rollback [releaseId] [--json]',
@@ -146,6 +150,7 @@ export async function runDeployCmd(args: string[], deps: DeployCliDeps = {}): Pr
   if (sub === 'link') return runLinkCmd(args.slice(1), deps, io);
   if (sub === 'validate') return runValidateCmd(args.slice(1), deps, io);
   if (sub === 'doctor') return runDoctorCmd(args.slice(1), deps, io);
+  if (sub === 'dev') return runDevCmd(args.slice(1), deps, io);
   if (sub === 'status') return runStatusCmd(args.slice(1), deps, io);
   if (sub === 'logs') return runLogsCmd(args.slice(1), deps, io);
   if (sub === 'rollback') return runRollbackCmd(args.slice(1), deps, io);
@@ -871,6 +876,65 @@ function lintWorkerEntry(text: string, entry: string, prebuilt: boolean, hasNode
   }
 
   return out;
+}
+
+// ─── dev ──────────────────────────────────────────────────────────────────
+
+export interface ParsedDevArgs {
+  ok: true;
+  port?: number;
+  host?: string;
+  vars: Record<string, string>;
+}
+
+/** Parse `yolo deploy dev` flags: --port <n>, --host <h>, repeatable --var KEY=VALUE. */
+export function parseDevArgs(args: string[]): ParsedDevArgs | ParseError {
+  let port: number | undefined;
+  let host: string | undefined;
+  const vars: Record<string, string> = {};
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--port' || a.startsWith('--port=')) {
+      const v = a.includes('=') ? a.slice('--port='.length) : args[++i];
+      const n = Number(v);
+      if (!v || !Number.isInteger(n) || n < 0 || n > 65535) return { ok: false, message: `--port must be an integer 0–65535 (got '${v ?? ''}')` };
+      port = n;
+    } else if (a === '--host' || a.startsWith('--host=')) {
+      const v = a.includes('=') ? a.slice('--host='.length) : args[++i];
+      if (!v || v.startsWith('--')) return { ok: false, message: '--host requires a value' };
+      host = v;
+    } else if (a === '--var' || a.startsWith('--var=')) {
+      const v = a.includes('=') && a.startsWith('--var=') ? a.slice('--var='.length) : args[++i];
+      const eq = v ? v.indexOf('=') : -1;
+      if (!v || eq <= 0) return { ok: false, message: `--var must be KEY=VALUE (got '${v ?? ''}')` };
+      vars[v.slice(0, eq)] = v.slice(eq + 1);
+    } else {
+      return { ok: false, message: `unexpected argument: ${a}` };
+    }
+  }
+  return { ok: true, port, host, vars };
+}
+
+/**
+ * `yolo deploy dev` — serve the project locally on workerd (miniflare) so the
+ * runtime-contract gotchas surface before a ship. Delegates to
+ * `deploy-dev.ts` (which lazy-imports miniflare). Runs until Ctrl-C.
+ */
+async function runDevCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Promise<number> {
+  const parsed = parseDevArgs(args);
+  if (!parsed.ok) {
+    io.err(`yolo deploy dev: ${parsed.message}\nUsage: yolo deploy dev [--port <n>] [--host <h>] [--var KEY=VALUE ...]\n`);
+    return 64;
+  }
+  const devOpts: DevServerOptions = {
+    cwd: deps.cwd,
+    io,
+    vars: parsed.vars,
+    ...(parsed.port !== undefined ? { port: parsed.port } : {}),
+    ...(parsed.host !== undefined ? { host: parsed.host } : {}),
+    ...(deps.devDeps ?? {}),
+  };
+  return runDeployDev(devOpts);
 }
 
 // ─── status ───────────────────────────────────────────────────────────────

@@ -460,7 +460,7 @@ function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function defaultRunBuild(command: string, cwd: string, onOutput: (chunk: string) => void): Promise<{ code: number }> {
+export function defaultRunBuild(command: string, cwd: string, onOutput: (chunk: string) => void): Promise<{ code: number }> {
   return new Promise((resolve) => {
     const child = spawn(command, { cwd, shell: true, stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
     child.stdout?.on('data', (data) => onOutput(String(data)));

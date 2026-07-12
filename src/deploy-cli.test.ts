@@ -12,6 +12,7 @@ import {
   runDeployCmd,
   parseSinceMinutes,
   parseDbQueryArgs,
+  parseDevArgs,
   parseRenameArgs,
   parseAliasArgs,
   parseRedirectArgs,
@@ -328,6 +329,75 @@ describe('deploy-cli — validate', () => {
     const parsed = JSON.parse(io.stdout.join('').trim());
     assert.equal(parsed.ok, false);
     assert.ok(parsed.issues.some((i: { path?: string }) => i.path === 'worker.entry'));
+  });
+});
+
+// ─── dev arg parsing + dispatch ──────────────────────────────────────────────
+
+describe('deploy-cli — dev arg parsing', () => {
+  it('parses --port, --host, and repeatable --var KEY=VALUE', () => {
+    const p = parseDevArgs(['--port', '3000', '--host', '0.0.0.0', '--var', 'A=1', '--var', 'B=two=2']);
+    assert.ok(p.ok);
+    if (p.ok) {
+      assert.equal(p.port, 3000);
+      assert.equal(p.host, '0.0.0.0');
+      assert.deepEqual(p.vars, { A: '1', B: 'two=2' }); // only the FIRST '=' splits
+    }
+  });
+
+  it('accepts --port=/--var= forms and defaults host/port to undefined', () => {
+    const p = parseDevArgs(['--port=0', '--var=X=y']);
+    assert.ok(p.ok);
+    if (p.ok) {
+      assert.equal(p.port, 0);
+      assert.deepEqual(p.vars, { X: 'y' });
+      assert.equal(p.host, undefined);
+    }
+  });
+
+  it('rejects a non-numeric / out-of-range port', () => {
+    assert.equal(parseDevArgs(['--port', 'abc']).ok, false);
+    assert.equal(parseDevArgs(['--port', '70000']).ok, false);
+  });
+
+  it('rejects a --var without =', () => {
+    assert.equal(parseDevArgs(['--var', 'NOPE']).ok, false);
+  });
+
+  it('rejects an unexpected positional', () => {
+    assert.equal(parseDevArgs(['serve']).ok, false);
+  });
+});
+
+describe('deploy-cli — dev dispatch', () => {
+  it('rejects bad dev flags with exit 64', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(['dev', '--port', 'nope'], baseDeps(io));
+    assert.equal(code, 64);
+    assert.match(io.stderr.join(''), /--port must be an integer/);
+  });
+
+  it('runs the dev server via seamed deps and exits 0', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['dev', '--var', 'FOO=bar'],
+      baseDeps(io, {
+        devDeps: {
+          readDeployConfigImpl: () => ({ ok: true, config: { $version: 1, projectId: 'hp_1', type: 'worker', worker: { entry: 'src/index.ts' } }, path: '/proj/.yolo/deploy.json', warnings: [] }),
+          detectProjectShapeImpl: () => ({ ok: true, shape: { type: 'worker', entry: 'src/index.ts' }, source: 'deploy-json' }),
+          bundleProjectImpl: async () => ({
+            ok: true, type: 'worker', manifest: {}, assetPaths: {}, assets: [],
+            module: { name: 'index.js', contents: new TextEncoder().encode('export default {};') },
+            workerModules: [{ name: 'index.js', contents: new TextEncoder().encode('export default {};') }],
+            moduleSource: 'esbuild', fileCount: 0, totalAssetBytes: 0, bundleDigest: 'sha256:x', warnings: [],
+          }),
+          startImpl: async () => ({ url: 'http://127.0.0.1:8787/', dispose: async () => {} }),
+          waitForStopImpl: async () => {},
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.match(io.stdout.join(''), /serving worker on http:\/\/127\.0\.0\.1:8787\//);
   });
 });
 
