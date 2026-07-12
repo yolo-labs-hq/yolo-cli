@@ -302,6 +302,248 @@ describe('deploy-bundle — worker modules', () => {
     }
   });
 
+  it('pins process.env.NODE_ENV to "production" via esbuild define', async () => {
+    const tmp = makeTmpDir();
+    // A branch that only survives when NODE_ENV is replaced at build time.
+    writeTree(tmp, {
+      'src/index.ts': [
+        'const mode = process.env.NODE_ENV === "production" ? "prod-marker" : "dev-marker";',
+        'export default { fetch(): Response { return new Response(mode); } };',
+      ].join('\n'),
+    });
+    const shape: ProjectShape = { type: 'worker', entry: 'src/index.ts' };
+    const res = await bundleProject(shape, tmp);
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      const text = Buffer.from(res.module!.contents).toString('utf8');
+      assert.ok(text.includes('prod-marker'), 'production branch retained');
+      assert.ok(!text.includes('dev-marker'), 'dev branch dead-code-eliminated');
+    }
+  });
+
+  it('leaves node: builtins external and warns when nodejs_compat is absent', async () => {
+    const tmp = makeTmpDir();
+    writeTree(tmp, {
+      'src/index.ts': [
+        'import { AsyncLocalStorage } from "node:async_hooks";',
+        'export default { fetch(): Response { return new Response(String(!!AsyncLocalStorage)); } };',
+      ].join('\n'),
+    });
+    const shape: ProjectShape = { type: 'worker', entry: 'src/index.ts' };
+    const res = await bundleProject(shape, tmp);
+    assert.equal(res.ok, true, 'node: import no longer hard-fails the bundle');
+    if (res.ok) {
+      const text = Buffer.from(res.module!.contents).toString('utf8');
+      assert.ok(text.includes('node:async_hooks'), 'node: import kept external, not inlined');
+      assert.ok(
+        res.warnings.some((w) => w.includes('nodejs_compat') && w.includes('node:async_hooks')),
+        'warns about the missing nodejs_compat flag',
+      );
+    }
+  });
+
+  it('still fails the build on an unknown/misspelled node: specifier', async () => {
+    const tmp = makeTmpDir();
+    writeTree(tmp, {
+      // node:async_hook (missing the trailing "s") is not a real builtin —
+      // externalizing it blindly would defer the failure to runtime.
+      'src/index.ts': [
+        'import { AsyncLocalStorage } from "node:async_hook";',
+        'export default { fetch(): Response { return new Response(String(!!AsyncLocalStorage)); } };',
+      ].join('\n'),
+    });
+    const shape: ProjectShape = { type: 'worker', entry: 'src/index.ts' };
+    const res = await bundleProject(shape, tmp);
+    assert.equal(res.ok, false, 'unknown node: builtin is rejected, not silently externalized');
+    if (!res.ok) assert.equal(res.kind, 'build-failed');
+  });
+
+  it('externalizes a workerd-provided subpath builtin (node:stream/promises)', async () => {
+    const tmp = makeTmpDir();
+    writeTree(tmp, {
+      'src/index.ts': [
+        'import { pipeline } from "node:stream/promises";',
+        'export default { fetch(): Response { return new Response(typeof pipeline); } };',
+      ].join('\n'),
+    });
+    const shape: ProjectShape = { type: 'worker', entry: 'src/index.ts' };
+    const res = await bundleProject(shape, tmp, undefined, { compatibilityFlags: ['nodejs_compat'] });
+    assert.equal(res.ok, true, 'subpath of an allowlisted base is externalized');
+    if (res.ok) {
+      const text = Buffer.from(res.module!.contents).toString('utf8');
+      assert.ok(text.includes('node:stream/promises'), 'kept external');
+    }
+  });
+
+  it('rejects a bogus subpath (node:path/typo) — not a real builtin', async () => {
+    const tmp = makeTmpDir();
+    writeTree(tmp, {
+      // node:path/typo is not a real builtin, so it is not externalized and
+      // esbuild's resolver fails it — a typo stays a build error, not runtime.
+      'src/index.ts': [
+        'import x from "node:path/typo";',
+        'export default { fetch(): Response { return new Response(typeof x); } };',
+      ].join('\n'),
+    });
+    const shape: ProjectShape = { type: 'worker', entry: 'src/index.ts' };
+    const res = await bundleProject(shape, tmp, undefined, { compatibilityFlags: ['nodejs_compat'] });
+    assert.equal(res.ok, false, 'a non-builtin subpath is not externalized');
+    if (!res.ok) assert.equal(res.kind, 'build-failed');
+  });
+
+  it('externalizes every real builtin (node:fs, node:tls) — bundler is not the workerd oracle', async () => {
+    const tmp = makeTmpDir();
+    writeTree(tmp, {
+      'src/index.ts': [
+        'import { readFileSync } from "node:fs";',
+        'import { connect } from "node:tls";',
+        'export default { fetch(): Response { return new Response(typeof readFileSync + typeof connect); } };',
+      ].join('\n'),
+    });
+    const shape: ProjectShape = { type: 'worker', entry: 'src/index.ts' };
+    const res = await bundleProject(shape, tmp, undefined, { compatibilityFlags: ['nodejs_compat'] });
+    assert.equal(res.ok, true, 'real builtins are externalized, never false-rejected at build');
+    if (res.ok) {
+      const text = Buffer.from(res.module!.contents).toString('utf8');
+      assert.ok(text.includes('node:fs') && text.includes('node:tls'), 'both kept external');
+    }
+  });
+
+  it('rejects a require() of a node: builtin (would emit __require in ESM)', async () => {
+    const tmp = makeTmpDir();
+    writeTree(tmp, {
+      'src/index.ts': [
+        'const fs = require("node:fs");',
+        'export default { fetch(): Response { return new Response(typeof fs); } };',
+      ].join('\n'),
+    });
+    const shape: ProjectShape = { type: 'worker', entry: 'src/index.ts' };
+    const res = await bundleProject(shape, tmp, undefined, { compatibilityFlags: ['nodejs_compat'] });
+    assert.equal(res.ok, false, 'require() of a node: builtin fails the build');
+    if (!res.ok) {
+      assert.equal(res.kind, 'build-failed');
+      assert.match(res.message, /require\(/);
+    }
+  });
+
+  it('warns about a DYNAMIC import("node:…") in a prebuilt worker', async () => {
+    const tmp = makeTmpDir();
+    const prebuilt = 'export default{async fetch(){const{AsyncLocalStorage}=await import("node:async_hooks");return new Response(String(!!AsyncLocalStorage))}};\n';
+    writeTree(tmp, { '.vinext/worker.mjs': prebuilt });
+    const shape: ProjectShape = { type: 'worker', entry: '.vinext/worker.mjs', prebuilt: true };
+    const res = await bundleProject(shape, tmp);
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      assert.ok(
+        res.warnings.some((w) => w.includes('nodejs_compat') && w.includes('node:async_hooks')),
+        'dynamic import() is detected on the prebuilt path',
+      );
+    }
+  });
+
+  it('detects a renamed require helper (__require("node:…")) in a prebuilt bundle', async () => {
+    const tmp = makeTmpDir();
+    // esbuild emits `__require(...)` for CJS builtins — the scanner must not key
+    // on the literal `require` token.
+    const prebuilt = 'var __require=(x)=>x;var fs=__require("node:fs");export default{fetch(){return new Response(typeof fs)}};\n';
+    writeTree(tmp, { '.vinext/worker.mjs': prebuilt });
+    const shape: ProjectShape = { type: 'worker', entry: '.vinext/worker.mjs', prebuilt: true };
+    const res = await bundleProject(shape, tmp);
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      assert.ok(
+        res.warnings.some((w) => w.includes('nodejs_compat') && w.includes('node:fs')),
+        'helper-call form is detected',
+      );
+    }
+  });
+
+  it('warns about retained node: imports in a PREBUILT worker (esbuild skipped)', async () => {
+    const tmp = makeTmpDir();
+    const prebuilt = 'import{AsyncLocalStorage}from"node:async_hooks";export default{fetch(){return new Response(String(!!AsyncLocalStorage))}};\n';
+    writeTree(tmp, { '.vinext/worker.mjs': prebuilt });
+    const shape: ProjectShape = { type: 'worker', entry: '.vinext/worker.mjs', prebuilt: true };
+    const noFlag = await bundleProject(shape, tmp);
+    assert.equal(noFlag.ok, true);
+    if (noFlag.ok) {
+      assert.equal(noFlag.moduleSource, 'prebuilt');
+      assert.ok(
+        noFlag.warnings.some((w) => w.includes('nodejs_compat') && w.includes('node:async_hooks')),
+        'prebuilt path warns too',
+      );
+    }
+    const withFlag = await bundleProject(shape, tmp, undefined, { compatibilityFlags: ['nodejs_compat'] });
+    assert.equal(withFlag.ok, true);
+    if (withFlag.ok) assert.ok(!withFlag.warnings.some((w) => w.includes('nodejs_compat')));
+  });
+
+  it('warns when a PREBUILT worker retains an unpinned process.env.NODE_ENV', async () => {
+    const tmp = makeTmpDir();
+    // A pinned build would have replaced this literal; its survival = unpinned.
+    const prebuilt = 'const dev=process.env.NODE_ENV!=="production";export default{fetch(){return new Response(String(dev))}};\n';
+    writeTree(tmp, { '.vinext/worker.mjs': prebuilt });
+    const shape: ProjectShape = { type: 'worker', entry: '.vinext/worker.mjs', prebuilt: true };
+    const res = await bundleProject(shape, tmp);
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      assert.equal(res.moduleSource, 'prebuilt');
+      assert.ok(
+        res.warnings.some((w) => w.includes('process.env.NODE_ENV') && w.includes('dev build')),
+        'unpinned NODE_ENV in a prebuilt bundle is flagged',
+      );
+    }
+  });
+
+  it('nodejs_als alone satisfies a node:async_hooks import (no warning)', async () => {
+    const tmp = makeTmpDir();
+    writeTree(tmp, {
+      'src/index.ts': [
+        'import { AsyncLocalStorage } from "node:async_hooks";',
+        'export default { fetch(): Response { return new Response(String(!!AsyncLocalStorage)); } };',
+      ].join('\n'),
+    });
+    const shape: ProjectShape = { type: 'worker', entry: 'src/index.ts' };
+    const res = await bundleProject(shape, tmp, undefined, { compatibilityFlags: ['nodejs_als'] });
+    assert.equal(res.ok, true);
+    if (res.ok) assert.ok(!res.warnings.some((w) => w.includes('nodejs_compat')), 'als covers async_hooks');
+  });
+
+  it('nodejs_als does NOT satisfy a non-async_hooks builtin (still warns for it)', async () => {
+    const tmp = makeTmpDir();
+    writeTree(tmp, {
+      'src/index.ts': [
+        'import { AsyncLocalStorage } from "node:async_hooks";',
+        'import { randomUUID } from "node:crypto";',
+        'export default { fetch(): Response { return new Response(randomUUID() + !!AsyncLocalStorage); } };',
+      ].join('\n'),
+    });
+    const shape: ProjectShape = { type: 'worker', entry: 'src/index.ts' };
+    const res = await bundleProject(shape, tmp, undefined, { compatibilityFlags: ['nodejs_als'] });
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      assert.ok(
+        res.warnings.some((w) => w.includes('node:crypto') && !w.includes('node:async_hooks')),
+        'warns for crypto only — async_hooks is covered by als',
+      );
+    }
+  });
+
+  it('suppresses the node: warning when nodejs_compat is set', async () => {
+    const tmp = makeTmpDir();
+    writeTree(tmp, {
+      'src/index.ts': [
+        'import { AsyncLocalStorage } from "node:async_hooks";',
+        'export default { fetch(): Response { return new Response(String(!!AsyncLocalStorage)); } };',
+      ].join('\n'),
+    });
+    const shape: ProjectShape = { type: 'worker', entry: 'src/index.ts' };
+    const res = await bundleProject(shape, tmp, undefined, { compatibilityFlags: ['nodejs_compat'] });
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      assert.ok(!res.warnings.some((w) => w.includes('nodejs_compat')), 'no warning when the flag is present');
+    }
+  });
+
   it('a broken entry fails build-failed (esbuild error surfaced, not thrown)', async () => {
     const tmp = makeTmpDir();
     // The import must be USED — esbuild elides unused TS imports before

@@ -8,11 +8,20 @@
  *   - **Worker module** — esbuild ESM bundle of the entry
  *     (`{bundle, format:'esm', platform:'browser',
  *     conditions:['workerd','worker'], target:'es2022', write:false,
- *     minify:true}`). If the entry already points at a BUILT `.js`/`.mjs`
- *     module (vinext/OpenNext output, skill-directed), esbuild is
- *     SKIPPED and the module ships byte-for-byte as-is — the size
- *     ceilings still apply. esbuild is lazy-imported so `yolo plan`
- *     startup never pays for it (the `serve.ts` lazy-load precedent).
+ *     minify:true, define:{'process.env.NODE_ENV':'"production"'}}` +
+ *     `nodeBuiltinExternalPlugin`). `NODE_ENV` is pinned to `production` so
+ *     libraries that branch on it (React et al.) never ship their dev build on
+ *     workerd (which has no runtime `process.env`). The plugin leaves every real
+ *     `node:` builtin external (nodejs_compat serves the supported ones) and
+ *     WARNS when that flag is absent, while forcing the two always-broken cases
+ *     (a `require()`-kind resolve, a misspelled non-builtin) to a build error
+ *     rather than a silent runtime failure. If the entry already points at a
+ *     BUILT `.js`/`.mjs` module (vinext/OpenNext output, skill-directed),
+ *     esbuild is SKIPPED and the module ships byte-for-byte as-is — the size
+ *     ceilings still apply and the shipped text is scanned to WARN on retained
+ *     `node:` imports and an unpinned `process.env.NODE_ENV`. esbuild is
+ *     lazy-imported so `yolo plan` startup never pays for it (the `serve.ts`
+ *     lazy-load precedent).
  *   - **Asset manifest** — walk `assetsDir` (skip dotfiles +
  *     node_modules), URL-style path → `{hash: sha256hex, size}`.
  *     Pure-static ships NO module; common-api attaches the canonical
@@ -33,11 +42,12 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { isBuiltin } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
 
-import type { Plugin } from 'esbuild';
+import type { Metafile, Plugin } from 'esbuild';
 
 import type { ProjectShape } from './deploy-detect.js';
 
@@ -98,6 +108,88 @@ function vendoredFlexdbPlugin(): Plugin | null {
       }));
     },
   };
+}
+
+// ─── node: builtin externalization ──────────────────────────────────────────
+//
+// A `node:` builtin can't be bundled — esbuild's browser resolver would hard-
+// fail it. We leave every REAL builtin external (workerd's nodejs_compat serves
+// the ones it supports at the pinned compatibility date) and force only the two
+// genuinely-broken cases to a BUILD error:
+//   - a require()-kind resolve → esbuild emits __require(...), which throws in
+//     an ESM Worker (no CJS require) regardless of workerd support
+//   - a non-builtin specifier (node:async_hook typo) → esbuild "Could not resolve"
+//
+// Deliberately NOT a workerd compatibility oracle: which builtins a given
+// compatibility-date + flag set actually serves (tls, node:fs behind
+// enable_nodejs_fs_module, modules dropped by no_* flags, …) is a moving matrix
+// that belongs to the runtime, not the bundler. Modeling it here only produces
+// false build rejections of valid Workers. Instead we externalize broadly and
+// WARN when nodejs_compat is absent (warnMissingNodejsCompat); the post-ship
+// boot probe / runtime is the authority on whether a module is really served.
+
+/**
+ * esbuild plugin that leaves every real `node:` builtin external while turning
+ * the two always-broken cases (require()-kind, non-builtin typo) into build
+ * errors instead of a silent runtime resolve failure.
+ */
+function nodeBuiltinExternalPlugin(): Plugin {
+  return {
+    name: 'yolo-node-builtin-external',
+    setup(build) {
+      build.onResolve({ filter: /^node:/ }, (args) => {
+        if (args.kind === 'require-call') {
+          return {
+            errors: [
+              {
+                text:
+                  `require(${JSON.stringify(args.path)}) is not supported in a Worker — use an ESM ` +
+                  `\`import\` instead. A CommonJS require() of a node: builtin compiles to __require(...), ` +
+                  `which throws at runtime because an ESM Worker has no require().`,
+              },
+            ],
+          };
+        }
+        if (isBuiltin(args.path)) return { path: args.path, external: true };
+        return null; // not a builtin at all → esbuild reports "Could not resolve"
+      });
+    },
+  };
+}
+
+/**
+ * The distinct `node:<builtin>` specifiers referenced by already-bundled text
+ * (prebuilt worker path, which never touches esbuild). A `node:` literal in
+ * call position — `require(…)`, esbuild's `__require(…)`, dynamic `import(…)` —
+ * or after `from`/bare `import` counts. Matching any call `(` (rather than a
+ * specific helper name) is deliberate: bundlers rename the require helper.
+ * Deduped, sorted.
+ */
+function collectNodeBuiltinsFromText(text: string): string[] {
+  const found = new Set<string>();
+  const re = /(?:\bfrom\s*|\bimport\s*|\(\s*)['"](node:[a-zA-Z0-9_/.-]+)['"]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) found.add(m[1]!);
+  return [...found].sort();
+}
+
+/**
+ * Push the "missing nodejs_compat" warning when a Worker references a `node:`
+ * builtin whose runtime support isn't enabled. Shared by the esbuild and
+ * prebuilt paths so `BundleOptions`' promise holds for both. `nodejs_als`
+ * satisfies `node:async_hooks` alone (workerd provides AsyncLocalStorage under
+ * that narrower flag), so those imports don't count as unsatisfied.
+ */
+function warnMissingNodejsCompat(nodeBuiltins: string[], compatibilityFlags: string[], warnings: string[]): void {
+  if (nodeBuiltins.length === 0 || compatibilityFlags.includes('nodejs_compat')) return;
+  const alsSatisfied = compatibilityFlags.includes('nodejs_als');
+  const unsatisfied = nodeBuiltins.filter((b) => !(alsSatisfied && b === 'node:async_hooks'));
+  if (unsatisfied.length === 0) return;
+  warnings.push(
+    `worker imports node: builtins (${unsatisfied.join(', ')}) but compatibilityFlags does not ` +
+      `include "nodejs_compat" — they resolve to nothing at runtime on workerd. Add "nodejs_compat" ` +
+      `to .yolo/deploy.json compatibilityFlags.`,
+  );
 }
 
 // ─── Public types ─────────────────────────────────────────────────────────
@@ -174,19 +266,37 @@ export type BundleResult = BundleSuccess | BundleFailure;
 
 // ─── Public entry ─────────────────────────────────────────────────────────
 
+export interface BundleOptions {
+  /**
+   * `.yolo/deploy.json` `compatibilityFlags` — used only to decide whether a
+   * worker's `node:` imports should warn. When `nodejs_compat` is present the
+   * runtime provides those builtins, so the warning is suppressed.
+   */
+  compatibilityFlags?: string[];
+}
+
 export async function bundleProject(
   shape: ProjectShape,
   cwd: string,
   ceilings: BundleCeilings = {},
+  options: BundleOptions = {},
 ): Promise<BundleResult> {
   const caps = { ...DEPLOY_CEILINGS, ...definedOnly(ceilings) };
   const warnings: string[] = [];
+  const compatibilityFlags = options.compatibilityFlags ?? [];
 
   // ── Worker module (esbuild, or as-is for pre-built entries) ────────────
   let module: BundleSuccess['module'] = null;
   let moduleSource: BundleSuccess['moduleSource'] = null;
   if (shape.type === 'worker') {
-    const built = await buildWorkerModule(shape.entry, cwd, shape.prebuilt === true, caps, warnings);
+    const built = await buildWorkerModule(
+      shape.entry,
+      cwd,
+      shape.prebuilt === true,
+      caps,
+      warnings,
+      compatibilityFlags,
+    );
     if (!built.ok) return built;
     module = built.module;
     moduleSource = built.source;
@@ -309,6 +419,23 @@ export function computeBundleDigest(
 
 // ─── Internals ────────────────────────────────────────────────────────────
 
+/**
+ * The distinct `node:` builtin specifiers esbuild left external for this
+ * bundle (deduped, sorted). Empty when the Worker imports none. Used to warn
+ * when `nodejs_compat` is absent — the runtime, not the bundler, is where a
+ * missing flag bites.
+ */
+function collectExternalNodeBuiltins(metafile: Metafile | undefined): string[] {
+  if (!metafile) return [];
+  const found = new Set<string>();
+  for (const input of Object.values(metafile.inputs)) {
+    for (const imp of input.imports) {
+      if (imp.external && imp.path.startsWith('node:')) found.add(imp.path);
+    }
+  }
+  return [...found].sort();
+}
+
 type BuildModuleResult =
   | { ok: true; module: { name: string; contents: Uint8Array }; source: 'esbuild' | 'prebuilt' }
   | BundleFailure;
@@ -319,6 +446,7 @@ async function buildWorkerModule(
   prebuilt: boolean,
   caps: Required<BundleCeilings>,
   warnings: string[],
+  compatibilityFlags: string[],
 ): Promise<BuildModuleResult> {
   const entryAbs = path.resolve(cwd, entry);
   let contents: Uint8Array;
@@ -341,6 +469,21 @@ async function buildWorkerModule(
     }
     name = path.basename(entryAbs);
     source = 'prebuilt';
+    // esbuild never runs for prebuilt output (vinext/OpenNext), so its define +
+    // node: externalization can't apply — scan the shipped text directly and
+    // WARN instead. Mutating an opaque framework bundle would break the
+    // ship-as-is contract; the fix belongs in the framework build.
+    const prebuiltText = Buffer.from(contents).toString('utf8');
+    warnMissingNodejsCompat(collectNodeBuiltinsFromText(prebuiltText), compatibilityFlags, warnings);
+    if (prebuiltText.includes('process.env.NODE_ENV')) {
+      // A pinned build would have replaced this literal with "production"; its
+      // survival means NODE_ENV is unpinned → risks shipping a dev build.
+      warnings.push(
+        `prebuilt worker references process.env.NODE_ENV — workerd has no runtime process.env, so an ` +
+          `unpinned NODE_ENV can ship a dev build (e.g. development React). Pin it in your framework ` +
+          `build (esbuild define 'process.env.NODE_ENV'='"production"').`,
+      );
+    }
   } else {
     // Lazy-load so non-deploy verbs never pay esbuild's startup cost.
     const esbuild = await import('esbuild');
@@ -358,9 +501,17 @@ async function buildWorkerModule(
         target: 'es2022',
         write: false,
         minify: true,
+        metafile: true,
+        // Pin production so libraries that gate on process.env.NODE_ENV (React
+        // et al.) never emit their dev build — workerd has no runtime
+        // process.env, so an unpinned NODE_ENV silently ships dev code.
+        define: { 'process.env.NODE_ENV': '"production"' },
         absWorkingDir: path.resolve(cwd),
         logLevel: 'silent',
-        plugins: flexdbPlugin ? [flexdbPlugin] : [],
+        // nodeBuiltinExternalPlugin leaves real node: builtins external
+        // (nodejs_compat serves them) but fails the build on a require()-kind
+        // resolve or a misspelling. Ordered first so it wins over default resolve.
+        plugins: [nodeBuiltinExternalPlugin(), ...(flexdbPlugin ? [flexdbPlugin] : [])],
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -374,6 +525,9 @@ async function buildWorkerModule(
     if (out === undefined) {
       return { ok: false, kind: 'build-failed', message: `esbuild produced no output for ${entry}` };
     }
+    // node: builtins were left external above; if the Worker actually imports
+    // any and nodejs_compat isn't enabled, they resolve to nothing at runtime.
+    warnMissingNodejsCompat(collectExternalNodeBuiltins(result.metafile), compatibilityFlags, warnings);
     contents = out.contents;
     name = 'index.js';
     source = 'esbuild';

@@ -184,7 +184,9 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
   }
 
   // 4. Bundle — all size/count ceilings fire locally in here, pre-network.
-  const bundled = await bundle(shape, cwd);
+  const bundled = await bundle(shape, cwd, undefined, {
+    compatibilityFlags: config.compatibilityFlags,
+  });
   if (!bundled.ok) {
     return { ok: false, kind: bundled.kind, message: bundled.message, hint: bundled.hint, detail: bundled.detail };
   }
