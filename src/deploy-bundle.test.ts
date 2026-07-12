@@ -494,9 +494,12 @@ describe('deploy-bundle — worker modules', () => {
     }
   });
 
-  it('nodejs_als alone satisfies a node:async_hooks import (no warning)', async () => {
+  it('warns even under nodejs_als — only nodejs_compat is server-accepted', async () => {
     const tmp = makeTmpDir();
     writeTree(tmp, {
+      // nodejs_als is a real workerd flag, but the hosting service rejects it at
+      // ship (ALLOWED_COMPATIBILITY_FLAGS = nodejs_compat only), so the warning
+      // must still steer users to nodejs_compat rather than pass here and fail there.
       'src/index.ts': [
         'import { AsyncLocalStorage } from "node:async_hooks";',
         'export default { fetch(): Response { return new Response(String(!!AsyncLocalStorage)); } };',
@@ -505,25 +508,10 @@ describe('deploy-bundle — worker modules', () => {
     const shape: ProjectShape = { type: 'worker', entry: 'src/index.ts' };
     const res = await bundleProject(shape, tmp, undefined, { compatibilityFlags: ['nodejs_als'] });
     assert.equal(res.ok, true);
-    if (res.ok) assert.ok(!res.warnings.some((w) => w.includes('nodejs_compat')), 'als covers async_hooks');
-  });
-
-  it('nodejs_als does NOT satisfy a non-async_hooks builtin (still warns for it)', async () => {
-    const tmp = makeTmpDir();
-    writeTree(tmp, {
-      'src/index.ts': [
-        'import { AsyncLocalStorage } from "node:async_hooks";',
-        'import { randomUUID } from "node:crypto";',
-        'export default { fetch(): Response { return new Response(randomUUID() + !!AsyncLocalStorage); } };',
-      ].join('\n'),
-    });
-    const shape: ProjectShape = { type: 'worker', entry: 'src/index.ts' };
-    const res = await bundleProject(shape, tmp, undefined, { compatibilityFlags: ['nodejs_als'] });
-    assert.equal(res.ok, true);
     if (res.ok) {
       assert.ok(
-        res.warnings.some((w) => w.includes('node:crypto') && !w.includes('node:async_hooks')),
-        'warns for crypto only — async_hooks is covered by als',
+        res.warnings.some((w) => w.includes('nodejs_compat') && w.includes('node:async_hooks')),
+        'nodejs_als does not suppress the nodejs_compat warning',
       );
     }
   });

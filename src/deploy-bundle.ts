@@ -175,18 +175,19 @@ function collectNodeBuiltinsFromText(text: string): string[] {
 
 /**
  * Push the "missing nodejs_compat" warning when a Worker references a `node:`
- * builtin whose runtime support isn't enabled. Shared by the esbuild and
- * prebuilt paths so `BundleOptions`' promise holds for both. `nodejs_als`
- * satisfies `node:async_hooks` alone (workerd provides AsyncLocalStorage under
- * that narrower flag), so those imports don't count as unsatisfied.
+ * builtin but that flag isn't set. Shared by the esbuild and prebuilt paths so
+ * `BundleOptions`' promise holds for both.
+ *
+ * Keyed strictly on `nodejs_compat` — the ONLY compatibility flag the hosting
+ * service accepts at ship (`ship-session.ts` ALLOWED_COMPATIBILITY_FLAGS). We
+ * deliberately do NOT recognize narrower flags (`nodejs_als`) or per-module
+ * enable flags here: suppressing the warning for a flag the server rejects
+ * would pass local bundling only to fail at ship with `bundle-invalid`.
  */
 function warnMissingNodejsCompat(nodeBuiltins: string[], compatibilityFlags: string[], warnings: string[]): void {
   if (nodeBuiltins.length === 0 || compatibilityFlags.includes('nodejs_compat')) return;
-  const alsSatisfied = compatibilityFlags.includes('nodejs_als');
-  const unsatisfied = nodeBuiltins.filter((b) => !(alsSatisfied && b === 'node:async_hooks'));
-  if (unsatisfied.length === 0) return;
   warnings.push(
-    `worker imports node: builtins (${unsatisfied.join(', ')}) but compatibilityFlags does not ` +
+    `worker imports node: builtins (${nodeBuiltins.join(', ')}) but compatibilityFlags does not ` +
       `include "nodejs_compat" — they resolve to nothing at runtime on workerd. Add "nodejs_compat" ` +
       `to .yolo/deploy.json compatibilityFlags.`,
   );
