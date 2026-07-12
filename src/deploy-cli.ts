@@ -70,6 +70,7 @@ import {
 } from './deploy-client.js';
 import { readDeployConfig, writeDeployConfig, type DeployConfig } from './deploy-config.js';
 import { adaptWrangler, detectProjectShape, type ProjectShape } from './deploy-detect.js';
+import { collectNodeBuiltinsFromText } from './deploy-bundle.js';
 import { defaultReadFile, type ReadFileImpl } from './auth-context.js';
 
 // ─── Injectable surface ───────────────────────────────────────────────────
@@ -115,6 +116,7 @@ const USAGE = [
   '       yolo deploy init [--slug <slug>] [--type <static|worker>]',
   '       yolo deploy link (--project-id <id> | --slug <slug>) [--type <static|worker>]',
   '       yolo deploy validate [--json]',
+  '       yolo deploy doctor [--json]',
   '       yolo deploy status [--json]',
   '       yolo deploy logs [--tail] [--since <dur>] [--json]',
   '       yolo deploy rollback [releaseId] [--json]',
@@ -143,6 +145,7 @@ export async function runDeployCmd(args: string[], deps: DeployCliDeps = {}): Pr
   if (sub === 'init') return runInitCmd(args.slice(1), deps, io);
   if (sub === 'link') return runLinkCmd(args.slice(1), deps, io);
   if (sub === 'validate') return runValidateCmd(args.slice(1), deps, io);
+  if (sub === 'doctor') return runDoctorCmd(args.slice(1), deps, io);
   if (sub === 'status') return runStatusCmd(args.slice(1), deps, io);
   if (sub === 'logs') return runLogsCmd(args.slice(1), deps, io);
   if (sub === 'rollback') return runRollbackCmd(args.slice(1), deps, io);
@@ -710,6 +713,164 @@ async function runValidateCmd(args: string[], deps: DeployCliDeps, io: DeployIo)
   }
   for (const n of notes) io.out(`  note: ${n}\n`);
   return 0;
+}
+
+// ─── doctor ─────────────────────────────────────────────────────────────────
+
+/** One doctor check outcome. `ok:false` is an advisory ⚠ (not a hard failure). */
+interface DoctorCheck {
+  ok: boolean;
+  title: string;
+  detail?: string;
+}
+
+/**
+ * `yolo deploy doctor [--json]` — a fast OFFLINE lint of the worker entry
+ * against the workerd runtime contract (see the Runtime Contract doc). Catches
+ * the field-report gotchas before a ship: `process.env` reads (workerd has no
+ * runtime process.env), `node:` imports without `nodejs_compat`, `require()` of
+ * a builtin, and an unpinned `NODE_ENV` in a prebuilt bundle.
+ *
+ * It scans only the ENTRY file (no bundling, no dep walk) — advisory, so
+ * warnings do NOT fail the command; only a broken config / missing source entry
+ * exits non-zero. Run `yolo deploy --dry-run` for a full bundle-level check.
+ */
+async function runDoctorCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Promise<number> {
+  const jsonOutput = args.includes('--json');
+  const unexpected = args.filter((a) => a !== '--json');
+  if (unexpected.length > 0) {
+    io.err(`yolo deploy doctor: unexpected argument(s): ${unexpected.join(' ')}\nUsage: yolo deploy doctor [--json]\n`);
+    return 64;
+  }
+  const cwd = deps.cwd ?? process.cwd();
+  const readFile = deps.readFileImpl ?? defaultReadFile;
+  const statPath = deps.statPathImpl ?? defaultStatPath;
+  const readConfig = deps.readDeployConfigImpl ?? readDeployConfig;
+
+  // Resolve config + shape (a broken config is a hard error, like validate).
+  const readResult = readConfig(cwd, deps.readFileImpl);
+  if (!readResult.ok) {
+    const msg = readResult.errors?.map((e) => `${e.path ? `${e.path}: ` : ''}${e.message}`).join('; ') ?? readResult.message;
+    if (jsonOutput) io.out(`${JSON.stringify({ ok: false, error: msg })}\n`);
+    else io.err(`FAIL: ${msg}\n  hint: run 'yolo deploy validate' for full config diagnostics\n`);
+    return 1;
+  }
+  const config = readResult.config;
+  const det = detectProjectShape({ cwd, config: config ?? null, readFileImpl: deps.readFileImpl });
+  if (!det.ok) {
+    if (jsonOutput) io.out(`${JSON.stringify({ ok: false, error: det.message })}\n`);
+    else io.err(`FAIL: ${det.message}\n`);
+    return 1;
+  }
+  const shape = det.shape;
+  const hasNodejsCompat = (config?.compatibilityFlags ?? []).includes('nodejs_compat');
+
+  const checks: DoctorCheck[] = [];
+  let hardError = false;
+
+  if (shape.type === 'static') {
+    checks.push({ ok: true, title: 'static site — the workerd runtime contract applies to Workers only' });
+  } else {
+    // Read the entry text (source or prebuilt). A missing SOURCE entry is a hard
+    // error; a missing build OUTPUT is a can't-scan note (build hasn't run yet).
+    const entryAbs = path.resolve(cwd, shape.entry);
+    const kind = statPath(entryAbs);
+    if (kind === 'missing') {
+      // Only a PREBUILT entry is a build OUTPUT that may not exist yet; a SOURCE
+      // entry (src/index.ts) is committed input esbuild bundles in place — the
+      // build doesn't create it — so a missing source entry is a typo, a hard
+      // error, even when a build command is configured (matches `validate`).
+      if (shape.prebuilt === true) {
+        checks.push({ ok: true, title: `entry '${shape.entry}' not built yet — run your build, then re-run doctor` });
+      } else {
+        checks.push({ ok: false, title: `entry '${shape.entry}' does not exist`, detail: 'fix worker.entry in .yolo/deploy.json or create the file' });
+        hardError = true;
+      }
+    } else {
+      const text = readFile(entryAbs);
+      if (text === undefined) {
+        checks.push({ ok: false, title: `entry '${shape.entry}' could not be read`, detail: 'check file permissions' });
+        hardError = true;
+      } else {
+        checks.push({ ok: true, title: `entry '${shape.entry}' resolves` });
+        for (const c of lintWorkerEntry(text, shape.entry, shape.prebuilt === true, hasNodejsCompat)) checks.push(c);
+      }
+    }
+  }
+
+  const anyWarn = checks.some((c) => !c.ok);
+
+  if (jsonOutput) {
+    io.out(`${JSON.stringify({ ok: !hardError, hardError, checks, scannedEntryOnly: true })}\n`);
+    return hardError ? 1 : 0;
+  }
+
+  io.out(`yolo deploy doctor — ${shape.type} project\n`);
+  for (const c of checks) {
+    io.out(`  ${c.ok ? '✓' : '⚠'} ${c.title}\n`);
+    if (c.detail) io.out(`    → ${c.detail}\n`);
+  }
+  if (shape.type === 'worker') {
+    io.out('  note: doctor scans your entry file only — run `yolo deploy --dry-run` to bundle and check dependencies too\n');
+  }
+  io.out(hardError ? '\nFAIL: fix the errors above before shipping\n' : anyWarn ? '\nOK with warnings — review the ⚠ items above\n' : '\nOK: no runtime-contract issues found\n');
+  return hardError ? 1 : 0;
+}
+
+/** The workerd-runtime-contract checks over one entry file's text. */
+function lintWorkerEntry(text: string, entry: string, prebuilt: boolean, hasNodejsCompat: boolean): DoctorCheck[] {
+  const out: DoctorCheck[] = [];
+
+  // process.env reads other than NODE_ENV — workerd has no runtime process.env.
+  const envNames = new Set<string>();
+  const envRe = /process\.env\.([A-Za-z_][A-Za-z0-9_]*)/g;
+  let m: RegExpExecArray | null;
+  while ((m = envRe.exec(text)) !== null) {
+    if (m[1] !== 'NODE_ENV') envNames.add(m[1]!);
+  }
+  if (envNames.size > 0) {
+    const names = [...envNames].sort();
+    out.push({
+      ok: false,
+      title: `${entry} reads process.env.${names.join(', process.env.')}`,
+      detail: `workerd has no runtime process.env — read these from the env fetch arg (env.${names[0]})`,
+    });
+  } else {
+    out.push({ ok: true, title: 'no process.env reads (other than NODE_ENV)' });
+  }
+
+  // node: builtins vs nodejs_compat.
+  const builtins = collectNodeBuiltinsFromText(text);
+  if (builtins.length === 0) {
+    out.push({ ok: true, title: 'no node: builtins imported' });
+  } else if (hasNodejsCompat) {
+    out.push({ ok: true, title: `node: builtins (${builtins.join(', ')}) covered by nodejs_compat` });
+  } else {
+    out.push({
+      ok: false,
+      title: `imports node: builtins (${builtins.join(', ')}), deploy.json missing nodejs_compat`,
+      detail: 'add "nodejs_compat" to .yolo/deploy.json compatibilityFlags',
+    });
+  }
+
+  // require("node:…") — throws in an ESM Worker.
+  if (/\brequire\s*\(\s*['"]node:/.test(text)) {
+    out.push({ ok: false, title: `${entry} uses require() of a node: builtin`, detail: 'use an ESM `import` — require() throws at runtime in an ESM Worker' });
+  }
+
+  // NODE_ENV pinning. The bundler pins it for a SOURCE entry; a prebuilt bundle
+  // that still references it was not pinned in the framework build.
+  if (prebuilt) {
+    if (text.includes('process.env.NODE_ENV')) {
+      out.push({ ok: false, title: 'prebuilt bundle references an unpinned process.env.NODE_ENV', detail: 'pin NODE_ENV=production in your framework build or it may ship a dev build' });
+    } else {
+      out.push({ ok: true, title: 'NODE_ENV not left unpinned in the prebuilt bundle' });
+    }
+  } else {
+    out.push({ ok: true, title: 'NODE_ENV pinned to production by the bundler' });
+  }
+
+  return out;
 }
 
 // ─── status ───────────────────────────────────────────────────────────────

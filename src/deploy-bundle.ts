@@ -12,10 +12,11 @@
  *     `nodeBuiltinExternalPlugin`). `NODE_ENV` is pinned to `production` so
  *     libraries that branch on it (React et al.) never ship their dev build on
  *     workerd (which has no runtime `process.env`). The plugin leaves every real
- *     `node:` builtin external (nodejs_compat serves the supported ones) and
- *     WARNS when that flag is absent, while forcing the two always-broken cases
- *     (a `require()`-kind resolve, a misspelled non-builtin) to a build error
- *     rather than a silent runtime failure. If the entry already points at a
+ *     `node:` builtin external (nodejs_compat serves the supported ones); a
+ *     misspelled non-builtin is the only `node:` case that fails the build. It
+ *     WARNS (not fails) when nodejs_compat is absent and when a builtin is loaded
+ *     via `require()` (throws in an ESM Worker unless guarded). If the entry
+ *     already points at a
  *     BUILT `.js`/`.mjs` module (vinext/OpenNext output, skill-directed),
  *     esbuild is SKIPPED and the module ships byte-for-byte as-is — the size
  *     ceilings still apply and the shipped text is scanned to WARN on retained
@@ -114,42 +115,37 @@ function vendoredFlexdbPlugin(): Plugin | null {
 //
 // A `node:` builtin can't be bundled — esbuild's browser resolver would hard-
 // fail it. We leave every REAL builtin external (workerd's nodejs_compat serves
-// the ones it supports at the pinned compatibility date) and force only the two
-// genuinely-broken cases to a BUILD error:
-//   - a require()-kind resolve → esbuild emits __require(...), which throws in
-//     an ESM Worker (no CJS require) regardless of workerd support
-//   - a non-builtin specifier (node:async_hook typo) → esbuild "Could not resolve"
+// the ones it supports at the pinned compatibility date); the ONLY `node:` case
+// that stays a build error is a non-builtin specifier (a `node:async_hook` typo
+// → esbuild "Could not resolve"). Everything else externalizes and, where risky,
+// WARNS post-bundle:
+//   - a require()-kind load → esbuild emits __require(...), which throws in an
+//     ESM Worker UNLESS guarded by try/catch → warn (collectExternalNodeRequires),
+//     don't fail — a hard error would break guarded optional-dependency probes
+//   - node: builtins with no nodejs_compat → warn (warnMissingNodejsCompat)
 //
 // Deliberately NOT a workerd compatibility oracle: which builtins a given
 // compatibility-date + flag set actually serves (tls, node:fs behind
 // enable_nodejs_fs_module, modules dropped by no_* flags, …) is a moving matrix
 // that belongs to the runtime, not the bundler. Modeling it here only produces
-// false build rejections of valid Workers. Instead we externalize broadly and
-// WARN when nodejs_compat is absent (warnMissingNodejsCompat); the post-ship
-// boot probe / runtime is the authority on whether a module is really served.
+// false build rejections of valid Workers. The post-ship boot probe / runtime is
+// the authority on whether a module is really served.
 
 /**
- * esbuild plugin that leaves every real `node:` builtin external while turning
- * the two always-broken cases (require()-kind, non-builtin typo) into build
- * errors instead of a silent runtime resolve failure.
+ * esbuild plugin that leaves every real `node:` builtin external (any import
+ * kind, including require-call), so a non-builtin typo is the only `node:` case
+ * that stays a build error. A require()-kind load is externalized rather than
+ * rejected: esbuild emits `__require(...)`, which a GUARDED probe
+ * (`try { require("node:fs") } catch { …fallback… }`) can still catch — a hard
+ * rejection would break that common optional-dependency pattern. An UNGUARDED
+ * require of a builtin throws in an ESM Worker; that's surfaced as a post-bundle
+ * warning (see collectExternalNodeRequires), not a build failure.
  */
 function nodeBuiltinExternalPlugin(): Plugin {
   return {
     name: 'yolo-node-builtin-external',
     setup(build) {
       build.onResolve({ filter: /^node:/ }, (args) => {
-        if (args.kind === 'require-call') {
-          return {
-            errors: [
-              {
-                text:
-                  `require(${JSON.stringify(args.path)}) is not supported in a Worker — use an ESM ` +
-                  `\`import\` instead. A CommonJS require() of a node: builtin compiles to __require(...), ` +
-                  `which throws at runtime because an ESM Worker has no require().`,
-              },
-            ],
-          };
-        }
         if (isBuiltin(args.path)) return { path: args.path, external: true };
         return null; // not a builtin at all → esbuild reports "Could not resolve"
       });
@@ -165,9 +161,26 @@ function nodeBuiltinExternalPlugin(): Plugin {
  * specific helper name) is deliberate: bundlers rename the require helper.
  * Deduped, sorted.
  */
-function collectNodeBuiltinsFromText(text: string): string[] {
+export function collectNodeBuiltinsFromText(text: string): string[] {
   const found = new Set<string>();
   const re = /(?:\bfrom\s*|\bimport\s*|\(\s*)['"](node:[a-zA-Z0-9_/.-]+)['"]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) found.add(m[1]!);
+  return [...found].sort();
+}
+
+/**
+ * The distinct `node:` builtins loaded via a CommonJS `require(…)` / esbuild's
+ * `__require(…)` (any `<ident>require(` helper) in already-bundled text. These
+ * throw in an ESM Worker regardless of `nodejs_compat` — the esbuild path
+ * rejects them; the prebuilt path (esbuild skipped) can only WARN. Deduped, sorted.
+ */
+export function collectNodeRequireCalls(text: string): string[] {
+  const found = new Set<string>();
+  // A require-CALL of a node: literal: `require("node:x")`, `__require("node:x")`.
+  // The leading \w* covers renamed helpers; it won't match the shim's own
+  // definition (that has no node: string argument).
+  const re = /\w*require\s*\(\s*['"](node:[a-zA-Z0-9_/.-]+)['"]/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) found.add(m[1]!);
   return [...found].sort();
@@ -437,6 +450,24 @@ function collectExternalNodeBuiltins(metafile: Metafile | undefined): string[] {
   return [...found].sort();
 }
 
+/**
+ * The distinct `node:` builtins loaded via a CommonJS `require()` (esbuild
+ * import kind `require-call`) in this bundle. esbuild compiles these to
+ * `__require(...)`, which throws in an ESM Worker unless the call is guarded by
+ * try/catch — so we WARN (not fail), preserving the guarded optional-dependency
+ * pattern. Deduped, sorted.
+ */
+function collectExternalNodeRequires(metafile: Metafile | undefined): string[] {
+  if (!metafile) return [];
+  const found = new Set<string>();
+  for (const input of Object.values(metafile.inputs)) {
+    for (const imp of input.imports) {
+      if (imp.external && imp.kind === 'require-call' && imp.path.startsWith('node:')) found.add(imp.path);
+    }
+  }
+  return [...found].sort();
+}
+
 type BuildModuleResult =
   | { ok: true; module: { name: string; contents: Uint8Array }; source: 'esbuild' | 'prebuilt' }
   | BundleFailure;
@@ -476,6 +507,17 @@ async function buildWorkerModule(
     // ship-as-is contract; the fix belongs in the framework build.
     const prebuiltText = Buffer.from(contents).toString('utf8');
     warnMissingNodejsCompat(collectNodeBuiltinsFromText(prebuiltText), compatibilityFlags, warnings);
+    // A require()/__require() of a node: builtin throws in an ESM Worker no
+    // matter what nodejs_compat is — the esbuild path rejects it, so warn here
+    // independently of the missing-compat warning above (which nodejs_compat
+    // suppresses). The framework build should emit ESM imports instead.
+    const nodeRequires = collectNodeRequireCalls(prebuiltText);
+    if (nodeRequires.length > 0) {
+      warnings.push(
+        `prebuilt worker uses require() of node: builtins (${nodeRequires.join(', ')}) — a CommonJS ` +
+          `require of a builtin throws in an ESM Worker. Rebuild it to emit ESM \`import\`s.`,
+      );
+    }
     if (prebuiltText.includes('process.env.NODE_ENV')) {
       // A pinned build would have replaced this literal with "production"; its
       // survival means NODE_ENV is unpinned → risks shipping a dev build.
@@ -510,8 +552,8 @@ async function buildWorkerModule(
         absWorkingDir: path.resolve(cwd),
         logLevel: 'silent',
         // nodeBuiltinExternalPlugin leaves real node: builtins external
-        // (nodejs_compat serves them) but fails the build on a require()-kind
-        // resolve or a misspelling. Ordered first so it wins over default resolve.
+        // (nodejs_compat serves them); only a non-builtin misspelling fails the
+        // build. Ordered first so it wins over default resolve.
         plugins: [nodeBuiltinExternalPlugin(), ...(flexdbPlugin ? [flexdbPlugin] : [])],
       });
     } catch (err) {
@@ -529,6 +571,15 @@ async function buildWorkerModule(
     // node: builtins were left external above; if the Worker actually imports
     // any and nodejs_compat isn't enabled, they resolve to nothing at runtime.
     warnMissingNodejsCompat(collectExternalNodeBuiltins(result.metafile), compatibilityFlags, warnings);
+    // A require()-kind load of a builtin becomes __require(...), which throws in
+    // an ESM Worker unless guarded — advisory (guarded probes stay valid).
+    const nodeRequires = collectExternalNodeRequires(result.metafile);
+    if (nodeRequires.length > 0) {
+      warnings.push(
+        `worker loads node: builtins via require() (${nodeRequires.join(', ')}) — require() throws in an ` +
+          `ESM Worker unless wrapped in try/catch. Prefer an ESM \`import\`.`,
+      );
+    }
     contents = out.contents;
     name = 'index.js';
     source = 'esbuild';

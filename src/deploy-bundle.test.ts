@@ -409,20 +409,24 @@ describe('deploy-bundle — worker modules', () => {
     }
   });
 
-  it('rejects a require() of a node: builtin (would emit __require in ESM)', async () => {
+  it('externalizes a require() of a node: builtin and WARNS (guarded probes stay valid)', async () => {
     const tmp = makeTmpDir();
     writeTree(tmp, {
+      // A guarded optional-dependency probe must still bundle — esbuild emits
+      // __require(...) inside the catch, so the fallback runs at runtime.
       'src/index.ts': [
-        'const fs = require("node:fs");',
+        'let fs; try { fs = require("node:fs"); } catch { fs = null; }',
         'export default { fetch(): Response { return new Response(typeof fs); } };',
       ].join('\n'),
     });
     const shape: ProjectShape = { type: 'worker', entry: 'src/index.ts' };
     const res = await bundleProject(shape, tmp, undefined, { compatibilityFlags: ['nodejs_compat'] });
-    assert.equal(res.ok, false, 'require() of a node: builtin fails the build');
-    if (!res.ok) {
-      assert.equal(res.kind, 'build-failed');
-      assert.match(res.message, /require\(/);
+    assert.equal(res.ok, true, 'require() no longer hard-fails the build');
+    if (res.ok) {
+      assert.ok(
+        res.warnings.some((w) => w.includes('require()') && w.includes('node:fs')),
+        'warns that require() of a builtin throws unless guarded',
+      );
     }
   });
 
@@ -437,6 +441,24 @@ describe('deploy-bundle — worker modules', () => {
       assert.ok(
         res.warnings.some((w) => w.includes('nodejs_compat') && w.includes('node:async_hooks')),
         'dynamic import() is detected on the prebuilt path',
+      );
+    }
+  });
+
+  it('warns on require()/__require() of a node: builtin in a prebuilt bundle even WITH nodejs_compat', async () => {
+    const tmp = makeTmpDir();
+    // require of a builtin throws in an ESM Worker regardless of nodejs_compat,
+    // so the warning must fire even when the missing-compat warning is suppressed.
+    const prebuilt = 'var __require=(x)=>x;var fs=__require("node:fs");export default{fetch(){return new Response(typeof fs)}};\n';
+    writeTree(tmp, { '.vinext/worker.mjs': prebuilt });
+    const shape: ProjectShape = { type: 'worker', entry: '.vinext/worker.mjs', prebuilt: true };
+    const res = await bundleProject(shape, tmp, undefined, { compatibilityFlags: ['nodejs_compat'] });
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      assert.ok(!res.warnings.some((w) => w.includes('nodejs_compat')), 'missing-compat warning suppressed by the flag');
+      assert.ok(
+        res.warnings.some((w) => w.includes('require()') && w.includes('node:fs')),
+        'require-of-builtin warning fires independently',
       );
     }
   });

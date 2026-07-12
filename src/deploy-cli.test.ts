@@ -331,6 +331,139 @@ describe('deploy-cli — validate', () => {
   });
 });
 
+// ─── doctor ─────────────────────────────────────────────────────────────────
+
+describe('deploy-cli — doctor', () => {
+  const workerCfg = (extra: Record<string, unknown> = {}, worker: Record<string, unknown> = { entry: 'src/index.ts' }) => ({
+    ok: true as const,
+    config: { $version: 1 as const, projectId: 'hp_1', slug: 'app', type: 'worker' as const, worker, ...extra },
+    path: CONFIG_PATH,
+    warnings: [],
+  });
+  const withEntry = (io: DeployIo, src: string, extra: Record<string, unknown> = {}, worker?: Record<string, unknown>) =>
+    baseDeps(io, { readDeployConfigImpl: () => workerCfg(extra, worker), statPathImpl: () => 'file', readFileImpl: () => src });
+
+  it('passes a clean worker entry (exit 0, no warnings)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(['doctor'], withEntry(io, 'export default { fetch(req, env) { return new Response(env.NAME); } };'));
+    assert.equal(code, 0);
+    const out = io.stdout.join('');
+    assert.match(out, /no runtime-contract issues found/);
+    assert.match(out, /NODE_ENV pinned to production by the bundler/);
+  });
+
+  it('flags a process.env read (advisory ⚠, exit 0)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(['doctor'], withEntry(io, 'export default { fetch(req) { return new Response(process.env.API_KEY); } };'));
+    assert.equal(code, 0); // advisory — does not fail
+    const out = io.stdout.join('');
+    assert.match(out, /reads process\.env\.API_KEY/);
+    assert.match(out, /workerd has no runtime process\.env/);
+  });
+
+  it('does not flag process.env.NODE_ENV (bundler pins it)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(['doctor'], withEntry(io, 'const p = process.env.NODE_ENV === "production"; export default { fetch() { return new Response(String(p)); } };'));
+    assert.equal(code, 0);
+    assert.match(io.stdout.join(''), /no process\.env reads \(other than NODE_ENV\)/);
+  });
+
+  it('warns on a node: import when nodejs_compat is absent', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(['doctor'], withEntry(io, 'import { randomUUID } from "node:crypto"; export default { fetch() { return new Response(randomUUID()); } };'));
+    assert.equal(code, 0);
+    assert.match(io.stdout.join(''), /imports node: builtins \(node:crypto\), deploy\.json missing nodejs_compat/);
+  });
+
+  it('passes a node: import when nodejs_compat is set', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(['doctor'], withEntry(io, 'import { randomUUID } from "node:crypto"; export default { fetch() { return new Response(randomUUID()); } };', { compatibilityFlags: ['nodejs_compat'] }));
+    assert.equal(code, 0);
+    assert.match(io.stdout.join(''), /node: builtins \(node:crypto\) covered by nodejs_compat/);
+  });
+
+  it('warns on a require() of a node: builtin', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(['doctor'], withEntry(io, 'const fs = require("node:fs"); export default { fetch() { return new Response(typeof fs); } };', { compatibilityFlags: ['nodejs_compat'] }));
+    assert.equal(code, 0);
+    assert.match(io.stdout.join(''), /uses require\(\) of a node: builtin/);
+  });
+
+  it('warns on an unpinned NODE_ENV in a prebuilt bundle', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['doctor'],
+      withEntry(io, 'export default { fetch() { return new Response(process.env.NODE_ENV); } };', {}, { entry: '.vinext/worker.mjs', prebuilt: true }),
+    );
+    assert.equal(code, 0);
+    assert.match(io.stdout.join(''), /prebuilt bundle references an unpinned process\.env\.NODE_ENV/);
+  });
+
+  it('fails (exit 1) when a source entry is missing', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['doctor'],
+      baseDeps(io, { readDeployConfigImpl: () => workerCfg(), statPathImpl: () => 'missing' }),
+    );
+    assert.equal(code, 1);
+    assert.match(io.stdout.join('') + io.stderr.join(''), /does not exist/);
+  });
+
+  it('fails (exit 1) for a missing SOURCE entry even with a build command (typo, not build output)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['doctor'],
+      baseDeps(io, { readDeployConfigImpl: () => workerCfg({ build: { command: 'npm run build' } }), statPathImpl: () => 'missing' }),
+    );
+    assert.equal(code, 1);
+    assert.match(io.stdout.join(''), /does not exist/);
+  });
+
+  it('is OK (exit 0) for a missing PREBUILT entry — build output, not yet produced', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['doctor'],
+      baseDeps(io, { readDeployConfigImpl: () => workerCfg({}, { entry: '.vinext/worker.mjs', prebuilt: true }), statPathImpl: () => 'missing' }),
+    );
+    assert.equal(code, 0);
+    assert.match(io.stdout.join(''), /not built yet/);
+  });
+
+  it('reports static projects as N/A for the worker runtime contract', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['doctor'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => ({
+          ok: true as const,
+          config: { $version: 1 as const, projectId: 'hp_1', slug: 's', type: 'static' as const, build: { outputDir: 'dist' } },
+          path: CONFIG_PATH,
+          warnings: [],
+        }),
+        statPathImpl: () => 'dir',
+      }),
+    );
+    assert.equal(code, 0);
+    assert.match(io.stdout.join(''), /static site — the workerd runtime contract applies to Workers only/);
+  });
+
+  it('emits --json with checks and hardError=false', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(['doctor', '--json'], withEntry(io, 'export default { fetch(req, env) { return new Response(env.X); } };'));
+    assert.equal(code, 0);
+    const parsed = JSON.parse(io.stdout.join('').trim());
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.hardError, false);
+    assert.ok(Array.isArray(parsed.checks));
+  });
+
+  it('rejects an unexpected argument with exit 64', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(['doctor', '--frobnicate'], withEntry(io, 'export default {};'));
+    assert.equal(code, 64);
+  });
+});
+
 // ─── Bare ship ────────────────────────────────────────────────────────────
 
 describe('deploy-cli — bare ship', () => {
