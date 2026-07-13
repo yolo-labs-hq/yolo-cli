@@ -44,6 +44,7 @@ function fakeBundle(opts: { moduleText?: string | null; assets?: BundleAsset[]; 
     module,
     workerModules: module ? [module] : [],
     moduleSource: module ? 'esbuild' : null,
+    sourceMap: null,
     fileCount: 0,
     totalAssetBytes: 0,
     bundleDigest: 'sha256:deadbeef',

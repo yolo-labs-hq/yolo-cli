@@ -389,7 +389,7 @@ describe('deploy-cli — dev dispatch', () => {
             ok: true, type: 'worker', manifest: {}, assetPaths: {}, assets: [],
             module: { name: 'index.js', contents: new TextEncoder().encode('export default {};') },
             workerModules: [{ name: 'index.js', contents: new TextEncoder().encode('export default {};') }],
-            moduleSource: 'esbuild', fileCount: 0, totalAssetBytes: 0, bundleDigest: 'sha256:x', warnings: [],
+            moduleSource: 'esbuild', sourceMap: null, fileCount: 0, totalAssetBytes: 0, bundleDigest: 'sha256:x', warnings: [],
           }),
           startImpl: async () => ({ url: 'http://127.0.0.1:8787/', dispose: async () => {} }),
           waitForStopImpl: async () => {},

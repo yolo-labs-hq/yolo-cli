@@ -554,6 +554,36 @@ describe('deploy-bundle — worker modules', () => {
     }
   });
 
+  it('emits a linked sourcemap sidecar only when sourcemaps:true (out of the digest)', async () => {
+    const tmp = makeTmpDir();
+    writeTree(tmp, {
+      'src/util.ts': 'export const G: string = "hi";\n',
+      'src/index.ts': 'import { G } from "./util.js";\nexport default { fetch(): Response { return new Response(G); } };',
+    });
+    const shape: ProjectShape = { type: 'worker', entry: 'src/index.ts' };
+
+    const off = await bundleProject(shape, tmp); // default: no sourcemaps
+    assert.equal(off.ok, true);
+    const on = await bundleProject(shape, tmp, undefined, { sourcemaps: true });
+    assert.equal(on.ok, true);
+    if (off.ok && on.ok) {
+      // OFF → no sidecar, module has no sourceMappingURL comment.
+      assert.equal(off.sourceMap, null);
+      assert.ok(!Buffer.from(off.module!.contents).toString('utf8').includes('sourceMappingURL'));
+      // ON → sidecar present, valid JSON map, module links to it by the matching name.
+      assert.ok(on.sourceMap, 'sidecar emitted');
+      assert.equal(on.sourceMap!.name, 'index.js.map');
+      const map = JSON.parse(on.sourceMap!.content);
+      assert.equal(map.version, 3);
+      assert.ok(Array.isArray(map.sources) && map.sources.some((s: string) => s.includes('index.ts')));
+      const modText = Buffer.from(on.module!.contents).toString('utf8');
+      assert.ok(modText.includes('//# sourceMappingURL=index.js.map'), 'module links to the map by name');
+      // The sidecar is NOT a worker module and NOT in the digest input.
+      assert.equal(on.workerModules.length, 1);
+      assert.ok(!on.workerModules.some((m) => m.name.endsWith('.map')));
+    }
+  });
+
   it('a broken entry fails build-failed (esbuild error surfaced, not thrown)', async () => {
     const tmp = makeTmpDir();
     // The import must be USED — esbuild elides unused TS imports before

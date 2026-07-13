@@ -260,6 +260,15 @@ export interface BundleSuccess {
   workerModules: Array<{ name: string; contents: Uint8Array }>;
   /** Whether the module was shipped as-is (pre-built entry) vs esbuild-bundled. */
   moduleSource: 'esbuild' | 'prebuilt' | null;
+  /**
+   * External sourcemap SIDECAR for the worker module, when `sourcemaps` was
+   * requested and esbuild produced one. Deliberately NOT part of `module` /
+   * `workerModules` / the digest — it's uploaded as a separate CF part
+   * (`application/source-map`) and the module carries a `//# sourceMappingURL`
+   * comment linking to it, so CF symbolicates exceptions server-side.
+   * `name` matches that comment (`index.js.map`). `null` when not emitted.
+   */
+  sourceMap: { name: string; content: string } | null;
   fileCount: number;
   totalAssetBytes: number;
   /** `sha256:<hex>` over module bytes + sorted manifest. */
@@ -287,6 +296,14 @@ export interface BundleOptions {
    * runtime provides those builtins, so the warning is suppressed.
    */
   compatibilityFlags?: string[];
+  /**
+   * Emit a linked sourcemap for an esbuild-bundled worker (adds a
+   * `//# sourceMappingURL` comment to the module + returns the `.map` sidecar),
+   * so the ship path can upload it and CF symbolicates exceptions. Opt-in: OFF
+   * leaves the module bytes (and the digest) exactly as before. No effect on
+   * static or prebuilt bundles.
+   */
+  sourcemaps?: boolean;
 }
 
 export async function bundleProject(
@@ -302,6 +319,7 @@ export async function bundleProject(
   // ── Worker module (esbuild, or as-is for pre-built entries) ────────────
   let module: BundleSuccess['module'] = null;
   let moduleSource: BundleSuccess['moduleSource'] = null;
+  let sourceMap: BundleSuccess['sourceMap'] = null;
   if (shape.type === 'worker') {
     const built = await buildWorkerModule(
       shape.entry,
@@ -310,10 +328,12 @@ export async function bundleProject(
       caps,
       warnings,
       compatibilityFlags,
+      options.sourcemaps === true,
     );
     if (!built.ok) return built;
     module = built.module;
     moduleSource = built.source;
+    sourceMap = built.sourceMap ?? null;
   }
 
   // ── Asset walk + manifest + ceilings ────────────────────────────────────
@@ -393,6 +413,7 @@ export async function bundleProject(
     module,
     workerModules: module === null ? [] : [module],
     moduleSource,
+    sourceMap, // sidecar — intentionally excluded from workerModules + the digest below
     fileCount,
     totalAssetBytes,
     bundleDigest: computeBundleDigest(module === null ? [] : [module], manifest),
@@ -469,7 +490,12 @@ function collectExternalNodeRequires(metafile: Metafile | undefined): string[] {
 }
 
 type BuildModuleResult =
-  | { ok: true; module: { name: string; contents: Uint8Array }; source: 'esbuild' | 'prebuilt' }
+  | {
+      ok: true;
+      module: { name: string; contents: Uint8Array };
+      source: 'esbuild' | 'prebuilt';
+      sourceMap?: { name: string; content: string };
+    }
   | BundleFailure;
 
 async function buildWorkerModule(
@@ -479,11 +505,13 @@ async function buildWorkerModule(
   caps: Required<BundleCeilings>,
   warnings: string[],
   compatibilityFlags: string[],
+  sourcemaps: boolean,
 ): Promise<BuildModuleResult> {
   const entryAbs = path.resolve(cwd, entry);
   let contents: Uint8Array;
   let name: string;
   let source: 'esbuild' | 'prebuilt';
+  let sourceMap: { name: string; content: string } | undefined;
 
   // Ship as-is ONLY for an explicitly-configured built output (deploy.json
   // worker.entry → .js/.mjs). Auto-detected `src/index.js` is SOURCE and must
@@ -551,6 +579,12 @@ async function buildWorkerModule(
         define: { 'process.env.NODE_ENV': '"production"' },
         absWorkingDir: path.resolve(cwd),
         logLevel: 'silent',
+        // sourcemaps: 'linked' adds a `//# sourceMappingURL=index.js.map`
+        // comment (which CF uses to associate the uploaded map) + emits the
+        // .map as a second output. A fixed outfile makes that comment's name
+        // deterministic so it matches the uploaded sidecar. OFF → the exact
+        // prior options → byte-identical module → stable digest.
+        ...(sourcemaps ? { sourcemap: 'linked' as const, outfile: path.resolve(cwd, 'index.js') } : {}),
         // nodeBuiltinExternalPlugin leaves real node: builtins external
         // (nodejs_compat serves them); only a non-builtin misspelling fails the
         // build. Ordered first so it wins over default resolve.
@@ -564,7 +598,11 @@ async function buildWorkerModule(
         message: `esbuild failed for ${entry}: ${msg}`,
       };
     }
-    const out = result.outputFiles?.[0];
+    const outputs = result.outputFiles ?? [];
+    // The module is the non-.map output; the .map (present only with sourcemaps)
+    // is the sidecar.
+    const out = outputs.find((o) => !o.path.endsWith('.map'));
+    const mapOut = outputs.find((o) => o.path.endsWith('.map'));
     if (out === undefined) {
       return { ok: false, kind: 'build-failed', message: `esbuild produced no output for ${entry}` };
     }
@@ -583,6 +621,11 @@ async function buildWorkerModule(
     contents = out.contents;
     name = 'index.js';
     source = 'esbuild';
+    if (sourcemaps && mapOut !== undefined) {
+      // Name matches the `//# sourceMappingURL=index.js.map` comment esbuild
+      // wrote into the module (deterministic via the fixed outfile).
+      sourceMap = { name: 'index.js.map', content: Buffer.from(mapOut.contents).toString('utf8') };
+    }
   }
 
   if (contents.byteLength > caps.maxModuleBytes) {
@@ -600,7 +643,7 @@ async function buildWorkerModule(
     );
   }
 
-  return { ok: true, module: { name, contents }, source };
+  return { ok: true, module: { name, contents }, source, ...(sourceMap ? { sourceMap } : {}) };
 }
 
 /**

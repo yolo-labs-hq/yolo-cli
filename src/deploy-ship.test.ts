@@ -49,6 +49,7 @@ const STATIC_BUNDLE: BundleSuccess = {
   module: null,
   workerModules: [],
   moduleSource: null,
+  sourceMap: null,
   fileCount: 2,
   totalAssetBytes: 3072,
   bundleDigest: 'sha256:91c2aabbccdd',
