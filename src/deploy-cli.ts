@@ -1139,7 +1139,16 @@ function formatLogEntry(entry: unknown): string {
   const ts = str(e.timestamp) ?? str(e.ts) ?? str(e.time);
   const level = str(e.level);
   const message = str(e.message) ?? str(e.msg) ?? JSON.stringify(entry);
-  return [ts ? `[${ts}]` : undefined, level, message].filter(Boolean).join(' ');
+  const head = [ts ? `[${ts}]` : undefined, level, message].filter(Boolean).join(' ');
+  // Surface the (CF-symbolicated) exception stack indented under the message —
+  // this is what turns an opaque 1101 into a real source-mapped trace.
+  const stack = str(e.stack);
+  if (stack) {
+    const errName = str(e.errorName);
+    const lines = stack.split(/\r?\n/).map((l) => `    ${l.trim()}`).filter((l) => l.trim());
+    return [head, errName ? `  ${errName}` : undefined, ...lines].filter(Boolean).join('\n');
+  }
+  return head;
 }
 
 // ─── rollback ─────────────────────────────────────────────────────────────

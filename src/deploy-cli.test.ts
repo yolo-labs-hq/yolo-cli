@@ -1053,6 +1053,35 @@ describe('deploy-cli — logs', () => {
     assert.match(io.stdout.join(''), /\[2026-06-13T00:00:00Z\] info hello/);
   });
 
+  it('prints the symbolicated exception stack indented under the message', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['logs'],
+      baseDeps(io, {
+        getLogsImpl: async () => ({
+          ok: true,
+          value: {
+            logs: [
+              {
+                timestamp: '2026-07-13T00:00:00Z',
+                level: 'error',
+                message: 'kaboom-detonation',
+                errorName: 'Error',
+                stack: 'at detonate (boom.ts:3:9)\nat Object.fetch (entry.ts:4:5)',
+              },
+            ],
+          },
+        }),
+      }),
+    );
+    assert.equal(code, 0);
+    const out = io.stdout.join('');
+    assert.match(out, /\[2026-07-13T00:00:00Z\] error kaboom-detonation/);
+    assert.match(out, /Error/);
+    assert.match(out, /at detonate \(boom\.ts:3:9\)/); // original source, not the bundle
+    assert.match(out, /at Object\.fetch \(entry\.ts:4:5\)/);
+  });
+
   it('--tail long-polls the live buffer, prints new lines, and threads the cursor', async () => {
     const io = makeIo();
     const calls: Array<{ cursor?: string }> = [];
