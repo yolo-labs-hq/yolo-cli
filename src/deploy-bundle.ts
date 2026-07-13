@@ -218,6 +218,12 @@ export const DEPLOY_CEILINGS = {
   maxModuleBytes: 10 * 1024 * 1024,
   /** Gzipped-module size that triggers a warning (not a failure). */
   warnModuleGzipBytes: 1 * 1024 * 1024,
+  /**
+   * Sourcemap sidecar cap — mirrors the server's FINALIZE_SOURCEMAPS_MAX_BYTES
+   * (common-api `routes/deploy.ts`). Over this we DROP the map (+ warn) rather
+   * than fail the deploy or 413 late at finalize — symbolication is optional.
+   */
+  maxSourceMapBytes: 40 * 1024 * 1024,
 } as const;
 
 export interface BundleCeilings {
@@ -226,6 +232,7 @@ export interface BundleCeilings {
   maxTotalBytes?: number;
   maxModuleBytes?: number;
   warnModuleGzipBytes?: number;
+  maxSourceMapBytes?: number;
 }
 
 export interface AssetManifestEntry {
@@ -624,7 +631,17 @@ async function buildWorkerModule(
     if (sourcemaps && mapOut !== undefined) {
       // Name matches the `//# sourceMappingURL=index.js.map` comment esbuild
       // wrote into the module (deterministic via the fixed outfile).
-      sourceMap = { name: 'index.js.map', content: Buffer.from(mapOut.contents).toString('utf8') };
+      const content = Buffer.from(mapOut.contents).toString('utf8');
+      if (Buffer.byteLength(content, 'utf8') > caps.maxSourceMapBytes) {
+        // Too big to upload — drop it (the module is valid) so the deploy still
+        // ships, just without symbolicated stacks. Better than a late 413.
+        warnings.push(
+          `sourcemap is ${formatBytes(Buffer.byteLength(content, 'utf8'))} (> ${formatBytes(caps.maxSourceMapBytes)}) — ` +
+            `skipping it; exceptions in deploy.logs won't be source-mapped for this release`,
+        );
+      } else {
+        sourceMap = { name: 'index.js.map', content };
+      }
     }
   }
 

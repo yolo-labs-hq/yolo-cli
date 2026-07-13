@@ -272,6 +272,7 @@ export async function finalizeShip(
   projectId: string,
   shipId: string,
   modules: WorkerModuleUpload[] = [],
+  sourceMap?: { name: string; content: string } | null,
 ): Promise<FinalizeShipResult> {
   // NOT auto-retried (unlike ship/start + assets). finalize is single-shot per
   // ship session: if the first request reached the server and created the
@@ -295,6 +296,15 @@ export async function finalizeShip(
           module.name,
           new Blob([module.contents], { type: 'application/javascript+module' }),
           module.name,
+        );
+      }
+      // Sourcemap sidecar — the server distinguishes it from modules by the
+      // `application/source-map` content-type (never a worker module / digest input).
+      if (sourceMap) {
+        form.append(
+          sourceMap.name,
+          new Blob([sourceMap.content], { type: 'application/source-map' }),
+          sourceMap.name,
         );
       }
       // No explicit Content-Type — fetch sets the multipart boundary itself.

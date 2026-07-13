@@ -184,8 +184,11 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
   }
 
   // 4. Bundle — all size/count ceilings fire locally in here, pre-network.
+  //    Request a sourcemap so CF can symbolicate exception stacks in deploy.logs
+  //    (the .map ships as a sidecar, out of the module + the digest).
   const bundled = await bundle(shape, cwd, undefined, {
     compatibilityFlags: config.compatibilityFlags,
+    sourcemaps: true,
   });
   if (!bundled.ok) {
     return { ok: false, kind: bundled.kind, message: bundled.message, hint: bundled.hint, detail: bundled.detail };
@@ -275,8 +278,9 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
     }
   }
 
-  // 8. Finalize — worker modules multipart / empty JSON for pure-static.
-  const finalized = await finalizeLeg(ctx, projectId, shipId, workerModules);
+  // 8. Finalize — worker modules multipart / empty JSON for pure-static. The
+  //    sourcemap sidecar rides alongside the modules (out of the digest).
+  const finalized = await finalizeLeg(ctx, projectId, shipId, workerModules, bundled.sourceMap);
   if (!finalized.ok) {
     if (finalized.kind === 'awaiting-approval' && 'approvalId' in finalized) {
       progress('deploy: finalize → pending operator approval (T3 prod ship)');

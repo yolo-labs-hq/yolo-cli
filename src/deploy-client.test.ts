@@ -287,6 +287,29 @@ describe('deploy-client — finalizeShip', () => {
     assert.equal(uploaded, 'export default {};');
   });
 
+  it('appends the sourcemap sidecar as an application/source-map part', async () => {
+    const { fetch, calls } = makeFetchStub({ jsonBody: { releaseId: 'rel_1', url: 'https://x.yolo.host', status: 'live' } });
+    const contents = new TextEncoder().encode('throw 0;\n//# sourceMappingURL=index.js.map');
+    await finalizeShip(makeContext(fetch), 'hp_1', 'shp_77', [{ name: 'index.js', contents }], {
+      name: 'index.js.map',
+      content: '{"version":3,"sources":["src/index.ts"]}',
+    });
+    const form = calls[0]!.body as FormData;
+    const modPart = form.get('index.js') as Blob;
+    assert.equal(modPart.type, 'application/javascript+module');
+    const mapPart = form.get('index.js.map') as Blob;
+    assert.ok(mapPart, 'sourcemap part present');
+    assert.equal(mapPart.type, 'application/source-map'); // distinct from the module
+    assert.equal(Buffer.from(await mapPart.arrayBuffer()).toString(), '{"version":3,"sources":["src/index.ts"]}');
+  });
+
+  it('omits the sourcemap part when none is passed', async () => {
+    const { fetch, calls } = makeFetchStub({ jsonBody: { releaseId: 'rel_1', url: 'https://x.yolo.host', status: 'live' } });
+    await finalizeShip(makeContext(fetch), 'hp_1', 'shp_77', [{ name: 'index.js', contents: new TextEncoder().encode('x') }]);
+    const form = calls[0]!.body as FormData;
+    assert.equal([...form.keys()].filter((k) => k.endsWith('.map')).length, 0);
+  });
+
   it('sends empty JSON for a pure-static finalize (server attaches the shim)', async () => {
     const { fetch, calls } = makeFetchStub({ jsonBody: { releaseId: 'rel_1', url: 'https://s.yolo.host', status: 'live' } });
     const result = await finalizeShip(makeContext(fetch), 'hp_1', 'shp_77', []);

@@ -584,6 +584,18 @@ describe('deploy-bundle — worker modules', () => {
     }
   });
 
+  it('drops an oversize sourcemap (+ warns) instead of failing or 413-ing late', async () => {
+    const tmp = makeTmpDir();
+    writeTree(tmp, { 'src/index.ts': 'export default { fetch(): Response { return new Response("hi"); } };' });
+    const shape: ProjectShape = { type: 'worker', entry: 'src/index.ts' };
+    const res = await bundleProject(shape, tmp, { maxSourceMapBytes: 10 }, { sourcemaps: true });
+    assert.equal(res.ok, true, 'deploy still ships — the module is valid');
+    if (res.ok) {
+      assert.equal(res.sourceMap, null, 'oversize map dropped, not uploaded');
+      assert.ok(res.warnings.some((w) => w.includes('sourcemap is') && w.includes('skipping')));
+    }
+  });
+
   it('a broken entry fails build-failed (esbuild error surfaced, not thrown)', async () => {
     const tmp = makeTmpDir();
     // The import must be USED — esbuild elides unused TS imports before
