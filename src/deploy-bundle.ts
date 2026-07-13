@@ -479,6 +479,23 @@ function collectExternalNodeBuiltins(metafile: Metafile | undefined): string[] {
 }
 
 /**
+ * Ensure the sourcemap JSON carries a `file` field naming the module it maps
+ * (`index.js`) — CF associates a map to its module by this field (verified live)
+ * and esbuild omits it. Returns the map text unchanged if it isn't parseable
+ * JSON (defensive; the map still ships, just possibly un-symbolicated).
+ */
+function withMapFile(mapText: string, moduleName: string): string {
+  try {
+    const parsed = JSON.parse(mapText) as Record<string, unknown>;
+    if (parsed.file === moduleName) return mapText;
+    parsed.file = moduleName;
+    return JSON.stringify(parsed);
+  } catch {
+    return mapText;
+  }
+}
+
+/**
  * The distinct `node:` builtins loaded via a CommonJS `require()` (esbuild
  * import kind `require-call`) in this bundle. esbuild compiles these to
  * `__require(...)`, which throws in an ESM Worker unless the call is guarded by
@@ -631,7 +648,11 @@ async function buildWorkerModule(
     if (sourcemaps && mapOut !== undefined) {
       // Name matches the `//# sourceMappingURL=index.js.map` comment esbuild
       // wrote into the module (deterministic via the fixed outfile).
-      const content = Buffer.from(mapOut.contents).toString('utf8');
+      // CF associates the sourcemap to the module by the map's `file` field —
+      // verified against the live account: esbuild OMITS `file`, and without it
+      // CF returns minified exception stacks; adding `file` = the module name
+      // makes it symbolicate. (wrangler's map carries `file` too.)
+      const content = withMapFile(Buffer.from(mapOut.contents).toString('utf8'), name);
       if (Buffer.byteLength(content, 'utf8') > caps.maxSourceMapBytes) {
         // Too big to upload — drop it (the module is valid) so the deploy still
         // ships, just without symbolicated stacks. Better than a late 413.

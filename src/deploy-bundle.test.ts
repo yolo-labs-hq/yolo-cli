@@ -576,6 +576,9 @@ describe('deploy-bundle — worker modules', () => {
       const map = JSON.parse(on.sourceMap!.content);
       assert.equal(map.version, 3);
       assert.ok(Array.isArray(map.sources) && map.sources.some((s: string) => s.includes('index.ts')));
+      // CF associates the map to the module by `file` (esbuild omits it) — without
+      // this, deploy.logs exception stacks stay minified (verified against CF).
+      assert.equal(map.file, 'index.js');
       const modText = Buffer.from(on.module!.contents).toString('utf8');
       assert.ok(modText.includes('//# sourceMappingURL=index.js.map'), 'module links to the map by name');
       // The sidecar is NOT a worker module and NOT in the digest input.
