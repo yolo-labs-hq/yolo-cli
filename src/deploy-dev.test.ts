@@ -220,6 +220,20 @@ describe('deploy-dev — runDeployDev orchestration', () => {
     assert.deepEqual(s.captured()!.assets, { directory: '/tmp/staged-xyz', binding: 'ASSETS' });
   });
 
+  it('a rejecting dispose warns + still cleans up the staged dir, exits 0', async () => {
+    const io = makeIo();
+    const staged = mkdtempSync(path.join(os.tmpdir(), 'yolo-dev-dispose-'));
+    writeFileSync(path.join(staged, 'index.html'), 'x');
+    const s = seams(io, {
+      stageAssetsImpl: () => staged, // a REAL dir we assert gets removed
+      startImpl: async () => ({ url: 'http://127.0.0.1:9999/', dispose: async () => { throw new Error('boom-dispose'); } }),
+    });
+    const code = await runDeployDev(s.opts as never);
+    assert.equal(code, 0, 'a dispose failure at shutdown does not crash a clean stop');
+    assert.match(io.stderr.join(''), /dispose failed: boom-dispose/);
+    assert.equal(existsSync(staged), false, 'staged dir cleaned up despite the dispose failure');
+  });
+
   it('fails (exit 1) on an unreadable deploy config', async () => {
     const io = makeIo();
     const s = seams(io, { readDeployConfigImpl: () => ({ ok: false, kind: 'malformed', message: 'bad json', path: CONFIG_PATH }) });

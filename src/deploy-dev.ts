@@ -257,8 +257,16 @@ export async function runDeployDev(opts: DevServerOptions): Promise<number> {
   try {
     await waitForStop();
   } finally {
-    await server.dispose();
-    cleanup();
+    // A dispose failure at shutdown is best-effort — warn, don't turn a clean
+    // Ctrl-C into a crash — and the inner finally guarantees the staged-asset
+    // cleanup runs regardless.
+    try {
+      await server.dispose();
+    } catch (err) {
+      io.err(`warn: dev server dispose failed: ${err instanceof Error ? err.message : String(err)}\n`);
+    } finally {
+      cleanup();
+    }
   }
   io.out('\ndev server stopped\n');
   return 0;
