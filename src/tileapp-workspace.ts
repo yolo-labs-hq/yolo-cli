@@ -10,8 +10,13 @@
  *     → POST /v1/workspaces/<wsId>/tiles { id, type: 'app', name, app }.
  *       The tiles route REQUIRES a client-generated tile id ("Tile id, type,
  *       and name are required"), so we mint one: app-<appId-slug>-<suffix>.
- *       When --version (or --name) is omitted we resolve the app's current
- *       manifest via GET /v1/tileapps/<appId> first.
+ *       Preflights BEFORE creating the tile (codex gpt-5.6-sol P2, 2026-07-18
+ *       — the tiles route itself validates neither, so a bare POST happily
+ *       persists a tile that 409s "app-not-installed" at launch):
+ *         1. GET /v1/tileapps/<appId> — the app must exist (404 → clear
+ *            error). Also supplies the --version/--name defaults.
+ *         2. GET /v1/tileapps/installed?workspaceId=… — the app must have a
+ *            grant in the target workspace (else: run `tileapp install`).
  *
  * Auth: user JWT (no SESSION_ID needed — these are user-authed /v1 routes),
  * same resolution as `tileapp publish --personal`.
@@ -128,25 +133,50 @@ export async function runTileAppAddTile(opts: AddTileOptions): Promise<CmdResult
   const base = apiBase(auth.commonApiUrl);
   const headers = { 'content-type': 'application/json', authorization: `Bearer ${auth.userToken}` };
 
-  // Resolve the manifest when --version (or --name) is omitted — the tiles
-  // route requires both a version and a name.
+  // Preflight 1 — the app must EXIST. Always performed (even with explicit
+  // --version/--name): the tiles route validates only the tile shape, so
+  // skipping this would persist a tile for a nonexistent appId that can never
+  // launch. Doubles as the --version/--name default source.
   let version = opts.version;
   let name = opts.name;
-  if (!version || !name) {
-    try {
-      const res = await fetchImpl(`${base}/tileapps/${encodeURIComponent(opts.appId)}`, { headers });
-      if (!res.ok) return { ok: false, kind: 'http', message: `resolve app failed: HTTP ${res.status} — ${await safeText(res)}` };
-      const json = (await res.json()) as { app?: { version?: string; displayName?: string } };
-      if (!version) {
-        if (typeof json.app?.version !== 'string' || !json.app.version) {
-          return { ok: false, kind: 'http', message: 'resolve app response missing app.version — pass --version explicitly' };
-        }
-        version = json.app.version;
-      }
-      if (!name) name = json.app?.displayName || opts.appId;
-    } catch (e) {
-      return { ok: false, kind: 'http', message: `resolve app request failed: ${(e as Error).message}` };
+  try {
+    const res = await fetchImpl(`${base}/tileapps/${encodeURIComponent(opts.appId)}`, { headers });
+    if (res.status === 404) {
+      return { ok: false, kind: 'http', message: `app '${opts.appId}' not found — check the appId (GET /v1/tileapps/${opts.appId} → 404)` };
     }
+    if (!res.ok) return { ok: false, kind: 'http', message: `resolve app failed: HTTP ${res.status} — ${await safeText(res)}` };
+    const json = (await res.json()) as { app?: { version?: string; displayName?: string } };
+    if (!version) {
+      if (typeof json.app?.version !== 'string' || !json.app.version) {
+        return { ok: false, kind: 'http', message: 'resolve app response missing app.version — pass --version explicitly' };
+      }
+      version = json.app.version;
+    }
+    if (!name) name = json.app?.displayName || opts.appId;
+  } catch (e) {
+    return { ok: false, kind: 'http', message: `resolve app request failed: ${(e as Error).message}` };
+  }
+
+  // Preflight 2 — the app must be INSTALLED (granted) in the target workspace,
+  // or the created tile would 409 app-not-installed at launch. Read via the
+  // existing grants listing (GET /tileapps/installed?workspaceId=…) — user-JWT
+  // readable + workspace-ownership-checked server-side.
+  try {
+    const res = await fetchImpl(`${base}/tileapps/installed?workspaceId=${encodeURIComponent(opts.workspaceId)}`, { headers });
+    if (!res.ok) return { ok: false, kind: 'http', message: `installed-apps check failed: HTTP ${res.status} — ${await safeText(res)}` };
+    const json = (await res.json()) as { installed?: Array<{ appId?: string }> };
+    if (!Array.isArray(json.installed)) {
+      return { ok: false, kind: 'http', message: 'installed-apps response missing `installed` array' };
+    }
+    if (!json.installed.some((g) => g.appId === opts.appId)) {
+      return {
+        ok: false,
+        kind: 'http',
+        message: `app '${opts.appId}' is not installed in this workspace — run: yolo tileapp install ${opts.appId} --workspace ${opts.workspaceId}`,
+      };
+    }
+  } catch (e) {
+    return { ok: false, kind: 'http', message: `installed-apps check request failed: ${(e as Error).message}` };
   }
 
   const tileId = generateTileId(opts.appId, opts.idSuffixImpl);

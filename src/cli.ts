@@ -851,10 +851,13 @@ async function runTileAppInstallCmd(args: string[]): Promise<number> {
   const acceptOptional: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
-    if (a === '--workspace') { workspaceId = args[++i]; if (workspaceId === undefined) return tileAppUsage('install', '--workspace requires a value'); }
-    else if (a.startsWith('--workspace=')) workspaceId = a.slice('--workspace='.length);
-    else if (a === '--accept-optional') { const v = args[++i]; if (v === undefined) return tileAppUsage('install', '--accept-optional requires a value'); acceptOptional.push(v); }
-    else if (a.startsWith('--accept-optional=')) acceptOptional.push(a.slice('--accept-optional='.length));
+    // A following flag must never be consumed as a value (`--workspace
+    // --accept-optional=x`), so reject empty values and `--`-leading values —
+    // same pattern as the run/plan parsers (codex gpt-5.6-sol P3, 2026-07-18).
+    if (a === '--workspace') { const v = args[++i]; if (!v || v.startsWith('--')) return tileAppUsage('install', '--workspace requires a value'); workspaceId = v; }
+    else if (a.startsWith('--workspace=')) { const v = a.slice('--workspace='.length); if (!v) return tileAppUsage('install', '--workspace requires a value'); workspaceId = v; }
+    else if (a === '--accept-optional') { const v = args[++i]; if (!v || v.startsWith('--')) return tileAppUsage('install', '--accept-optional requires a value'); acceptOptional.push(v); }
+    else if (a.startsWith('--accept-optional=')) { const v = a.slice('--accept-optional='.length); if (!v) return tileAppUsage('install', '--accept-optional requires a value'); acceptOptional.push(v); }
     else if (!a.startsWith('-') && !appId) appId = a;
     else return tileAppUsage('install', `unexpected argument '${a}'`);
   }
@@ -873,12 +876,14 @@ async function runTileAppAddTileCmd(args: string[]): Promise<number> {
   let version: string | undefined;
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
-    if (a === '--workspace') { workspaceId = args[++i]; if (workspaceId === undefined) return tileAppUsage('add-tile', '--workspace requires a value'); }
-    else if (a.startsWith('--workspace=')) workspaceId = a.slice('--workspace='.length);
-    else if (a === '--name') { name = args[++i]; if (name === undefined) return tileAppUsage('add-tile', '--name requires a value'); }
-    else if (a.startsWith('--name=')) name = a.slice('--name='.length);
-    else if (a === '--version') { version = args[++i]; if (version === undefined) return tileAppUsage('add-tile', '--version requires a value'); }
-    else if (a.startsWith('--version=')) version = a.slice('--version='.length);
+    // Reject empty/`--`-leading values so a following flag is never consumed
+    // as a value (codex gpt-5.6-sol P3, 2026-07-18).
+    if (a === '--workspace') { const v = args[++i]; if (!v || v.startsWith('--')) return tileAppUsage('add-tile', '--workspace requires a value'); workspaceId = v; }
+    else if (a.startsWith('--workspace=')) { const v = a.slice('--workspace='.length); if (!v) return tileAppUsage('add-tile', '--workspace requires a value'); workspaceId = v; }
+    else if (a === '--name') { const v = args[++i]; if (!v || v.startsWith('--')) return tileAppUsage('add-tile', '--name requires a value'); name = v; }
+    else if (a.startsWith('--name=')) { const v = a.slice('--name='.length); if (!v) return tileAppUsage('add-tile', '--name requires a value'); name = v; }
+    else if (a === '--version') { const v = args[++i]; if (!v || v.startsWith('--')) return tileAppUsage('add-tile', '--version requires a value'); version = v; }
+    else if (a.startsWith('--version=')) { const v = a.slice('--version='.length); if (!v) return tileAppUsage('add-tile', '--version requires a value'); version = v; }
     else if (!a.startsWith('-') && !appId) appId = a;
     else return tileAppUsage('add-tile', `unexpected argument '${a}'`);
   }
@@ -895,8 +900,10 @@ async function runMcpScopesCmd(args: string[]): Promise<number> {
   let jsonOutput = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
-    if (a === '--agent') { agentId = args[++i]; if (agentId === undefined) { process.stderr.write('yolo mcp scopes: --agent requires a value\n'); return 64; } }
-    else if (a.startsWith('--agent=')) agentId = a.slice('--agent='.length);
+    // Reject empty/`--`-leading values so a following flag is never consumed
+    // as a value (codex gpt-5.6-sol P3, 2026-07-18).
+    if (a === '--agent') { const v = args[++i]; if (!v || v.startsWith('--')) { process.stderr.write('yolo mcp scopes: --agent requires a value\n'); return 64; } agentId = v; }
+    else if (a.startsWith('--agent=')) { const v = a.slice('--agent='.length); if (!v) { process.stderr.write('yolo mcp scopes: --agent requires a value\n'); return 64; } agentId = v; }
     else if (a === '--json') jsonOutput = true;
     else { process.stderr.write(`yolo mcp scopes: unexpected argument '${a}'\nUsage: yolo mcp scopes [--agent <agentId>] [--json]\n`); return 64; }
   }

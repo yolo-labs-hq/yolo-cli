@@ -8,9 +8,12 @@
  *     - HTTP failure surfaces status + body
  *     - missing auth env → auth failure (no network)
  *   add-tile:
- *     - explicit --version + --name skips the manifest resolve
- *     - omitted version/name resolves GET /tileapps/:appId first
+ *     - ALWAYS preflights app existence + workspace grant (even with explicit
+ *       --version/--name) before creating the tile
+ *     - omitted version/name defaults from GET /tileapps/:appId
  *     - generated tile id is app-<slug>-<suffix> and rides in the POST body
+ *     - manifest 404 → "not found" failure, no tile POST
+ *     - no grant in the workspace → "not installed" failure w/ install hint
  *     - manifest missing app.version → http failure with a --version hint
  *     - HTTP failure on the tiles POST surfaces status
  *   exitCodeForFailure mapping
@@ -111,20 +114,40 @@ describe('runTileAppInstall', () => {
   });
 });
 
+/** Route the three add-tile legs: manifest GET, installed GET, tiles POST. */
+function addTileRoutes(overrides: {
+  manifest?: { ok: boolean; status: number; body: unknown };
+  installed?: { ok: boolean; status: number; body: unknown };
+  tiles?: { ok: boolean; status: number; body: unknown };
+} = {}) {
+  return (url: string, method: string): { ok: boolean; status: number; body: unknown } => {
+    if (method === 'GET' && url.includes('/tileapps/installed')) {
+      return overrides.installed ?? { ok: true, status: 200, body: { installed: [{ appId: 'notes', version: '1.0.0' }] } };
+    }
+    if (method === 'GET' && url.includes('/tileapps/')) {
+      return overrides.manifest ?? { ok: true, status: 200, body: { app: { id: 'notes', version: '3.1.4', displayName: 'Notes App' } } };
+    }
+    return overrides.tiles ?? { ok: true, status: 201, body: { workspace: {} } };
+  };
+}
+
 describe('runTileAppAddTile', () => {
-  it('skips the manifest resolve when --version and --name are both given', async () => {
+  it('ALWAYS preflights app existence + grant, even with explicit --version and --name', async () => {
     const calls: Call[] = [];
-    const fetchImpl = makeFetchStub(() => ({ ok: true, status: 201, body: { workspace: {} } }), calls);
+    const fetchImpl = makeFetchStub(addTileRoutes(), calls);
 
     const result = await runTileAppAddTile({
       appId: 'notes', workspaceId: WS, name: 'My Notes', version: '2.0.0',
       env: STUB_ENV, fetchImpl, idSuffixImpl: () => 'abc123',
     });
     assert.equal(result.ok, true);
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0]!.url, `https://api.example.com/v1/workspaces/${WS}/tiles`);
-    assert.equal(calls[0]!.method, 'POST');
-    assert.deepEqual(calls[0]!.body, {
+    // manifest GET → installed GET → tiles POST, in that order.
+    assert.equal(calls.length, 3);
+    assert.equal(calls[0]!.url, 'https://api.example.com/v1/tileapps/notes');
+    assert.equal(calls[1]!.url, `https://api.example.com/v1/tileapps/installed?workspaceId=${WS}`);
+    assert.equal(calls[2]!.url, `https://api.example.com/v1/workspaces/${WS}/tiles`);
+    assert.equal(calls[2]!.method, 'POST');
+    assert.deepEqual(calls[2]!.body, {
       id: 'app-notes-abc123',
       type: 'app',
       name: 'My Notes',
@@ -133,22 +156,16 @@ describe('runTileAppAddTile', () => {
     if (result.ok) assert.match(result.output, /Added app tile app-notes-abc123 \(notes@2\.0\.0/);
   });
 
-  it('resolves version + displayName from GET /tileapps/:appId when omitted', async () => {
+  it('defaults version + displayName from GET /tileapps/:appId when omitted', async () => {
     const calls: Call[] = [];
-    const fetchImpl = makeFetchStub((url, method) => {
-      if (method === 'GET') {
-        assert.equal(url, 'https://api.example.com/v1/tileapps/notes');
-        return { ok: true, status: 200, body: { app: { id: 'notes', version: '3.1.4', displayName: 'Notes App' } } };
-      }
-      return { ok: true, status: 201, body: { workspace: {} } };
-    }, calls);
+    const fetchImpl = makeFetchStub(addTileRoutes(), calls);
 
     const result = await runTileAppAddTile({
       appId: 'notes', workspaceId: WS, env: STUB_ENV, fetchImpl, idSuffixImpl: () => 'zzz999',
     });
     assert.equal(result.ok, true);
-    assert.equal(calls.length, 2);
-    assert.deepEqual(calls[1]!.body, {
+    assert.equal(calls.length, 3);
+    assert.deepEqual(calls[2]!.body, {
       id: 'app-notes-zzz999',
       type: 'app',
       name: 'Notes App',
@@ -156,11 +173,45 @@ describe('runTileAppAddTile', () => {
     });
   });
 
+  it('fails "not found" (no tile POST) when the app does not exist', async () => {
+    const calls: Call[] = [];
+    const fetchImpl = makeFetchStub(addTileRoutes({
+      manifest: { ok: false, status: 404, body: { error: 'tile app not found' } },
+    }), calls);
+    const result = await runTileAppAddTile({
+      appId: 'ghost', workspaceId: WS, name: 'G', version: '1.0.0', env: STUB_ENV, fetchImpl,
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.kind, 'http');
+      assert.match(result.message, /app 'ghost' not found/);
+    }
+    // Failed at the first preflight — nothing else was called.
+    assert.equal(calls.length, 1);
+  });
+
+  it('fails "not installed" with an install hint (no tile POST) when the workspace has no grant', async () => {
+    const calls: Call[] = [];
+    const fetchImpl = makeFetchStub(addTileRoutes({
+      installed: { ok: true, status: 200, body: { installed: [{ appId: 'other-app' }] } },
+    }), calls);
+    const result = await runTileAppAddTile({
+      appId: 'notes', workspaceId: WS, name: 'N', version: '1.0.0', env: STUB_ENV, fetchImpl,
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.kind, 'http');
+      assert.match(result.message, /not installed in this workspace/);
+      assert.match(result.message, new RegExp(`yolo tileapp install notes --workspace ${WS}`));
+    }
+    // manifest + installed only — the tile was never created.
+    assert.equal(calls.length, 2);
+  });
+
   it('fails with a --version hint when the manifest has no version', async () => {
-    const fetchImpl = makeFetchStub((_url, method) =>
-      method === 'GET'
-        ? { ok: true, status: 200, body: { app: { id: 'notes' } } }
-        : { ok: true, status: 201, body: {} });
+    const fetchImpl = makeFetchStub(addTileRoutes({
+      manifest: { ok: true, status: 200, body: { app: { id: 'notes' } } },
+    }));
     const result = await runTileAppAddTile({ appId: 'notes', workspaceId: WS, env: STUB_ENV, fetchImpl });
     assert.equal(result.ok, false);
     if (!result.ok) {
@@ -170,10 +221,9 @@ describe('runTileAppAddTile', () => {
   });
 
   it('surfaces a tiles-POST failure', async () => {
-    const fetchImpl = makeFetchStub((_url, method) =>
-      method === 'GET'
-        ? { ok: true, status: 200, body: { app: { version: '1.0.0', displayName: 'N' } } }
-        : { ok: false, status: 400, body: { error: 'Tile id, type, and name are required' } });
+    const fetchImpl = makeFetchStub(addTileRoutes({
+      tiles: { ok: false, status: 400, body: { error: 'Tile id, type, and name are required' } },
+    }));
     const result = await runTileAppAddTile({ appId: 'notes', workspaceId: WS, env: STUB_ENV, fetchImpl });
     assert.equal(result.ok, false);
     if (!result.ok) {
