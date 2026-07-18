@@ -198,6 +198,16 @@ function printHelp(): void {
       '  tileapp publish <manifest> [opts]         Submit a SIGNED manifest for marketplace review (POST /v1/publisher/publish).',
       '    [--channel beta|stable]                 Target channel (default: stable).',
       '    [--image-digest <d>]                    Consistency check: must equal the signed manifest image.digest.',
+      '  tileapp install <appId> [opts]            Record an app grant for a workspace (POST /v1/tileapps/:appId/install).',
+      '    --workspace <workspaceId>               Target workspace (required).',
+      '    [--accept-optional <perm>]              Accept an optional permission (repeatable).',
+      '  tileapp add-tile <appId> [opts]           Place an app tile in a workspace (POST /v1/workspaces/:id/tiles).',
+      '    --workspace <workspaceId>               Target workspace (required).',
+      '    [--name <name>]                         Tile display name (default: the app manifest displayName).',
+      '    [--version <v>]                         App version to pin (default: the app\'s current version).',
+      '  mcp scopes [opts]                         Show mintable vs not-mintable MCP scopes for this session (pure read).',
+      '    [--agent <agentId>]                     Agent identity to inspect (default: substrate-cli).',
+      '    [--json]                                Emit {agentId, allowed, denied} as JSON.',
       '  serve <dir> [opts]                        Static file server (decision-preview / Gap 2a).',
       '    [--port <n>]                            Port (default: $PORT, else 3000).',
       '    [--host <h>]                            Bind host (default: 0.0.0.0).',
@@ -819,7 +829,7 @@ function parseRunGetArgs(args: string[]): ParsedRunGetArgs | ParseError {
   return { ok: true, planRunId, workspaceFlag, jsonOutput };
 }
 
-function tileAppUsage(sub: 'sign' | 'publish' | 'validate' | 'dev' | 'init', message: string): number {
+function tileAppUsage(sub: 'sign' | 'publish' | 'validate' | 'dev' | 'init' | 'install' | 'add-tile', message: string): number {
   process.stderr.write(`yolo tileapp ${sub}: ${message}\n`);
   const usage: Record<string, string> = {
     init: 'Usage: yolo tileapp init <name>   (scaffolds ./<name>/tileapp.json + index.html)\n',
@@ -828,9 +838,73 @@ function tileAppUsage(sub: 'sign' | 'publish' | 'validate' | 'dev' | 'init', mes
       + '   or: yolo tileapp publish <manifest.json> [--channel beta|stable] [--image-digest <d>]   (marketplace)\n',
     validate: 'Usage: yolo tileapp validate <manifest.json> [--bundle-dir <dir>]\n',
     dev: 'Usage: yolo tileapp dev <manifest.json> [--port N] [--host H] [--bundle-dir <dir>] [--deny]\n',
+    install: 'Usage: yolo tileapp install <appId> --workspace <workspaceId> [--accept-optional <perm>]...\n',
+    'add-tile': 'Usage: yolo tileapp add-tile <appId> --workspace <workspaceId> [--name <name>] [--version <v>]\n',
   };
   process.stderr.write(usage[sub]);
   return 64;
+}
+
+async function runTileAppInstallCmd(args: string[]): Promise<number> {
+  let appId: string | undefined;
+  let workspaceId: string | undefined;
+  const acceptOptional: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--workspace') { workspaceId = args[++i]; if (workspaceId === undefined) return tileAppUsage('install', '--workspace requires a value'); }
+    else if (a.startsWith('--workspace=')) workspaceId = a.slice('--workspace='.length);
+    else if (a === '--accept-optional') { const v = args[++i]; if (v === undefined) return tileAppUsage('install', '--accept-optional requires a value'); acceptOptional.push(v); }
+    else if (a.startsWith('--accept-optional=')) acceptOptional.push(a.slice('--accept-optional='.length));
+    else if (!a.startsWith('-') && !appId) appId = a;
+    else return tileAppUsage('install', `unexpected argument '${a}'`);
+  }
+  if (!appId || !workspaceId) return tileAppUsage('install', 'an appId and --workspace <workspaceId> are required');
+  const { runTileAppInstall, exitCodeForFailure } = await import('./tileapp-workspace.js');
+  const result = await runTileAppInstall({ appId, workspaceId, acceptOptional });
+  if (result.ok) { process.stdout.write(`${result.output}\n`); return 0; }
+  process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
+  return exitCodeForFailure(result.kind);
+}
+
+async function runTileAppAddTileCmd(args: string[]): Promise<number> {
+  let appId: string | undefined;
+  let workspaceId: string | undefined;
+  let name: string | undefined;
+  let version: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--workspace') { workspaceId = args[++i]; if (workspaceId === undefined) return tileAppUsage('add-tile', '--workspace requires a value'); }
+    else if (a.startsWith('--workspace=')) workspaceId = a.slice('--workspace='.length);
+    else if (a === '--name') { name = args[++i]; if (name === undefined) return tileAppUsage('add-tile', '--name requires a value'); }
+    else if (a.startsWith('--name=')) name = a.slice('--name='.length);
+    else if (a === '--version') { version = args[++i]; if (version === undefined) return tileAppUsage('add-tile', '--version requires a value'); }
+    else if (a.startsWith('--version=')) version = a.slice('--version='.length);
+    else if (!a.startsWith('-') && !appId) appId = a;
+    else return tileAppUsage('add-tile', `unexpected argument '${a}'`);
+  }
+  if (!appId || !workspaceId) return tileAppUsage('add-tile', 'an appId and --workspace <workspaceId> are required');
+  const { runTileAppAddTile, exitCodeForFailure } = await import('./tileapp-workspace.js');
+  const result = await runTileAppAddTile({ appId, workspaceId, name, version });
+  if (result.ok) { process.stdout.write(`${result.output}\n`); return 0; }
+  process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
+  return exitCodeForFailure(result.kind);
+}
+
+async function runMcpScopesCmd(args: string[]): Promise<number> {
+  let agentId: string | undefined;
+  let jsonOutput = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--agent') { agentId = args[++i]; if (agentId === undefined) { process.stderr.write('yolo mcp scopes: --agent requires a value\n'); return 64; } }
+    else if (a.startsWith('--agent=')) agentId = a.slice('--agent='.length);
+    else if (a === '--json') jsonOutput = true;
+    else { process.stderr.write(`yolo mcp scopes: unexpected argument '${a}'\nUsage: yolo mcp scopes [--agent <agentId>] [--json]\n`); return 64; }
+  }
+  const { runMcpScopes, exitCodeForFailure } = await import('./mcp-scopes.js');
+  const result = await runMcpScopes({ agentId, outputFormat: jsonOutput ? 'json' : 'summary' });
+  if (result.ok) { process.stdout.write(`${result.output}\n`); return 0; }
+  process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
+  return exitCodeForFailure(result.kind);
 }
 
 async function runTileAppSignCmd(args: string[]): Promise<number> {
@@ -1394,12 +1468,26 @@ async function main(argv: string[]): Promise<number> {
     if (sub === 'publish') return runTileAppPublishCmd(args.slice(2));
     if (sub === 'validate') return runTileAppValidateCmd(args.slice(2));
     if (sub === 'dev') return runTileAppDevCmd(args.slice(2));
+    if (sub === 'install') return runTileAppInstallCmd(args.slice(2));
+    if (sub === 'add-tile') return runTileAppAddTileCmd(args.slice(2));
     if (!sub) {
-      process.stderr.write('yolo: tileapp requires a subcommand (init, validate, dev, sign, publish)\n');
+      process.stderr.write('yolo: tileapp requires a subcommand (init, validate, dev, sign, publish, install, add-tile)\n');
       return 64;
     }
     process.stderr.write(`yolo: unknown tileapp subcommand '${sub}'\n`);
-    process.stderr.write('Subcommands: init, validate, dev, sign, publish\n');
+    process.stderr.write('Subcommands: init, validate, dev, sign, publish, install, add-tile\n');
+    return 64;
+  }
+
+  if (cmd === 'mcp') {
+    const sub = args[1];
+    if (sub === 'scopes') return runMcpScopesCmd(args.slice(2));
+    if (!sub) {
+      process.stderr.write('yolo: mcp requires a subcommand (scopes)\n');
+      return 64;
+    }
+    process.stderr.write(`yolo: unknown mcp subcommand '${sub}'\n`);
+    process.stderr.write('Subcommands: scopes\n');
     return 64;
   }
 
