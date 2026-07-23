@@ -45,25 +45,32 @@ export interface DeployPendingRecord {
 }
 
 export interface PendingStore {
-  load(projectId: string): DeployPendingRecord | null;
   /**
-   * Persist a staged-ship record. FIRST-WINS: if a non-stale record for a
-   * DIFFERENT shipId already exists (a concurrent prod deploy of the same
-   * project staged first), the existing one is KEPT and this save is a no-op
-   * — returns `false`. Re-saving the SAME shipId (or replacing a stale
-   * record) returns `true`. This prevents a second racing deploy from
-   * silently discarding the first bundle's resume record (codex P2 r6).
+   * All resumable records for a project, NEWEST first. One file per shipId
+   * (see keying note below), so two concurrent same-project deploys each get
+   * their OWN record — neither clobbers the other, and BOTH stay resumable
+   * once approved (codex P2 r7). Malformed files are skipped.
    */
-  save(record: DeployPendingRecord): boolean;
-  /** Remove the record ONLY if its shipId matches — an identity-checked clear so
-   *  a racing deploy can't delete a newer deploy's record (codex P2 r6). */
+  loadAll(projectId: string): DeployPendingRecord[];
+  /**
+   * Persist a staged-ship record. Keyed by (projectId, shipId), so a
+   * concurrent deploy with a different shipId writes a DIFFERENT file —
+   * there is no shared-file race and no lost record (the write itself is a
+   * single atomic file write). Re-saving the same shipId is idempotent.
+   */
+  save(record: DeployPendingRecord): void;
+  /**
+   * Remove a SPECIFIC (projectId, shipId) record, or — when shipId is
+   * omitted — every record for the project. Per-ship keying means a clear can
+   * never delete another concurrent deploy's record.
+   */
   clear(projectId: string, shipId?: string): void;
 }
 
 /** Resume records older than this are stale — the ship session is long gone. */
 export const PENDING_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
-function pendingDir(env: Record<string, string | undefined>): string {
+function pendingRoot(env: Record<string, string | undefined>): string {
   // `||` (not `??`) + os.homedir() fallback (matching auth-context.ts): an
   // unset OR EMPTY HOME must not resolve the store into the CURRENT REPO,
   // where the persisted bundle would surface in `git status` and could ride
@@ -72,60 +79,74 @@ function pendingDir(env: Record<string, string | undefined>): string {
   return path.join(home, '.config', 'yolo', 'deploy-pending');
 }
 
-function pendingPath(env: Record<string, string | undefined>, projectId: string): string {
-  // projectId is server-issued; sanitize anyway so a hostile value can't
-  // escape the directory.
-  return path.join(pendingDir(env), `${projectId.replace(/[^A-Za-z0-9_-]/g, '_')}.json`);
+// server-issued ids; sanitize anyway so a hostile value can't escape the dir.
+const safe = (id: string): string => id.replace(/[^A-Za-z0-9_-]/g, '_');
+
+function projectDir(env: Record<string, string | undefined>, projectId: string): string {
+  return path.join(pendingRoot(env), safe(projectId));
+}
+
+function shipPath(env: Record<string, string | undefined>, projectId: string, shipId: string): string {
+  return path.join(projectDir(env, projectId), `${safe(shipId)}.json`);
+}
+
+function parseRecord(raw: string): DeployPendingRecord | null {
+  try {
+    const parsed = JSON.parse(raw) as DeployPendingRecord;
+    if (
+      parsed?.$version !== 1 ||
+      typeof parsed.shipId !== 'string' ||
+      typeof parsed.bundleDigest !== 'string' ||
+      typeof parsed.approvalId !== 'string'
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
 }
 
 export function defaultPendingStore(env: Record<string, string | undefined>): PendingStore {
   return {
-    load(projectId) {
+    loadAll(projectId) {
+      let names: string[];
       try {
-        const raw = fs.readFileSync(pendingPath(env, projectId), 'utf8');
-        const parsed = JSON.parse(raw) as DeployPendingRecord;
-        if (
-          parsed?.$version !== 1 ||
-          typeof parsed.shipId !== 'string' ||
-          typeof parsed.bundleDigest !== 'string' ||
-          typeof parsed.approvalId !== 'string'
-        ) {
-          return null; // malformed → treat as absent (caller clears + fresh-ships)
-        }
-        return parsed;
+        names = fs.readdirSync(projectDir(env, projectId));
       } catch {
-        return null;
+        return []; // no dir → nothing staged
       }
+      const records: DeployPendingRecord[] = [];
+      for (const name of names) {
+        if (!name.endsWith('.json')) continue;
+        try {
+          const rec = parseRecord(fs.readFileSync(path.join(projectDir(env, projectId), name), 'utf8'));
+          if (rec) records.push(rec);
+        } catch {
+          // unreadable — skip
+        }
+      }
+      return records.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
     },
     save(record) {
-      // First-wins: don't clobber a non-stale record for a DIFFERENT shipId
-      // (a concurrent same-project deploy staged first — its resume record
-      // must survive so its approval stays actionable).
-      const existing = this.load(record.projectId);
-      if (
-        existing &&
-        existing.shipId !== record.shipId &&
-        Date.now() - Date.parse(existing.createdAt) <= PENDING_MAX_AGE_MS
-      ) {
-        return false;
-      }
-      const dir = pendingDir(env);
+      const dir = projectDir(env, record.projectId);
       fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(pendingPath(env, record.projectId), `${JSON.stringify(record, null, 2)}\n`, {
+      fs.writeFileSync(shipPath(env, record.projectId, record.shipId), `${JSON.stringify(record, null, 2)}\n`, {
         mode: 0o600,
       });
-      return true;
     },
     clear(projectId, shipId) {
-      // Identity-checked: a racing deploy must not delete a record that now
-      // belongs to a DIFFERENT shipId. Omitting shipId forces the clear
-      // (used when the caller knows the record is theirs / stale).
       if (shipId !== undefined) {
-        const existing = this.load(projectId);
-        if (existing && existing.shipId !== shipId) return;
+        try {
+          fs.unlinkSync(shipPath(env, projectId, shipId));
+        } catch {
+          // absent — fine
+        }
+        return;
       }
+      // Whole-project clear: remove the dir and everything under it.
       try {
-        fs.unlinkSync(pendingPath(env, projectId));
+        fs.rmSync(projectDir(env, projectId), { recursive: true, force: true });
       } catch {
         // absent — fine
       }

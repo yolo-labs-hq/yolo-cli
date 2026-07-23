@@ -199,27 +199,41 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
   // gpt-5.6-sol P1 round 3). Falls through to a fresh build only when the
   // server says the session/approval is gone.
   if (!dryRun) {
-    const resume = pendingStore.load(projectId);
-    if (resume && resume.env === envFlag) {
-      if (Date.now() - Date.parse(resume.createdAt) > PENDING_MAX_AGE_MS) {
-        pendingStore.clear(projectId, resume.shipId);
-        progress('deploy: staged ship discarded (older than 24h) — building fresh');
-      } else {
-        const resolved = resolveCtx();
-        if (!resolved.ok) return resolved;
-        const resumed = await resumeStagedShip(resolved.ctx, resume, {
-          projectId,
-          slug: config.slug,
-          envFlag,
-          channel,
-          finalizeLeg,
-          pendingStore,
-          progress,
-        });
-        if (resumed) return resumed;
-        // fell through — fresh build below.
+    // Try EVERY staged record for this project+env, newest first — two
+    // concurrent same-project deploys each stage their own record, and either
+    // may be the one the operator granted (codex P2 r7). A record that
+    // finalizes (granted) wins; a still-pending one is remembered; the rest
+    // fall through. Only when NONE finalizes and NONE is still pending do we
+    // build fresh.
+    const staged = pendingStore.loadAll(projectId).filter((r) => r.env === envFlag);
+    let anyStillPending: DeployShipResult | null = null;
+    for (const rec of staged) {
+      if (Date.now() - Date.parse(rec.createdAt) > PENDING_MAX_AGE_MS) {
+        pendingStore.clear(projectId, rec.shipId);
+        progress(`deploy: staged ship ${rec.shipId} discarded (older than 24h)`);
+        continue;
       }
+      const resolved = resolveCtx();
+      if (!resolved.ok) return resolved;
+      const resumed = await resumeStagedShip(resolved.ctx, rec, {
+        projectId,
+        slug: config.slug,
+        envFlag,
+        channel,
+        finalizeLeg,
+        pendingStore,
+        progress,
+      });
+      if (!resumed) continue; // this record not resumable (cleared) — try the next
+      // A live finalize, a denial, or the ambiguous upload-expired are all
+      // terminal answers about a real staged ship — return immediately.
+      if (resumed.ok || resumed.kind !== 'awaiting-approval') return resumed;
+      // Still awaiting the grant — remember it, but keep checking the others
+      // (a LATER record may already be granted).
+      anyStillPending = resumed;
     }
+    if (anyStillPending) return anyStillPending;
+    // No staged record finalized or is pending → build fresh below.
   }
 
   // 2. Detect.
@@ -337,7 +351,7 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
       // orphan the grant). Best-effort: a failed save just means the rerun
       // rebuilds — same as before this existed.
       try {
-        const saved = pendingStore.save({
+        pendingStore.save({
           $version: 1,
           projectId,
           shipId,
@@ -359,11 +373,7 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
             : {}),
           ...(bundled.sourceMap ? { sourceMap: bundled.sourceMap } : {}),
         });
-        progress(
-          saved
-            ? 'deploy: staged bundle saved — a rerun after the grant resumes this exact bundle (no rebuild)'
-            : 'deploy: another concurrent deploy already staged this project; its bundle is the resumable one (this one needs its own approval + rerun)',
-        );
+        progress('deploy: staged bundle saved — a rerun after the grant resumes this exact bundle (no rebuild)');
       } catch (err) {
         progress(`deploy: warn — could not save the staged-ship resume record (${describeErrorMessage(err)}); a rerun will rebuild`);
       }

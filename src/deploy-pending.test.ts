@@ -39,65 +39,74 @@ beforeEach(() => {
 afterEach(() => fs.rmSync(home, { recursive: true, force: true }));
 
 describe('deploy-pending — round-trip + location', () => {
-  it('saves under ~/.config/yolo/deploy-pending and round-trips', () => {
+  it('saves under ~/.config/yolo/deploy-pending/<project>/<ship>.json and round-trips', () => {
     const store = defaultPendingStore(env);
     const rec = record();
-    assert.equal(store.save(rec), true);
-    const onDisk = path.join(home, '.config', 'yolo', 'deploy-pending', 'hp_1.json');
+    store.save(rec);
+    const onDisk = path.join(home, '.config', 'yolo', 'deploy-pending', 'hp_1', 'shp_a.json');
     assert.ok(fs.existsSync(onDisk));
-    assert.deepEqual(store.load('hp_1'), rec);
+    assert.deepEqual(store.loadAll('hp_1'), [rec]);
   });
 
   it('empty HOME falls back to os.homedir() — never resolves into cwd (codex P2 r5)', () => {
     const store = defaultPendingStore({ HOME: '' });
-    // The path must be absolute (under the OS home), not a relative ./.config.
-    // We assert indirectly: saving must not create a ./.config in cwd.
+    // Saving must not create a repo-local ./.config (a relative path would).
     const before = fs.existsSync(path.join(process.cwd(), '.config'));
     store.save(record({ projectId: 'hp_home_test' }));
     const after = fs.existsSync(path.join(process.cwd(), '.config'));
     assert.equal(after, before); // no repo-local dir appeared
-    // clean up the real-home artifact we just wrote
-    store.clear('hp_home_test');
+    store.clear('hp_home_test'); // clean up the real-home artifact
   });
 });
 
-describe('deploy-pending — concurrency guards', () => {
-  it('save is FIRST-WINS: a non-stale record for a different shipId is not clobbered', () => {
+describe('deploy-pending — per-ship multi-record concurrency (codex P2 r7)', () => {
+  it('two concurrent same-project deploys keep BOTH records (no clobber)', () => {
     const store = defaultPendingStore(env);
-    assert.equal(store.save(record({ shipId: 'shp_first' })), true);
-    assert.equal(store.save(record({ shipId: 'shp_second' })), false);
-    assert.equal(store.load('hp_1')?.shipId, 'shp_first');
+    store.save(record({ shipId: 'shp_first', approvalId: 'apr_1' }));
+    store.save(record({ shipId: 'shp_second', approvalId: 'apr_2' }));
+    const all = store.loadAll('hp_1');
+    assert.equal(all.length, 2);
+    assert.deepEqual(all.map((r) => r.shipId).sort(), ['shp_first', 'shp_second']);
   });
 
-  it('save DOES replace the same shipId (idempotent re-save)', () => {
+  it('loadAll returns NEWEST first', () => {
     const store = defaultPendingStore(env);
-    store.save(record({ shipId: 'shp_x' }));
-    assert.equal(store.save(record({ shipId: 'shp_x', approvalId: 'apr_2' })), true);
-    assert.equal(store.load('hp_1')?.approvalId, 'apr_2');
+    const older = new Date(Date.now() - 60_000).toISOString();
+    store.save(record({ shipId: 'shp_old', createdAt: older }));
+    store.save(record({ shipId: 'shp_new' }));
+    assert.equal(store.loadAll('hp_1')[0]?.shipId, 'shp_new');
   });
 
-  it('a fresh different shipId REPLACES a STALE (>24h) existing record', () => {
+  it('re-saving the same shipId is idempotent (overwrites in place)', () => {
     const store = defaultPendingStore(env);
-    const staleTime = new Date(Date.now() - PENDING_MAX_AGE_MS - 1000).toISOString();
-    store.save(record({ shipId: 'shp_old', createdAt: staleTime }));
-    assert.equal(store.load('hp_1')?.shipId, 'shp_old'); // present but stale
-    assert.equal(store.save(record({ shipId: 'shp_new' })), true); // stale → replaceable
-    assert.equal(store.load('hp_1')?.shipId, 'shp_new');
+    store.save(record({ shipId: 'shp_x', approvalId: 'apr_1' }));
+    store.save(record({ shipId: 'shp_x', approvalId: 'apr_2' }));
+    const all = store.loadAll('hp_1');
+    assert.equal(all.length, 1);
+    assert.equal(all[0]?.approvalId, 'apr_2');
   });
 
-  it('clear is IDENTITY-CHECKED: a mismatched shipId does not delete a newer record', () => {
+  it('clear(projectId, shipId) removes ONLY that ship — a concurrent record survives', () => {
     const store = defaultPendingStore(env);
-    store.save(record({ shipId: 'shp_current' }));
-    store.clear('hp_1', 'shp_stale'); // a racing deploy's stale id
-    assert.ok(store.load('hp_1'), 'record must survive a mismatched clear');
-    store.clear('hp_1', 'shp_current'); // the real owner clears
-    assert.equal(store.load('hp_1'), null);
+    store.save(record({ shipId: 'shp_a' }));
+    store.save(record({ shipId: 'shp_b' }));
+    store.clear('hp_1', 'shp_a');
+    assert.deepEqual(store.loadAll('hp_1').map((r) => r.shipId), ['shp_b']);
   });
 
-  it('clear with no shipId forces removal', () => {
+  it('clear with no shipId removes every record for the project', () => {
     const store = defaultPendingStore(env);
-    store.save(record());
+    store.save(record({ shipId: 'shp_a' }));
+    store.save(record({ shipId: 'shp_b' }));
     store.clear('hp_1');
-    assert.equal(store.load('hp_1'), null);
+    assert.deepEqual(store.loadAll('hp_1'), []);
+  });
+
+  it('a malformed record file is skipped, not fatal', () => {
+    const store = defaultPendingStore(env);
+    store.save(record({ shipId: 'shp_ok' }));
+    const dir = path.join(home, '.config', 'yolo', 'deploy-pending', 'hp_1');
+    fs.writeFileSync(path.join(dir, 'shp_bad.json'), '{not json');
+    assert.deepEqual(store.loadAll('hp_1').map((r) => r.shipId), ['shp_ok']);
   });
 });

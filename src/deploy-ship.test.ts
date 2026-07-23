@@ -397,24 +397,33 @@ describe('deploy-ship — failures', () => {
 
 // ─── Awaiting approval (T3 prod gate) + staged-ship resume ────────────────
 
-/** In-memory PendingStore seam. */
+/**
+ * In-memory PendingStore seam. Keyed by `${projectId}:${shipId}` to mirror the
+ * real per-ship store. The tests seed at most one record per project, so the
+ * `records` handle exposes per-project lookup helpers for assertions.
+ */
 function memoryPendingStore(seed: Record<string, DeployPendingRecord> = {}) {
-  const records = new Map<string, DeployPendingRecord>(Object.entries(seed));
+  const byKey = new Map<string, DeployPendingRecord>();
+  for (const [projectId, rec] of Object.entries(seed)) byKey.set(`${projectId}:${rec.shipId}`, rec);
   const store: PendingStore = {
-    load: (projectId) => records.get(projectId) ?? null,
-    save: (record) => {
-      const existing = records.get(record.projectId);
-      if (existing && existing.shipId !== record.shipId && Date.now() - Date.parse(existing.createdAt) <= 24 * 60 * 60 * 1000) {
-        return false;
-      }
-      records.set(record.projectId, record);
-      return true;
-    },
+    loadAll: (projectId) =>
+      [...byKey.values()]
+        .filter((r) => r.projectId === projectId)
+        .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)),
+    save: (record) => void byKey.set(`${record.projectId}:${record.shipId}`, record),
     clear: (projectId, shipId) => {
-      const existing = records.get(projectId);
-      if (shipId !== undefined && existing && existing.shipId !== shipId) return;
-      records.delete(projectId);
+      if (shipId !== undefined) {
+        byKey.delete(`${projectId}:${shipId}`);
+        return;
+      }
+      for (const key of [...byKey.keys()]) if (key.startsWith(`${projectId}:`)) byKey.delete(key);
     },
+  };
+  // Per-project assertion helpers (tests use one record per project).
+  const records = {
+    get: (projectId: string) => [...byKey.values()].find((r) => r.projectId === projectId),
+    has: (projectId: string) => [...byKey.values()].some((r) => r.projectId === projectId),
+    all: (projectId: string) => [...byKey.values()].filter((r) => r.projectId === projectId),
   };
   return { store, records };
 }
@@ -597,6 +606,41 @@ describe('deploy-ship — staged-ship resume (approval round-trip)', () => {
     assert.equal(result.ok, true);
     assert.deepEqual(finalizeShipIds, ['shp_77']);
     assert.equal(records.has('hp_8f3a'), true); // untouched — still resumable for prod
+  });
+
+  it('TWO staged records (concurrent deploys): resumes whichever is GRANTED, leaves the still-pending one (codex P2 r7)', async () => {
+    const { store, records } = memoryPendingStore();
+    // Newest-first ordering: shp_new is tried first (still pending), then
+    // shp_old (granted) finalizes and wins.
+    store.save({ ...pendingRecord({ shipId: 'shp_old', approvalId: 'apr_old' }), createdAt: new Date(Date.now() - 60_000).toISOString() });
+    store.save(pendingRecord({ shipId: 'shp_new', approvalId: 'apr_new' }));
+    const { deps } = makeDeps({
+      finalizeShipImpl: async (_ctx, _projectId, shipId) =>
+        shipId === 'shp_old'
+          ? { ok: true, value: { releaseId: 'rel_old', url: 'https://my-app.yolo.host', status: 'live' } }
+          : { ok: false, kind: 'approval-pending', message: 'awaiting operator decision', status: 409 },
+    });
+    deps.pendingStoreImpl = store;
+    const result = await runShip(deps, { envFlag: 'prod' }).promise;
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal(result.releaseId, 'rel_old');
+    // The granted one was cleared; the still-pending one survives.
+    assert.deepEqual(records.all('hp_8f3a').map((r) => r.shipId), ['shp_new']);
+  });
+
+  it('TWO staged records both still pending → PENDING (not a fresh ship), both records kept', async () => {
+    const { store, records } = memoryPendingStore();
+    store.save(pendingRecord({ shipId: 'shp_1' }));
+    store.save(pendingRecord({ shipId: 'shp_2' }));
+    const { deps, recorded } = makeDeps({
+      finalizeShipImpl: async () => ({ ok: false, kind: 'approval-pending', message: 'awaiting', status: 409 }),
+    });
+    deps.pendingStoreImpl = store;
+    const result = await runShip(deps, { envFlag: 'prod' }).promise;
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.kind, 'awaiting-approval');
+    assert.equal(recorded.startCalls.length, 0); // did NOT build fresh
+    assert.equal(records.all('hp_8f3a').length, 2);
   });
 });
 
