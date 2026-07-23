@@ -664,6 +664,24 @@ describe('deploy-ship — staged-ship resume (approval round-trip)', () => {
     assert.deepEqual(records.all('hp_8f3a'), []); // both purged
   });
 
+  it('a record a concurrent deploy saves DURING the resume finalize is ALSO purged (re-load at purge time, codex P1 r19)', async () => {
+    const { store, records } = memoryPendingStore({ hp_8f3a: pendingRecord({ shipId: 'shp_a', approvalId: 'apr_a' }) });
+    const { deps } = makeDeps({
+      finalizeShipImpl: async (_ctx, _projectId, shipId) => {
+        // Simulate a concurrent deploy parking its OWN record mid-finalize —
+        // it is NOT in the pre-finalize `staged` snapshot.
+        store.save(pendingRecord({ shipId: 'shp_concurrent', approvalId: 'apr_c' }));
+        return { ok: true, value: { releaseId: `rel_${shipId}`, url: 'https://my-app.yolo.host', status: 'live' } };
+      },
+    });
+    deps.pendingStoreImpl = store;
+    const result = await runShip(deps, { envFlag: 'prod' }).promise;
+    assert.equal(result.ok, true);
+    // The concurrent record must be purged too — else a later deploy resumes it
+    // and rolls prod back to the stale bundle.
+    assert.deepEqual(records.all('hp_8f3a'), []);
+  });
+
   it('TWO staged records both still pending → PENDING (not a fresh ship), both records kept', async () => {
     const { store, records } = memoryPendingStore();
     store.save(pendingRecord({ shipId: 'shp_1' }));

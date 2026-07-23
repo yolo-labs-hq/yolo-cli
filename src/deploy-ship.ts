@@ -230,9 +230,14 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
         // project+env is now stale — auto-resuming one on a future
         // `yolo deploy` would unexpectedly repoint prod to a prior concurrent
         // attempt's bundle (codex P1 r11). Purge the whole set so the next
-        // deploy builds CURRENT code. (resumeStagedShip already cleared `rec`.)
-        for (const other of staged) {
-          if (other.shipId !== rec.shipId) pendingStore.clear(projectId, other.shipId);
+        // deploy builds CURRENT code. Re-load at purge time (NOT the
+        // pre-finalize `staged` snapshot) so a record a CONCURRENT deploy saved
+        // DURING this resume's finalize is cleared too (codex P1 r19).
+        // (resumeStagedShip already cleared `rec`.)
+        for (const other of pendingStore.loadAll(projectId)) {
+          if (other.env === envFlag && other.shipId !== rec.shipId) {
+            pendingStore.clear(projectId, other.shipId);
+          }
         }
         return resumed;
       }
