@@ -459,7 +459,8 @@ describe('deploy-ship — formatters', () => {
     assert.ok(text.startsWith('PENDING [awaiting-approval]: prod ship of my-app (release-candidate rel_0193)'));
     assert.ok(!text.includes('FAIL'));
     assert.ok(text.includes('https://studio.yolo.dev/approvals/apr_55'));
-    assert.ok(text.includes('do NOT rerun `yolo deploy`'));
+    assert.ok(text.includes('rerun `yolo deploy` ONCE'));
+    assert.ok(text.includes('Do NOT loop reruns'));
     assert.ok(text.includes('yolo deploy status'));
   });
 

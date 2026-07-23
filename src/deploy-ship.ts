@@ -380,8 +380,11 @@ export function formatShipSuccess(result: DeployShipSuccess): string {
 }
 
 /**
- * Two independent "do not retry" signals: the PENDING prefix (not FAIL) and
- * exit 3 — so neither prefix-matching nor exit-code-matching agents loop.
+ * Two independent "not-an-error, don't blind-loop" signals: the PENDING
+ * prefix (not FAIL) and exit 3. The correct resume is ONE re-run AFTER the
+ * grant — the server redeems the granted approval automatically for the same
+ * bundle (exact-digest match), and staged assets hash-skip so the re-run is
+ * cheap. Re-running before the grant just re-issues this PENDING.
  */
 export function formatPending(result: DeployShipPending): string {
   const name = result.slug ?? result.projectId;
@@ -392,7 +395,9 @@ export function formatPending(result: DeployShipPending): string {
   return [
     `PENDING [awaiting-approval]: prod ship of ${name}${releaseTag} needs operator confirmation.`,
     approveLine,
-    '  then: poll `yolo deploy status` — do NOT rerun `yolo deploy`; the bundle is already staged.',
+    '  then: once granted (poll `yolo deploy status` / deploy.approval_status), rerun `yolo deploy` ONCE —',
+    '  the grant is redeemed automatically for this bundle and unchanged assets are not re-uploaded.',
+    '  Do NOT loop reruns while the approval is still pending.',
   ].join('\n');
 }
 

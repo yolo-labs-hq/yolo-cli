@@ -14,8 +14,9 @@
  *     final JSON object on stdout is the machine-readable result).
  *   - Failures: single structured stderr line `FAIL [<reason>]: <msg> | hint: …`
  *   - awaiting-approval: `PENDING [awaiting-approval]: …` (NOT FAIL) + exit 3
- *     + the approval URL + the "do NOT rerun" hint. Two independent signals
- *     so neither prefix-matching nor exit-code-matching agents retry-loop.
+ *     + the approval URL + the resume hint (rerun ONCE after the grant — the
+ *     server redeems it automatically; don't loop while pending). Two
+ *     independent signals so agents don't blind retry-loop.
  *
  * Exit codes are EXACTLY spec §5 via deploy-ship's `exitCodeForFailure`:
  * 0 ok / 64 usage / 78 env / 1 local / 2 backend-rejected / 3 pending / 4 network.
@@ -249,7 +250,7 @@ async function runShipCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
       io.out(
         `${formatJsonResult({
           ...result,
-          hint: "poll 'yolo deploy status'; do NOT rerun 'yolo deploy' — the bundle is already staged",
+          hint: "once granted, rerun 'yolo deploy' ONCE — the grant is redeemed automatically for this bundle; do NOT loop reruns while pending (poll 'yolo deploy status')",
         })}\n`,
       );
     } else {
