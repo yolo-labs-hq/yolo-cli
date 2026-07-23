@@ -3,7 +3,7 @@
  * (docs/MANAGED_HOSTING_CLI_SPEC.md §1).
  *
  *   yolo deploy [--env <staging|prod>] [--dry-run] [--json]   ← bare = ship
- *   yolo deploy init [--slug <slug>] [--type <static|worker>]
+ *   yolo deploy init [--slug <slug>] [--type <static|worker>] [--json]
  *   yolo deploy status [--json]
  *   yolo deploy logs [--tail] [--since <dur>] [--json]
  *   yolo deploy rollback [releaseId] [--json]
@@ -116,7 +116,7 @@ export interface DeployCliDeps {
 
 const USAGE = [
   'Usage: yolo deploy [--env <staging|prod>] [--dry-run] [--json]',
-  '       yolo deploy init [--slug <slug>] [--type <static|worker>]',
+  '       yolo deploy init [--slug <slug>] [--type <static|worker>] [--json]',
   '       yolo deploy link (--project-id <id> | --slug <slug>) [--type <static|worker>]',
   '       yolo deploy validate [--json]',
   '       yolo deploy doctor [--json]',
@@ -267,15 +267,19 @@ interface ParsedInitArgs {
   ok: true;
   slug?: string;
   type?: 'static' | 'worker';
+  jsonOutput: boolean;
 }
 
 export function parseInitArgs(args: string[]): ParsedInitArgs | ParseError {
   let slug: string | undefined;
   let type: 'static' | 'worker' | undefined;
+  let jsonOutput = false;
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
-    if (a === '--slug') {
+    if (a === '--json') {
+      jsonOutput = true;
+    } else if (a === '--slug') {
       const v = args[++i];
       if (!v || v.startsWith('--')) return { ok: false, message: '--slug requires a value' };
       slug = v;
@@ -296,13 +300,13 @@ export function parseInitArgs(args: string[]): ParsedInitArgs | ParseError {
       return { ok: false, message: `unexpected positional argument: ${a}` };
     }
   }
-  return { ok: true, slug, type };
+  return { ok: true, slug, type, jsonOutput };
 }
 
 async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Promise<number> {
   const parsed = parseInitArgs(args);
   if (!parsed.ok) {
-    io.err(`yolo deploy init: ${parsed.message}\nUsage: yolo deploy init [--slug <slug>] [--type <static|worker>]\n`);
+    io.err(`yolo deploy init: ${parsed.message}\nUsage: yolo deploy init [--slug <slug>] [--type <static|worker>] [--json]\n`);
     return 64;
   }
   const cwd = deps.cwd ?? process.cwd();
@@ -312,7 +316,8 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
   const readResult = readConfig(cwd);
   if (!readResult.ok) {
     // Never silently clobber a malformed/invalid link file.
-    io.err(`${formatFail({ kind: readResult.kind, message: readResult.message })}\n`);
+    const failure = { kind: readResult.kind, message: readResult.message };
+    io.err(parsed.jsonOutput ? `${formatJsonResult(failure)}\n` : `${formatFail(failure)}\n`);
     return exitCodeForFailure(readResult.kind);
   }
   const existing: DeployConfig | null = readResult.config;
@@ -320,7 +325,9 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
     // Idempotent: a committed link means future sessions ship to the SAME
     // project instead of forking a new slug — never silently re-create.
     io.out(
-      `OK: already linked to project ${existing.projectId}${existing.slug ? ` (slug ${existing.slug})` : ''} — .yolo/deploy.json left unchanged\n`,
+      parsed.jsonOutput
+        ? `${formatJsonResult({ status: 'already-linked', projectId: existing.projectId, ...(existing.slug ? { slug: existing.slug } : {}) })}\n`
+        : `OK: already linked to project ${existing.projectId}${existing.slug ? ` (slug ${existing.slug})` : ''} — .yolo/deploy.json left unchanged\n`,
     );
     return 0;
   }
@@ -333,7 +340,8 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
 
   const auth = resolveAuth(deps);
   if (!auth.ok) {
-    io.err(`${formatFail({ kind: 'auth', message: auth.message })}\n`);
+    const failure = { kind: 'auth', message: auth.message };
+    io.err(parsed.jsonOutput ? `${formatJsonResult(failure)}\n` : `${formatFail({ kind: 'auth', message: auth.message })}\n`);
     return 78;
   }
 
@@ -368,13 +376,21 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
             cwd,
             writeConfig,
             io,
-            { projectId, slug: str(owned!.slug) ?? takenSlug, type: parsed.type, existing, adapted },
+            {
+              projectId,
+              slug: str(owned!.slug) ?? takenSlug,
+              type: parsed.type,
+              existing,
+              adapted,
+              jsonOutput: parsed.jsonOutput,
+              jsonStatus: 'linked-existing',
+            },
             `OK: slug '${takenSlug}' was already yours — linked existing project ${projectId} — wrote .yolo/deploy.json`,
           );
         }
       }
     }
-    io.err(`${formatFail(created)}\n`);
+    io.err(parsed.jsonOutput ? `${formatJsonResult(created)}\n` : `${formatFail(created)}\n`);
     return exitCodeForFailure(created.kind);
   }
 
@@ -383,7 +399,8 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
   const projectId = resolveProjectId(project);
   const slug = str(project.slug) ?? parsed.slug;
   if (!projectId) {
-    io.err(`${formatFail({ kind: 'invalid-response', message: 'create-project response missing a project id' })}\n`);
+    const failure = { kind: 'invalid-response', message: 'create-project response missing a project id' };
+    io.err(parsed.jsonOutput ? `${formatJsonResult(failure)}\n` : `${formatFail(failure)}\n`);
     return 2;
   }
 
@@ -391,7 +408,7 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
     cwd,
     writeConfig,
     io,
-    { projectId, slug, type: parsed.type, existing, adapted },
+    { projectId, slug, type: parsed.type, existing, adapted, jsonOutput: parsed.jsonOutput, jsonStatus: 'created' },
     `OK: linked project ${projectId}${slug ? ` (slug ${slug})` : ''} — wrote .yolo/deploy.json`,
   );
 }
@@ -1829,6 +1846,9 @@ function writeLinkFile(
     type?: 'static' | 'worker';
     existing?: DeployConfig | null;
     adapted?: { config: Partial<DeployConfig>; sourceFile: string; migrated: string[]; warnings: string[] };
+    /** `--json` mode: emit one machine-readable object instead of OK/note lines. */
+    jsonOutput?: boolean;
+    jsonStatus?: 'created' | 'linked-existing';
   },
   message: string,
 ): number {
@@ -1846,10 +1866,28 @@ function writeLinkFile(
   try {
     writeConfig(cwd, config);
   } catch (err) {
-    io.err(
-      `${formatFail({ kind: 'config-write-failed', message: `failed to write .yolo/deploy.json: ${describeError(err)}` })}\n`,
-    );
+    const failure = {
+      kind: 'config-write-failed',
+      message: `failed to write .yolo/deploy.json: ${describeError(err)}`,
+    };
+    io.err(params.jsonOutput ? `${formatJsonResult(failure)}\n` : `${formatFail(failure)}\n`);
     return 1;
+  }
+  if (params.jsonOutput) {
+    io.out(
+      `${formatJsonResult({
+        status: params.jsonStatus ?? 'created',
+        projectId: params.projectId,
+        ...(params.slug ? { slug: params.slug } : {}),
+        ...(params.type ? { type: params.type } : {}),
+        configPath: '.yolo/deploy.json',
+        ...(params.adapted
+          ? { adapted: { sourceFile: params.adapted.sourceFile, migrated: params.adapted.migrated, warnings: params.adapted.warnings } }
+          : {}),
+        note: '.yolo/deploy.json is committed by design; it contains no secrets — commit it so future sessions, teammates, and CI ship to the same project.',
+      })}\n`,
+    );
+    return 0;
   }
   io.out(`${message}\n`);
   if (params.adapted) {

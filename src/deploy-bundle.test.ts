@@ -146,6 +146,46 @@ describe('deploy-bundle — static asset manifest', () => {
     }
   });
 
+  it('root-dir ship excludes top-level LANE.md/README.md/*.test.js with a warning; nested copies still ship', async () => {
+    const tmp = makeTmpDir();
+    writeTree(tmp, {
+      'index.html': '<html/>',
+      'app.js': 'code',
+      'engine.test.js': 'nope',
+      'Engine.Test.TS': 'nope',
+      'LANE.md': 'nope',
+      'README.md': 'nope',
+      'readme.md': 'nope-too',
+      'docs/README.md': 'ships — nested, not top-level',
+      'sub/unit.test.js': 'ships — exclusion is top-level only',
+    });
+    // readme.md + README.md collide on case-insensitive filesystems; tolerate either surviving as writes.
+    const res = await bundleProject({ type: 'static', assetsDir: '.' }, tmp);
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      const keys = Object.keys(res.manifest).sort();
+      assert.deepEqual(keys, ['/app.js', '/docs/README.md', '/index.html', '/sub/unit.test.js']);
+      assert.equal(res.warnings.filter((w) => w.startsWith('root-dir ship: excluded')).length, 1);
+      const warn = res.warnings.find((w) => w.startsWith('root-dir ship: excluded'))!;
+      assert.ok(warn.includes('LANE.md') && warn.includes('engine.test.js'), warn);
+    }
+  });
+
+  it('explicit dist/ ships keep README.md and *.test.js untouched (no root-ship excludes)', async () => {
+    const tmp = makeTmpDir();
+    writeTree(tmp, {
+      'dist/index.html': '<html/>',
+      'dist/README.md': 'ships',
+      'dist/engine.test.js': 'ships',
+    });
+    const res = await bundleProject(STATIC_SHAPE, tmp);
+    assert.equal(res.ok, true);
+    if (res.ok) {
+      assert.deepEqual(Object.keys(res.manifest).sort(), ['/README.md', '/engine.test.js', '/index.html']);
+      assert.equal(res.warnings.some((w) => w.startsWith('root-dir ship')), false);
+    }
+  });
+
   it('excludes a symlink that escapes the asset root, includes one that stays inside (codex P1 r12)', async () => {
     const tmp = makeTmpDir();
     writeTree(tmp, {

@@ -354,6 +354,12 @@ export async function bundleProject(
   const assetsDir = shape.assetsDir;
   if (assetsDir !== undefined) {
     const rootAbs = path.resolve(cwd, assetsDir);
+    // Root-dir ships (assetsDir == the project root) serve whatever the walk
+    // finds — which for repo-rooted static sites includes tests, README, and
+    // the substrate's LANE.md. Those are excluded at the TOP level only:
+    // a deliberately-shipped docs/README.md deeper in the tree still ships.
+    const isRootShip = rootAbs === path.resolve(cwd);
+    const rootShipSkipped: string[] = [];
     let rootStat;
     try {
       rootStat = statSync(rootAbs);
@@ -370,6 +376,10 @@ export async function bundleProject(
     }
 
     for (const relPosix of walkAssetFiles(rootAbs)) {
+      if (isRootShip && !relPosix.includes('/') && isRootShipExcludedName(relPosix)) {
+        rootShipSkipped.push(relPosix);
+        continue;
+      }
       const absPath = path.join(rootAbs, ...relPosix.split('/'));
       const size = statSync(absPath).size;
 
@@ -405,6 +415,13 @@ export async function bundleProject(
       manifest[manifestPath] = { hash, size };
       assetPaths[manifestPath] = absPath;
       assets.push({ path: manifestPath, hash, size, absPath });
+    }
+    if (rootShipSkipped.length > 0) {
+      warnings.push(
+        `root-dir ship: excluded ${rootShipSkipped.sort().join(', ')} from the public bundle ` +
+          `(tests, README, and lane files don't ship from a repo-root assets dir; ` +
+          `use a dist/ publish dir to control exactly what ships)`,
+      );
     }
   } else if (shape.type === 'static') {
     // Type system prevents this (static requires assetsDir), but guard anyway.
@@ -682,6 +699,20 @@ async function buildWorkerModule(
   }
 
   return { ok: true, module: { name, contents }, source, ...(sourceMap ? { sourceMap } : {}) };
+}
+
+/**
+ * Top-level names excluded from a ROOT-DIR ship (assetsDir == project root).
+ * Repo-rooted static sites otherwise serve their tests, README, and the
+ * substrate's LANE.md publicly (2026-07-22 field report). Applies ONLY at the
+ * top level of a root ship — never inside an explicit dist/public dir, and a
+ * nested docs/README.md still ships. (`.yolo/` and other dot-entries are
+ * already dropped by the dotfile rule in walkAssetFiles.)
+ */
+function isRootShipExcludedName(name: string): boolean {
+  if (name === 'LANE.md') return true;
+  if (name.toLowerCase() === 'readme.md') return true;
+  return /\.test\.(js|mjs|cjs|ts|tsx|jsx)$/i.test(name);
 }
 
 /**

@@ -705,6 +705,41 @@ describe('deploy-cli — init', () => {
     assert.match(out, /committed by design; it contains no secrets/);
   });
 
+  it('--json emits a machine-readable created object (progress-free stdout)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['init', '--slug', 'my-app', '--json'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => linked(null),
+        createProjectImpl: async () => ({ ok: true, value: { project: { id: 'hp_8f3a', slug: 'my-app' } } }),
+        writeDeployConfigImpl: () => CONFIG_PATH,
+      }),
+    );
+    assert.equal(code, 0);
+    const payload = JSON.parse(io.stdout.join(''));
+    assert.equal(payload.status, 'created');
+    assert.equal(payload.projectId, 'hp_8f3a');
+    assert.equal(payload.slug, 'my-app');
+    assert.equal(payload.configPath, '.yolo/deploy.json');
+    assert.match(payload.note, /committed by design/);
+  });
+
+  it('--json reports already-linked idempotently without rewriting', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['init', '--json'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => linked({ $version: 1, projectId: 'hp_old', slug: 'kept' }),
+        writeDeployConfigImpl: () => {
+          throw new Error('must not rewrite an existing link');
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    const payload = JSON.parse(io.stdout.join(''));
+    assert.deepEqual(payload, { status: 'already-linked', projectId: 'hp_old', slug: 'kept' });
+  });
+
   it('adapts an existing wrangler.json into the written .yolo/deploy.json on a fresh init', async () => {
     const io = makeIo();
     const written: Array<{ config: Record<string, unknown> }> = [];
