@@ -517,27 +517,31 @@ async function resumeStagedShip(
     return clientFail(finalized as DeployClientFailure);
   }
 
-  // upload-expired is AMBIGUOUS on a resume (codex P2 r4): the session is
-  // finished — either it genuinely lapsed, OR a prior resume finalize
-  // SUCCEEDED server-side and its response was lost (the open→finalized CAS
-  // then answers every retry with upload-expired). Auto-rebuilding here could
-  // duplicate a release that is already live (and re-mint approvals). Match
-  // finalizeShip's lost-response contract: clear the record, surface the
-  // failure, and direct the caller to check status before rerunning.
-  if (finalized.kind === 'upload-expired') {
+  // AMBIGUOUS-on-resume outcomes — the staged session/grant may have been
+  // completed by a CONCURRENT retry that's still finalizing or already went
+  // live, so auto-rebuilding could duplicate a live release / re-mint the
+  // approval. Surface and require a status check; never rebuild automatically.
+  //   - upload-expired  (codex P2 r4): the open→finalized CAS answers every
+  //     retry of an already-finalized session with 410 — a prior resume may
+  //     have gone live with a lost response.
+  //   - approval-consumed (codex P2 r14): two post-grant retries raced; the
+  //     WINNER consumed the nonce and may still be finalizing, the LOSER lands
+  //     here. The deployment is (being) applied — a fresh ship would orphan a
+  //     session and re-apply the same bundle.
+  if (finalized.kind === 'upload-expired' || finalized.kind === 'approval-consumed') {
     pendingStore.clear(projectId, resume.shipId);
     return {
       ok: false,
-      kind: 'upload-expired',
-      message: `staged ship ${resume.shipId} is finished or lapsed — a prior resume may have already gone live`,
+      kind: finalized.kind,
+      message: `staged ship ${resume.shipId} is finished or already being applied by a concurrent retry — a prior resume may have gone live`,
       hint: "run 'yolo deploy status' first: if the release is live you are done; otherwise rerun 'yolo deploy' for a fresh ship",
-      status: 410,
+      status: finalized.kind === 'upload-expired' ? 410 : 409,
     };
   }
 
-  // Everything else (approval-expired/-consumed/-required, bundle-invalid, …):
-  // the staged grant is gone but nothing finalized — fall back to a fresh
-  // build+ship, which re-enters the normal approval flow if needed.
+  // Everything else (approval-expired/-required, bundle-invalid, …): the staged
+  // grant is gone but nothing finalized — fall back to a fresh build+ship,
+  // which re-enters the normal approval flow if needed.
   pendingStore.clear(projectId, resume.shipId);
   progress(
     `deploy: staged ship not resumable (${finalized.kind}: ${finalized.message}) — building fresh`,

@@ -556,6 +556,22 @@ describe('deploy-ship — staged-ship resume (approval round-trip)', () => {
     assert.equal(records.has('hp_8f3a'), false); // cleared — next run fresh-ships deliberately
   });
 
+  it('approval-consumed on resume is AMBIGUOUS (a concurrent retry won the nonce, may be mid-finalize) → surfaced + cleared, NO auto-rebuild (codex P2 r14)', async () => {
+    const { store, records } = memoryPendingStore({ hp_8f3a: pendingRecord() });
+    const { deps, recorded } = makeDeps({
+      finalizeShipImpl: async () => ({ ok: false, kind: 'approval-consumed', message: 'already used', status: 409 }),
+    });
+    deps.pendingStoreImpl = store;
+    const result = await runShip(deps, { envFlag: 'prod' }).promise;
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.kind, 'approval-consumed');
+      assert.match(String((result as { hint?: string }).hint), /yolo deploy status/);
+    }
+    assert.equal(recorded.startCalls.length, 0); // NO fresh pipeline — would orphan/duplicate
+    assert.equal(records.has('hp_8f3a'), false);
+  });
+
   it('a dead grant with an OPEN session (approval-expired) still falls through to a fresh ship', async () => {
     const { store, records } = memoryPendingStore({ hp_8f3a: pendingRecord() });
     let finalizeCall = 0;
