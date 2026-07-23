@@ -54,10 +54,11 @@ export interface PendingStore {
 export const PENDING_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 function pendingDir(env: Record<string, string | undefined>): string {
-  // os.homedir() fallback (matching auth-context.ts): an empty HOME must not
-  // resolve the store into the CURRENT REPO, where the persisted bundle would
-  // surface in `git status` and could ride a `git add -A` (codex P2 r4).
-  const home = env.HOME ?? process.env.HOME ?? os.homedir();
+  // `||` (not `??`) + os.homedir() fallback (matching auth-context.ts): an
+  // unset OR EMPTY HOME must not resolve the store into the CURRENT REPO,
+  // where the persisted bundle would surface in `git status` and could ride
+  // a `git add -A` (codex P2 r4+r5).
+  const home = env.HOME || process.env.HOME || os.homedir();
   return path.join(home, '.config', 'yolo', 'deploy-pending');
 }
 
