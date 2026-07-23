@@ -726,6 +726,21 @@ describe('deploy-cli — init', () => {
     assert.match(payload.note, /committed by design/);
   });
 
+  it('--json routes a CREATE failure to stdout too, not stderr (codex P2 r16)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['init', '--slug', 'taken', '--json'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => linked(null),
+        createProjectImpl: async () => ({ ok: false, kind: 'quota-exceeded', message: 'project cap reached' }),
+      }),
+    );
+    assert.notEqual(code, 0);
+    const payload = JSON.parse(io.stdout.join(''));
+    assert.equal(payload.kind, 'quota-exceeded');
+    assert.equal(io.stderr.join(''), ''); // machine mode: nothing on stderr
+  });
+
   it('--json reports already-linked idempotently without rewriting', async () => {
     const io = makeIo();
     const code = await runDeployCmd(
@@ -742,13 +757,15 @@ describe('deploy-cli — init', () => {
     assert.deepEqual(payload, { status: 'already-linked', projectId: 'hp_old', slug: 'kept' });
   });
 
-  it('--json honors the flag on an ARG error too (machine-readable failure, exit 64)', async () => {
+  it('--json honors the flag on an ARG error too (machine-readable failure on stdout, exit 64)', async () => {
     const io = makeIo();
     const code = await runDeployCmd(['init', '--json', '--type', 'bogus'], baseDeps(io, {}));
     assert.equal(code, 64);
-    const payload = JSON.parse(io.stderr.join(''));
+    // The contract: one final machine-readable object on STDOUT (codex P2 r16).
+    const payload = JSON.parse(io.stdout.join(''));
     assert.equal(payload.kind, 'usage');
     assert.match(String(payload.message), /--type must be/);
+    assert.equal(io.stderr.join(''), ''); // nothing on stderr in --json mode
   });
 
   it('adapts an existing wrangler.json into the written .yolo/deploy.json on a fresh init', async () => {

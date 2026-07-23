@@ -258,7 +258,8 @@ async function runShipCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
     }
     return 3;
   }
-  io.err(parsed.jsonOutput ? `${formatJsonResult(result)}\n` : `${formatFail(result)}\n`);
+  if (parsed.jsonOutput) io.out(`${formatJsonResult(result)}\n`);
+  else io.err(`${formatFail(result)}\n`);
   return exitCodeForFailure(result.kind);
 }
 
@@ -312,7 +313,7 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
     // always parses the final stdout object still gets a machine-readable
     // result instead of human usage text on stderr.
     if (args.includes('--json')) {
-      io.err(`${formatJsonResult({ kind: 'usage', message: parsed.message })}\n`);
+      io.out(`${formatJsonResult({ kind: 'usage', message: parsed.message })}\n`);
     } else {
       io.err(`yolo deploy init: ${parsed.message}\nUsage: yolo deploy init [--slug <slug>] [--type <static|worker>] [--json]\n`);
     }
@@ -326,7 +327,8 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
   if (!readResult.ok) {
     // Never silently clobber a malformed/invalid link file.
     const failure = { kind: readResult.kind, message: readResult.message };
-    io.err(parsed.jsonOutput ? `${formatJsonResult(failure)}\n` : `${formatFail(failure)}\n`);
+    if (parsed.jsonOutput) io.out(`${formatJsonResult(failure)}\n`);
+    else io.err(`${formatFail(failure)}\n`);
     return exitCodeForFailure(readResult.kind);
   }
   const existing: DeployConfig | null = readResult.config;
@@ -350,7 +352,8 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
   const auth = resolveAuth(deps);
   if (!auth.ok) {
     const failure = { kind: 'auth', message: auth.message };
-    io.err(parsed.jsonOutput ? `${formatJsonResult(failure)}\n` : `${formatFail({ kind: 'auth', message: auth.message })}\n`);
+    if (parsed.jsonOutput) io.out(`${formatJsonResult(failure)}\n`);
+    else io.err(`${formatFail({ kind: 'auth', message: auth.message })}\n`);
     return 78;
   }
 
@@ -399,7 +402,8 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
         }
       }
     }
-    io.err(parsed.jsonOutput ? `${formatJsonResult(created)}\n` : `${formatFail(created)}\n`);
+    if (parsed.jsonOutput) io.out(`${formatJsonResult(created)}\n`);
+    else io.err(`${formatFail(created)}\n`);
     return exitCodeForFailure(created.kind);
   }
 
@@ -409,7 +413,8 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
   const slug = str(project.slug) ?? parsed.slug;
   if (!projectId) {
     const failure = { kind: 'invalid-response', message: 'create-project response missing a project id' };
-    io.err(parsed.jsonOutput ? `${formatJsonResult(failure)}\n` : `${formatFail(failure)}\n`);
+    if (parsed.jsonOutput) io.out(`${formatJsonResult(failure)}\n`);
+    else io.err(`${formatFail(failure)}\n`);
     return 2;
   }
 
@@ -1879,7 +1884,8 @@ function writeLinkFile(
       kind: 'config-write-failed',
       message: `failed to write .yolo/deploy.json: ${describeError(err)}`,
     };
-    io.err(params.jsonOutput ? `${formatJsonResult(failure)}\n` : `${formatFail(failure)}\n`);
+    if (params.jsonOutput) io.out(`${formatJsonResult(failure)}\n`);
+    else io.err(`${formatFail(failure)}\n`);
     return 1;
   }
   if (params.jsonOutput) {
