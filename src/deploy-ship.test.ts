@@ -21,6 +21,7 @@ import type { BundleSuccess } from './deploy-bundle.js';
 import type { ProjectShape } from './deploy-detect.js';
 import type { DeployConfig, ReadDeployConfigResult } from './deploy-config.js';
 import type { FinalizeShipResult, StartShipResponse } from './deploy-client.js';
+import type { DeployPendingRecord, PendingStore } from './deploy-pending.js';
 
 const CONFIG: DeployConfig = { $version: 1, projectId: 'hp_8f3a', slug: 'my-app', type: 'static' };
 const CONFIG_PATH = '/proj/.yolo/deploy.json';
@@ -394,20 +395,52 @@ describe('deploy-ship — failures', () => {
   });
 });
 
-// ─── Awaiting approval (T3 prod gate) ─────────────────────────────────────
+// ─── Awaiting approval (T3 prod gate) + staged-ship resume ────────────────
+
+/** In-memory PendingStore seam. */
+function memoryPendingStore(seed: Record<string, DeployPendingRecord> = {}) {
+  const records = new Map<string, DeployPendingRecord>(Object.entries(seed));
+  const store: PendingStore = {
+    load: (projectId) => records.get(projectId) ?? null,
+    save: (record) => void records.set(record.projectId, record),
+    clear: (projectId) => void records.delete(projectId),
+  };
+  return { store, records };
+}
+
+const AWAITING = {
+  ok: false,
+  kind: 'awaiting-approval',
+  approvalId: 'apr_55',
+  approvalUrl: 'https://studio.yolo.dev/approvals/apr_55',
+  releaseId: 'rel_0193',
+  message: 'prod ship needs operator confirmation',
+  status: 409,
+} as const;
+
+function pendingRecord(over: Partial<DeployPendingRecord> = {}): DeployPendingRecord {
+  return {
+    $version: 1,
+    projectId: 'hp_8f3a',
+    shipId: 'shp_prev',
+    env: 'prod',
+    slug: 'my-app',
+    type: 'static',
+    bundleDigest: 'sha256:approvedbytes',
+    approvalId: 'apr_55',
+    fileCount: 2,
+    totalAssetBytes: 3072,
+    createdAt: new Date().toISOString(),
+    ...over,
+  };
+}
 
 describe('deploy-ship — awaiting-approval', () => {
-  it('returns the pending outcome with approval fields + emits the pending progress line', async () => {
+  it('returns the pending outcome with approval fields + SAVES the staged-ship resume record', async () => {
+    const { store, records } = memoryPendingStore();
     const { deps } = makeDeps({
-      finalizeShipImpl: async () => ({
-        ok: false,
-        kind: 'awaiting-approval',
-        approvalId: 'apr_55',
-        approvalUrl: 'https://studio.yolo.dev/approvals/apr_55',
-        releaseId: 'rel_0193',
-        message: 'prod ship needs operator confirmation',
-        status: 409,
-      }),
+      finalizeShipImpl: async () => ({ ...AWAITING }),
+      pendingStoreImpl: store,
     });
     const { lines, promise } = runShip(deps, { envFlag: 'prod' });
     const result = await promise;
@@ -420,7 +453,120 @@ describe('deploy-ship — awaiting-approval', () => {
     } else {
       assert.fail(`expected awaiting-approval, got ${JSON.stringify(result)}`);
     }
-    assert.equal(lines[lines.length - 1], 'deploy: finalize → pending operator approval (T3 prod ship)');
+    assert.ok(lines.includes('deploy: finalize → pending operator approval (T3 prod ship)'));
+    // Resume record: exact staged identity, so the rerun re-finalizes THESE bytes.
+    const saved = records.get('hp_8f3a');
+    assert.ok(saved, 'expected a saved resume record');
+    assert.equal(saved.shipId, 'shp_77');
+    assert.equal(saved.approvalId, 'apr_55');
+    assert.equal(saved.bundleDigest, 'sha256:91c2aabbccdd');
+    assert.equal(saved.env, 'prod');
+    assert.ok(lines.some((l) => l.includes('staged bundle saved')));
+  });
+});
+
+describe('deploy-ship — staged-ship resume (approval round-trip)', () => {
+  it('resumes the staged session after a grant: finalizes with the stored shipId + approvalId, NO rebuild/rebundle/restart', async () => {
+    const { store, records } = memoryPendingStore({ hp_8f3a: pendingRecord() });
+    const finalizeCalls: Array<{ shipId: string; opts: unknown }> = [];
+    const { deps, recorded } = makeDeps({
+      detectProjectShapeImpl: () => assert.fail('must not re-detect on resume'),
+      bundleProjectImpl: async () => assert.fail('must not re-bundle on resume'),
+      finalizeShipImpl: async (_ctx, _projectId, shipId, _modules, _map, opts) => {
+        finalizeCalls.push({ shipId, opts });
+        return { ok: true, value: { releaseId: 'rel_0200', url: 'https://my-app.yolo.host', status: 'live' } };
+      },
+    });
+    deps.pendingStoreImpl = store;
+    const { lines, promise } = runShip(deps, { envFlag: 'prod' });
+    const result = await promise;
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.releaseId, 'rel_0200');
+      assert.equal(result.bundleDigest, 'sha256:approvedbytes');
+      assert.equal(result.shipId, 'shp_prev');
+    }
+    assert.deepEqual(finalizeCalls, [{ shipId: 'shp_prev', opts: { approvalId: 'apr_55' } }]);
+    assert.equal(recorded.startCalls.length, 0); // no fresh ship session
+    assert.equal(records.has('hp_8f3a'), false); // cleared after success
+    assert.ok(lines.some((l) => l.includes('resumed the approved bundle')));
+  });
+
+  it('still pending (approval-pending) → PENDING again with the SAME approvalId, record kept', async () => {
+    const { store, records } = memoryPendingStore({ hp_8f3a: pendingRecord() });
+    const { deps } = makeDeps({
+      finalizeShipImpl: async () => ({ ok: false, kind: 'approval-pending', message: 'awaiting operator decision', status: 409 }),
+    });
+    deps.pendingStoreImpl = store;
+    const result = await runShip(deps, { envFlag: 'prod' }).promise;
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.kind, 'awaiting-approval');
+    if (!result.ok && 'approvalId' in result) assert.equal(result.approvalId, 'apr_55');
+    assert.equal(records.has('hp_8f3a'), true);
+  });
+
+  it('operator DENIED → surfaces approval-denied and clears the record (no silent rebuild of rejected bytes)', async () => {
+    const { store, records } = memoryPendingStore({ hp_8f3a: pendingRecord() });
+    const { deps } = makeDeps({
+      finalizeShipImpl: async () => ({ ok: false, kind: 'approval-denied', message: 'operator denied', status: 403 }),
+    });
+    deps.pendingStoreImpl = store;
+    const result = await runShip(deps, { envFlag: 'prod' }).promise;
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.kind, 'approval-denied');
+    assert.equal(records.has('hp_8f3a'), false);
+  });
+
+  it('staged session gone (upload-expired) → clears + falls through to a FULL fresh ship', async () => {
+    const { store, records } = memoryPendingStore({ hp_8f3a: pendingRecord() });
+    let finalizeCall = 0;
+    const { deps, recorded } = makeDeps({
+      finalizeShipImpl: async () => {
+        finalizeCall += 1;
+        if (finalizeCall === 1) return { ok: false, kind: 'upload-expired', message: 'session lapsed', status: 410 };
+        return FINALIZE_LIVE;
+      },
+    });
+    deps.pendingStoreImpl = store;
+    const { lines, promise } = runShip(deps, { envFlag: 'prod' });
+    const result = await promise;
+    assert.equal(result.ok, true);
+    assert.equal(recorded.startCalls.length, 1); // fresh pipeline ran
+    assert.equal(records.has('hp_8f3a'), false);
+    assert.ok(lines.some((l) => l.includes('staged ship not resumable (upload-expired')));
+  });
+
+  it('stale record (>24h) is discarded without contacting the server', async () => {
+    const stale = pendingRecord({ createdAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString() });
+    const { store, records } = memoryPendingStore({ hp_8f3a: stale });
+    const finalizeShipIds: string[] = [];
+    const { deps } = makeDeps({
+      finalizeShipImpl: async (_ctx, _projectId, shipId) => {
+        finalizeShipIds.push(shipId);
+        return FINALIZE_LIVE;
+      },
+    });
+    deps.pendingStoreImpl = store;
+    const result = await runShip(deps, { envFlag: 'prod' }).promise;
+    assert.equal(result.ok, true);
+    assert.deepEqual(finalizeShipIds, ['shp_77']); // only the fresh session — never shp_prev
+    assert.equal(records.has('hp_8f3a'), false);
+  });
+
+  it('a staging rerun ignores a prod pending record (env-scoped)', async () => {
+    const { store, records } = memoryPendingStore({ hp_8f3a: pendingRecord() });
+    const finalizeShipIds: string[] = [];
+    const { deps } = makeDeps({
+      finalizeShipImpl: async (_ctx, _projectId, shipId) => {
+        finalizeShipIds.push(shipId);
+        return FINALIZE_LIVE;
+      },
+    });
+    deps.pendingStoreImpl = store;
+    const result = await runShip(deps).promise; // default staging
+    assert.equal(result.ok, true);
+    assert.deepEqual(finalizeShipIds, ['shp_77']);
+    assert.equal(records.has('hp_8f3a'), true); // untouched — still resumable for prod
   });
 });
 

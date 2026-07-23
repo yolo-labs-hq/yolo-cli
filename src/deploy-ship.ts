@@ -39,6 +39,12 @@ import {
   type StartShipRequest,
 } from './deploy-client.js';
 import type { ReadFileImpl } from './auth-context.js';
+import {
+  defaultPendingStore,
+  PENDING_MAX_AGE_MS,
+  type DeployPendingRecord,
+  type PendingStore,
+} from './deploy-pending.js';
 
 // ─── Public types ─────────────────────────────────────────────────────────
 
@@ -61,6 +67,8 @@ export interface DeployShipDeps {
   readAssetFileImpl?: (absolutePath: string) => Uint8Array;
   /** Best-effort git sha for the ship/start body. Default: `git rev-parse HEAD`. */
   resolveGitShaImpl?: (cwd: string) => string | undefined;
+  /** Staged-ship resume store (T3 approval round-trip). Default: ~/.config/yolo. */
+  pendingStoreImpl?: PendingStore;
 }
 
 export interface DeployShipOptions {
@@ -164,6 +172,56 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
     `deploy: link ok (project ${projectId}${config.slug ? `, slug ${config.slug}` : ''}${config.type ? `, type ${config.type}` : ''})`,
   );
 
+  const pendingStore = deps.pendingStoreImpl ?? defaultPendingStore(options.env ?? process.env);
+  const resolveCtx = (): { ok: true; ctx: DeployContext } | DeployShipFailure => {
+    const auth = resolveDeployContext(options.env ?? process.env, options.readFileImpl, options.fetchImpl);
+    if (!auth.ok) return fail('auth', auth.message);
+    // Bounded auto-retry for transient edge/origin 5xx (incl. CF 522) on the
+    // ship legs — a single transient blip shouldn't hard-fail a prod deploy.
+    return {
+      ok: true,
+      ctx: {
+        ...auth.context,
+        retry: {
+          onRetry: ({ leg, attempt, maxAttempts, delayMs, failure }) =>
+            progress(
+              `deploy: ${leg} transient error (${failure.message}); retrying ${attempt}/${maxAttempts - 1} in ${Math.round(delayMs)}ms`,
+            ),
+        },
+      },
+    };
+  };
+
+  // 1.5 Resume a staged, approval-parked ship BEFORE building. A rebuild is
+  // not digest-stable for every project (timestamps/salts), and the operator
+  // approved the EXACT staged bytes — so a rerun after PENDING re-finalizes
+  // the original ship session (no build, no bundle, no re-upload; codex
+  // gpt-5.6-sol P1 round 3). Falls through to a fresh build only when the
+  // server says the session/approval is gone.
+  if (!dryRun) {
+    const resume = pendingStore.load(projectId);
+    if (resume && resume.env === envFlag) {
+      if (Date.now() - Date.parse(resume.createdAt) > PENDING_MAX_AGE_MS) {
+        pendingStore.clear(projectId);
+        progress('deploy: staged ship discarded (older than 24h) — building fresh');
+      } else {
+        const resolved = resolveCtx();
+        if (!resolved.ok) return resolved;
+        const resumed = await resumeStagedShip(resolved.ctx, resume, {
+          projectId,
+          slug: config.slug,
+          envFlag,
+          channel,
+          finalizeLeg,
+          pendingStore,
+          progress,
+        });
+        if (resumed) return resumed;
+        // fell through — fresh build below.
+      }
+    }
+  }
+
   // 2. Detect.
   const detected = detect({ cwd, config });
   if (!detected.ok) return fail('detect-failed', detected.message);
@@ -214,19 +272,9 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
   //    resolution happen below this line).
   if (dryRun) return { ok: true, dryRun: true, ...base };
 
-  const auth = resolveDeployContext(options.env ?? process.env, options.readFileImpl, options.fetchImpl);
-  if (!auth.ok) return fail('auth', auth.message);
-  // Bounded auto-retry for transient edge/origin 5xx (incl. CF 522) on the
-  // ship legs — a single transient blip shouldn't hard-fail a prod deploy.
-  const ctx: DeployContext = {
-    ...auth.context,
-    retry: {
-      onRetry: ({ leg, attempt, maxAttempts, delayMs, failure }) =>
-        progress(
-          `deploy: ${leg} transient error (${failure.message}); retrying ${attempt}/${maxAttempts - 1} in ${Math.round(delayMs)}ms`,
-        ),
-    },
-  };
+  const resolved = resolveCtx();
+  if (!resolved.ok) return resolved;
+  const ctx: DeployContext = resolved.ctx;
 
   // 6. ship/start — manifest up, missing-hash buckets back.
   const manifest: AssetManifest = bundled.manifest;
@@ -284,6 +332,37 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
   if (!finalized.ok) {
     if (finalized.kind === 'awaiting-approval' && 'approvalId' in finalized) {
       progress('deploy: finalize → pending operator approval (T3 prod ship)');
+      // Persist the staged ship so the post-grant rerun re-finalizes THESE
+      // exact bytes instead of rebuilding (a rebuild may change the digest and
+      // orphan the grant). Best-effort: a failed save just means the rerun
+      // rebuilds — same as before this existed.
+      try {
+        pendingStore.save({
+          $version: 1,
+          projectId,
+          shipId,
+          env: envFlag,
+          ...(config.slug !== undefined ? { slug: config.slug } : {}),
+          type: shape.type,
+          bundleDigest: bundled.bundleDigest,
+          approvalId: finalized.approvalId,
+          fileCount,
+          totalAssetBytes: bundled.totalAssetBytes,
+          createdAt: new Date().toISOString(),
+          ...(workerModules.length > 0
+            ? {
+                workerModules: workerModules.map((m) => ({
+                  name: m.name,
+                  contentsBase64: Buffer.from(m.contents).toString('base64'),
+                })),
+              }
+            : {}),
+          ...(bundled.sourceMap ? { sourceMap: bundled.sourceMap } : {}),
+        });
+        progress('deploy: staged bundle saved — a rerun after the grant resumes this exact bundle (no rebuild)');
+      } catch (err) {
+        progress(`deploy: warn — could not save the staged-ship resume record (${describeErrorMessage(err)}); a rerun will rebuild`);
+      }
       return {
         ok: false,
         kind: 'awaiting-approval',
@@ -313,6 +392,117 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
     url: finalized.value.url,
     ...(bootCheck ? { bootCheck } : {}),
   };
+}
+
+/**
+ * Re-finalize a staged, approval-parked ship session with the operator's
+ * grant. Returns a terminal DeployShipResult, or null ⇒ the staged session is
+ * unusable (expired/consumed/denied-and-cleared cases that warrant a fresh
+ * build) and the caller falls through to the normal pipeline.
+ */
+async function resumeStagedShip(
+  ctx: DeployContext,
+  resume: DeployPendingRecord,
+  io: {
+    projectId: string;
+    slug: string | undefined;
+    envFlag: 'staging' | 'prod';
+    channel: 'preview' | 'prod';
+    finalizeLeg: typeof finalizeShip;
+    pendingStore: PendingStore;
+    progress: (line: string) => void;
+  },
+): Promise<DeployShipResult | null> {
+  const { projectId, envFlag, channel, finalizeLeg, pendingStore, progress } = io;
+  progress(
+    `deploy: resuming staged ship ${resume.shipId} (digest ${shortDigest(resume.bundleDigest)}, approval ${resume.approvalId})`,
+  );
+  const modules = (resume.workerModules ?? []).map((m) => ({
+    name: m.name,
+    contents: new Uint8Array(Buffer.from(m.contentsBase64, 'base64')),
+  }));
+  const finalized = await finalizeLeg(ctx, projectId, resume.shipId, modules, resume.sourceMap ?? null, {
+    approvalId: resume.approvalId,
+  });
+
+  if (finalized.ok) {
+    pendingStore.clear(projectId);
+    progress('deploy: finalize ok (resumed the approved bundle — no rebuild)');
+    const bootCheck = parseBootCheck(finalized.value.bootCheck);
+    if (bootCheck) progress(`deploy: warn — deployed Worker failed to boot (HTTP ${bootCheck.status})`);
+    return {
+      ok: true,
+      dryRun: false,
+      projectId,
+      slug: resume.slug ?? io.slug,
+      env: envFlag,
+      channel,
+      type: resume.type,
+      fileCount: resume.fileCount,
+      totalAssetBytes: resume.totalAssetBytes,
+      bundleDigest: resume.bundleDigest,
+      shipId: resume.shipId,
+      releaseId: finalized.value.releaseId,
+      url: finalized.value.url,
+      ...(bootCheck ? { bootCheck } : {}),
+    };
+  }
+
+  // Still parked: the grant hasn't landed yet (approval-pending), or the
+  // server re-issued the pending envelope. Keep the staged record — the next
+  // rerun retries the SAME session.
+  if (finalized.kind === 'approval-pending') {
+    progress('deploy: staged ship still awaiting the operator grant');
+    return {
+      ok: false,
+      kind: 'awaiting-approval',
+      projectId,
+      slug: resume.slug ?? io.slug,
+      approvalId: resume.approvalId,
+      message: finalized.message,
+    };
+  }
+  if (finalized.kind === 'awaiting-approval' && 'approvalId' in finalized) {
+    progress('deploy: staged ship still awaiting the operator grant');
+    return {
+      ok: false,
+      kind: 'awaiting-approval',
+      projectId,
+      slug: resume.slug ?? io.slug,
+      approvalId: finalized.approvalId,
+      approvalUrl: finalized.approvalUrl,
+      releaseId: finalized.releaseId,
+      statement: finalized.statement,
+      expiresAt: finalized.expiresAt,
+      message: finalized.message,
+    };
+  }
+
+  // Denied is a terminal answer about THIS bundle — surface it; don't
+  // silently rebuild what the operator just rejected.
+  if (finalized.kind === 'approval-denied') {
+    pendingStore.clear(projectId);
+    return clientFail(finalized as DeployClientFailure);
+  }
+
+  // Transient transport / auth: keep the staged record and surface the error
+  // — the session may still be perfectly resumable.
+  if (finalized.kind === 'network' || finalized.kind === 'auth' || finalized.kind === 'session-required') {
+    return clientFail(finalized as DeployClientFailure);
+  }
+
+  // Everything else (upload-expired, approval-expired/-consumed/-required,
+  // bundle-invalid, …): the staged session/grant is gone — fall back to a
+  // fresh build+ship, which re-enters the normal approval flow if needed.
+  pendingStore.clear(projectId);
+  progress(
+    `deploy: staged ship not resumable (${finalized.kind}: ${finalized.message}) — building fresh`,
+  );
+  return null;
+}
+
+function describeErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /** Narrow the backend's optional `bootCheck` envelope; ignore anything malformed. */
@@ -401,9 +591,9 @@ export function formatPending(result: DeployShipPending): string {
     `PENDING [awaiting-approval]: prod ship of ${name}${releaseTag} needs operator confirmation.`,
     approveLine,
     '  then: after the operator approves (they got a notification; the Approvals panel is the surface),',
-    '  rerun `yolo deploy` — the grant is redeemed automatically for this bundle and unchanged assets',
-    '  are not re-uploaded. A rerun BEFORE the grant is harmless: it re-prints this PENDING with the',
-    '  same approval id. MCP callers can poll deploy.approval_status; the CLI has no approval poll.',
+    '  rerun `yolo deploy` — it RESUMES this exact staged bundle (no rebuild, no re-upload; the grant',
+    '  is redeemed automatically). A rerun BEFORE the grant is harmless: it re-prints this PENDING',
+    '  with the same approval id. MCP callers can poll deploy.approval_status; the CLI has no approval poll.',
   ].join('\n');
 }
 

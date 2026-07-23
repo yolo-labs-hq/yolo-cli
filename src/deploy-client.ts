@@ -291,6 +291,7 @@ export async function finalizeShip(
   shipId: string,
   modules: WorkerModuleUpload[] = [],
   sourceMap?: { name: string; content: string } | null,
+  opts: { approvalId?: string } = {},
 ): Promise<FinalizeShipResult> {
   // NOT auto-retried (unlike ship/start + assets). finalize is single-shot per
   // ship session: if the first request reached the server and created the
@@ -306,6 +307,11 @@ export async function finalizeShip(
   const url = `${stripTrailingSlash(ctx.commonApiUrl)}/v1/deploy/projects/${enc(projectId)}/ship/${enc(shipId)}/finalize`;
   // Substrate run-context provenance headers (best-effort; empty outside a lane).
   const runHeaders = runContextHeaders(ctx.env);
+  // Resume-after-grant: the pending-store rerun redeems the operator's grant
+  // explicitly (x-approval-id → approvalNonce server-side), which yields crisp
+  // approval-pending/-denied/-expired outcomes instead of the nonce-less
+  // retry-redeem's blended ones.
+  if (opts.approvalId) runHeaders['x-approval-id'] = opts.approvalId;
 
   let response;
   try {
