@@ -534,7 +534,7 @@ async function resumeStagedShip(
       ok: false,
       kind: finalized.kind,
       message: `staged ship ${resume.shipId} is finished or already being applied by a concurrent retry — a prior resume may have gone live`,
-      hint: "run 'yolo deploy status' first: if the release is live you are done; otherwise rerun 'yolo deploy' for a fresh ship",
+      hint: "run 'yolo deploy status' first: if the release is live you are done; otherwise rerun 'yolo deploy --env prod' for a fresh ship",
       status: finalized.kind === 'upload-expired' ? 410 : 409,
     };
   }
@@ -639,9 +639,10 @@ export function formatPending(result: DeployShipPending): string {
     `PENDING [awaiting-approval]: prod ship of ${name}${releaseTag} needs operator confirmation.`,
     approveLine,
     '  then: after the operator approves (they got a notification; the Approvals panel is the surface),',
-    '  rerun `yolo deploy` — it RESUMES this exact staged bundle (no rebuild, no re-upload; the grant',
-    '  is redeemed automatically). A rerun BEFORE the grant is harmless: it re-prints this PENDING',
-    '  with the same approval id. MCP callers can poll deploy.approval_status; the CLI has no approval poll.',
+    '  rerun `yolo deploy --env prod` — it RESUMES this exact staged bundle (no rebuild, no re-upload;',
+    '  the grant is redeemed automatically). Rerun with --env prod: a bare `yolo deploy` targets STAGING',
+    '  and will NOT resume this prod bundle. A rerun BEFORE the grant is harmless (same PENDING, same',
+    '  approval id). MCP callers can poll deploy.approval_status; the CLI has no approval poll.',
   ].join('\n');
 }
 

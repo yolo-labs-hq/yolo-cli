@@ -715,7 +715,7 @@ describe('deploy-ship — formatters', () => {
     assert.ok(text.startsWith('PENDING [awaiting-approval]: prod ship of my-app (release-candidate rel_0193)'));
     assert.ok(!text.includes('FAIL'));
     assert.ok(text.includes('https://studio.yolo.dev/approvals/apr_55'));
-    assert.ok(text.includes('rerun `yolo deploy`'));
+    assert.ok(text.includes('rerun `yolo deploy --env prod`'));
     assert.ok(text.includes('A rerun BEFORE the grant is harmless'));
     assert.ok(text.includes('Approvals panel'));
   });

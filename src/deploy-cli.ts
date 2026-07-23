@@ -250,7 +250,7 @@ async function runShipCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
       io.out(
         `${formatJsonResult({
           ...result,
-          hint: "after the operator approves (Approvals panel / notification), rerun 'yolo deploy' — the grant is redeemed automatically for this bundle. An early rerun is harmless (same PENDING, same approvalId). MCP callers can poll deploy.approval_status.",
+          hint: "after the operator approves (Approvals panel / notification), rerun 'yolo deploy --env prod' — the grant is redeemed automatically for this bundle. Use --env prod: a bare 'yolo deploy' targets staging and won't resume this prod bundle. An early rerun is harmless (same PENDING, same approvalId). MCP callers can poll deploy.approval_status.",
         })}\n`,
       );
     } else {
