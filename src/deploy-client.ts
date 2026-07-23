@@ -267,6 +267,24 @@ export type FinalizeShipResult =
  *   success | 409 awaiting-approval (T3 prod gate — NOT an error)
  *           | 410 upload-expired (ship session lapsed → rerun)
  */
+/**
+ * Best-effort substrate run-context headers for the finalize leg. When `yolo
+ * deploy` runs inside a Plan-Run lane the pod env carries the run ids, so we
+ * forward them and the server stamps release PROVENANCE — letting an auditor
+ * walk a live URL back to the run that shipped it. These are CLIENT-ASSERTED
+ * over the user JWT (NOT cryptographically bound like the MCP token path), so
+ * the server records them as `source: 'cli-env'`: unverified audit metadata,
+ * never authorizing. Omitted entirely for an interactive `yolo deploy` run
+ * outside a lane (none of the vars set).
+ */
+export function runContextHeaders(env: Record<string, string | undefined>): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (env.YOLO_RUN_PLAN_ID) headers['X-Yolo-Run-Plan-Id'] = env.YOLO_RUN_PLAN_ID;
+  if (env.YOLO_RUN_STEP_RUN_ID) headers['X-Yolo-Run-Step-Run-Id'] = env.YOLO_RUN_STEP_RUN_ID;
+  if (env.SESSION_ID) headers['X-Yolo-Session-Id'] = env.SESSION_ID;
+  return headers;
+}
+
 export async function finalizeShip(
   ctx: DeployContext,
   projectId: string,
@@ -286,6 +304,8 @@ export async function finalizeShip(
   const fetchImpl = resolveFetch(ctx);
   if (!fetchImpl) return noFetchFailure();
   const url = `${stripTrailingSlash(ctx.commonApiUrl)}/v1/deploy/projects/${enc(projectId)}/ship/${enc(shipId)}/finalize`;
+  // Substrate run-context provenance headers (best-effort; empty outside a lane).
+  const runHeaders = runContextHeaders(ctx.env);
 
   let response;
   try {
@@ -310,13 +330,13 @@ export async function finalizeShip(
       // No explicit Content-Type — fetch sets the multipart boundary itself.
       response = await fetchImpl(url, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${token}`, ...runHeaders },
         body: form,
       });
     } else {
       response = await fetchImpl(url, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...runHeaders },
         body: JSON.stringify({}),
       });
     }
@@ -428,7 +448,13 @@ export async function rollbackProject(
   projectId: string,
   request: { releaseId?: string } = {},
 ): Promise<ClientResult<unknown>> {
-  return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/rollback`, { method: 'POST', jsonBody: request });
+  // Rollback is a prod re-activation — forward run-context so the server can
+  // stamp `rollback.provenance` (same audit basis as a ship's finalize leg).
+  return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/rollback`, {
+    method: 'POST',
+    jsonBody: request,
+    headers: runContextHeaders(ctx.env),
+  });
 }
 
 /** POST /v1/deploy/projects/:id/unpublish — take a live project offline (reversible). */
@@ -682,7 +708,7 @@ function resolveFetch(ctx: DeployContext): DeployFetchLike | undefined {
 async function jsonLeg(
   ctx: DeployContext,
   routePath: string,
-  init: { method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'; jsonBody?: unknown },
+  init: { method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'; jsonBody?: unknown; headers?: Record<string, string> },
 ): Promise<ClientResult<unknown>> {
   const token = currentToken(ctx);
   if (!token) return missingTokenFailure();
