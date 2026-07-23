@@ -639,8 +639,8 @@ describe('deploy-cli — bare ship', () => {
     assert.ok(err.startsWith('PENDING [awaiting-approval]:'), `expected PENDING prefix, got: ${err}`);
     assert.ok(!err.includes('FAIL'));
     assert.ok(err.includes('https://studio.yolo.dev/approvals/apr_55'));
-    assert.ok(err.includes('rerun `yolo deploy` ONCE'));
-    assert.ok(err.includes('Do NOT loop reruns'));
+    assert.ok(err.includes('rerun `yolo deploy`'));
+    assert.ok(err.includes('A rerun BEFORE the grant is harmless'));
   });
 
   it('awaiting-approval under --json emits the JSON result on stdout, exit 3', async () => {
@@ -650,7 +650,8 @@ describe('deploy-cli — bare ship', () => {
     const parsed = JSON.parse(io.stdout.join('')) as Record<string, unknown>;
     assert.equal(parsed.kind, 'awaiting-approval');
     assert.equal(parsed.approvalId, 'apr_55');
-    assert.match(String(parsed.hint), /rerun 'yolo deploy' ONCE/);
+    assert.match(String(parsed.hint), /rerun 'yolo deploy'/);
+    assert.match(String(parsed.hint), /early rerun is harmless/);
   });
 
   it('maps failure kinds onto the spec §5 exit codes (1 local, 2 backend, 4 network, 78 auth)', async () => {

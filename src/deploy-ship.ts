@@ -381,10 +381,15 @@ export function formatShipSuccess(result: DeployShipSuccess): string {
 
 /**
  * Two independent "not-an-error, don't blind-loop" signals: the PENDING
- * prefix (not FAIL) and exit 3. The correct resume is ONE re-run AFTER the
+ * prefix (not FAIL) and exit 3. The correct resume is a re-run AFTER the
  * grant — the server redeems the granted approval automatically for the same
  * bundle (exact-digest match), and staged assets hash-skip so the re-run is
- * cheap. Re-running before the grant just re-issues this PENDING.
+ * cheap. A premature re-run is idempotent server-side (re-issues this
+ * PENDING with the SAME approval id — no duplicate approvals). The CLI has
+ * no approval-status poll (`yolo deploy status` can't see pre-finalize
+ * approvals — no release row exists yet); the operator's grant surface is
+ * the notification + Approvals panel, and MCP agents have
+ * deploy.approval_status.
  */
 export function formatPending(result: DeployShipPending): string {
   const name = result.slug ?? result.projectId;
@@ -395,9 +400,10 @@ export function formatPending(result: DeployShipPending): string {
   return [
     `PENDING [awaiting-approval]: prod ship of ${name}${releaseTag} needs operator confirmation.`,
     approveLine,
-    '  then: once granted (poll `yolo deploy status` / deploy.approval_status), rerun `yolo deploy` ONCE —',
-    '  the grant is redeemed automatically for this bundle and unchanged assets are not re-uploaded.',
-    '  Do NOT loop reruns while the approval is still pending.',
+    '  then: after the operator approves (they got a notification; the Approvals panel is the surface),',
+    '  rerun `yolo deploy` — the grant is redeemed automatically for this bundle and unchanged assets',
+    '  are not re-uploaded. A rerun BEFORE the grant is harmless: it re-prints this PENDING with the',
+    '  same approval id. MCP callers can poll deploy.approval_status; the CLI has no approval poll.',
   ].join('\n');
 }
 
