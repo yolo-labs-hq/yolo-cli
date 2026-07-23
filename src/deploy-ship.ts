@@ -491,9 +491,27 @@ async function resumeStagedShip(
     return clientFail(finalized as DeployClientFailure);
   }
 
-  // Everything else (upload-expired, approval-expired/-consumed/-required,
-  // bundle-invalid, …): the staged session/grant is gone — fall back to a
-  // fresh build+ship, which re-enters the normal approval flow if needed.
+  // upload-expired is AMBIGUOUS on a resume (codex P2 r4): the session is
+  // finished — either it genuinely lapsed, OR a prior resume finalize
+  // SUCCEEDED server-side and its response was lost (the open→finalized CAS
+  // then answers every retry with upload-expired). Auto-rebuilding here could
+  // duplicate a release that is already live (and re-mint approvals). Match
+  // finalizeShip's lost-response contract: clear the record, surface the
+  // failure, and direct the caller to check status before rerunning.
+  if (finalized.kind === 'upload-expired') {
+    pendingStore.clear(projectId);
+    return {
+      ok: false,
+      kind: 'upload-expired',
+      message: `staged ship ${resume.shipId} is finished or lapsed — a prior resume may have already gone live`,
+      hint: "run 'yolo deploy status' first: if the release is live you are done; otherwise rerun 'yolo deploy' for a fresh ship",
+      status: 410,
+    };
+  }
+
+  // Everything else (approval-expired/-consumed/-required, bundle-invalid, …):
+  // the staged grant is gone but nothing finalized — fall back to a fresh
+  // build+ship, which re-enters the normal approval flow if needed.
   pendingStore.clear(projectId);
   progress(
     `deploy: staged ship not resumable (${finalized.kind}: ${finalized.message}) — building fresh`,

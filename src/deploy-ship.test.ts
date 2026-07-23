@@ -517,13 +517,32 @@ describe('deploy-ship — staged-ship resume (approval round-trip)', () => {
     assert.equal(records.has('hp_8f3a'), false);
   });
 
-  it('staged session gone (upload-expired) → clears + falls through to a FULL fresh ship', async () => {
+  it('upload-expired on resume is AMBIGUOUS (a lost-response finalize may already be live) → surfaced + cleared, NO auto-rebuild', async () => {
+    // codex P2 r4: the open→finalized CAS answers every retry of an
+    // already-finalized session with upload-expired — auto-rebuilding could
+    // duplicate a live release / re-mint approvals.
+    const { store, records } = memoryPendingStore({ hp_8f3a: pendingRecord() });
+    const { deps, recorded } = makeDeps({
+      finalizeShipImpl: async () => ({ ok: false, kind: 'upload-expired', message: 'session lapsed', status: 410 }),
+    });
+    deps.pendingStoreImpl = store;
+    const result = await runShip(deps, { envFlag: 'prod' }).promise;
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.kind, 'upload-expired');
+      assert.match(String((result as { hint?: string }).hint), /yolo deploy status/);
+    }
+    assert.equal(recorded.startCalls.length, 0); // NO fresh pipeline
+    assert.equal(records.has('hp_8f3a'), false); // cleared — next run fresh-ships deliberately
+  });
+
+  it('a dead grant with an OPEN session (approval-expired) still falls through to a fresh ship', async () => {
     const { store, records } = memoryPendingStore({ hp_8f3a: pendingRecord() });
     let finalizeCall = 0;
     const { deps, recorded } = makeDeps({
       finalizeShipImpl: async () => {
         finalizeCall += 1;
-        if (finalizeCall === 1) return { ok: false, kind: 'upload-expired', message: 'session lapsed', status: 410 };
+        if (finalizeCall === 1) return { ok: false, kind: 'approval-expired', message: 'grant lapsed', status: 410 };
         return FINALIZE_LIVE;
       },
     });
@@ -533,7 +552,7 @@ describe('deploy-ship — staged-ship resume (approval round-trip)', () => {
     assert.equal(result.ok, true);
     assert.equal(recorded.startCalls.length, 1); // fresh pipeline ran
     assert.equal(records.has('hp_8f3a'), false);
-    assert.ok(lines.some((l) => l.includes('staged ship not resumable (upload-expired')));
+    assert.ok(lines.some((l) => l.includes('staged ship not resumable (approval-expired')));
   });
 
   it('stale record (>24h) is discarded without contacting the server', async () => {
