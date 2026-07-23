@@ -608,10 +608,11 @@ describe('deploy-ship — staged-ship resume (approval round-trip)', () => {
     assert.equal(records.has('hp_8f3a'), true); // untouched — still resumable for prod
   });
 
-  it('TWO staged records (concurrent deploys): resumes whichever is GRANTED, leaves the still-pending one (codex P2 r7)', async () => {
+  it('TWO staged records (concurrent deploys): resumes the GRANTED one and PURGES the rest (codex P2 r7 + P1 r11)', async () => {
     const { store, records } = memoryPendingStore();
     // Newest-first ordering: shp_new is tried first (still pending), then
-    // shp_old (granted) finalizes and wins.
+    // shp_old (granted) finalizes and wins. Once it goes live, shp_new is
+    // stale — a future deploy must NOT auto-resume it (would regress prod).
     store.save({ ...pendingRecord({ shipId: 'shp_old', approvalId: 'apr_old' }), createdAt: new Date(Date.now() - 60_000).toISOString() });
     store.save(pendingRecord({ shipId: 'shp_new', approvalId: 'apr_new' }));
     const { deps } = makeDeps({
@@ -624,8 +625,27 @@ describe('deploy-ship — staged-ship resume (approval round-trip)', () => {
     const result = await runShip(deps, { envFlag: 'prod' }).promise;
     assert.equal(result.ok, true);
     if (result.ok) assert.equal(result.releaseId, 'rel_old');
-    // The granted one was cleared; the still-pending one survives.
-    assert.deepEqual(records.all('hp_8f3a').map((r) => r.shipId), ['shp_new']);
+    // A ship went live → the ENTIRE project+env staged set is purged.
+    assert.deepEqual(records.all('hp_8f3a'), []);
+  });
+
+  it('BOTH staged records granted: the NEWEST ships and the older granted one is PURGED (no stale-rollback on a later deploy, codex P1 r11)', async () => {
+    const { store, records } = memoryPendingStore();
+    store.save({ ...pendingRecord({ shipId: 'shp_old', approvalId: 'apr_old' }), createdAt: new Date(Date.now() - 60_000).toISOString() });
+    store.save(pendingRecord({ shipId: 'shp_new', approvalId: 'apr_new' }));
+    const finalized: string[] = [];
+    const { deps } = makeDeps({
+      finalizeShipImpl: async (_ctx, _projectId, shipId) => {
+        finalized.push(shipId);
+        return { ok: true, value: { releaseId: `rel_${shipId}`, url: 'https://my-app.yolo.host', status: 'live' } };
+      },
+    });
+    deps.pendingStoreImpl = store;
+    const result = await runShip(deps, { envFlag: 'prod' }).promise;
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal(result.releaseId, 'rel_shp_new'); // newest wins
+    assert.deepEqual(finalized, ['shp_new']); // older granted record never finalized
+    assert.deepEqual(records.all('hp_8f3a'), []); // both purged
   });
 
   it('TWO staged records both still pending → PENDING (not a fresh ship), both records kept', async () => {

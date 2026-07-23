@@ -225,9 +225,21 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
         progress,
       });
       if (!resumed) continue; // this record not resumable (cleared) — try the next
-      // A live finalize, a denial, or the ambiguous upload-expired are all
-      // terminal answers about a real staged ship — return immediately.
-      if (resumed.ok || resumed.kind !== 'awaiting-approval') return resumed;
+      if (resumed.ok) {
+        // A staged ship went LIVE. Every OTHER staged record for this
+        // project+env is now stale — auto-resuming one on a future
+        // `yolo deploy` would unexpectedly repoint prod to a prior concurrent
+        // attempt's bundle (codex P1 r11). Purge the whole set so the next
+        // deploy builds CURRENT code. (resumeStagedShip already cleared `rec`.)
+        for (const other of staged) {
+          if (other.shipId !== rec.shipId) pendingStore.clear(projectId, other.shipId);
+        }
+        return resumed;
+      }
+      // A denial or the ambiguous upload-expired are terminal answers about a
+      // real staged ship — return immediately (leave siblings for their own
+      // resolution; nothing went live).
+      if (resumed.kind !== 'awaiting-approval') return resumed;
       // Still awaiting the grant — remember it, but keep checking the others
       // (a LATER record may already be granted).
       anyStillPending = resumed;
