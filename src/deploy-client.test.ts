@@ -318,12 +318,6 @@ describe('deploy-client — finalizeShip', () => {
     assert.equal(calls[0]!.body, '{}');
   });
 
-  it('advertises the staged-resume capability header so the server can enforce the gate (codex P1 r9)', async () => {
-    const { fetch, calls } = makeFetchStub({ jsonBody: { releaseId: 'rel_1', url: 'https://s.yolo.host', status: 'live' } });
-    await finalizeShip(makeContext(fetch), 'hp_1', 'shp_77', []);
-    assert.equal(calls[0]!.headers['x-yolo-deploy-caps'], 'staged-resume');
-  });
-
   it('returns the distinct awaiting-approval outcome on the T3 409', async () => {
     const { fetch } = makeFetchStub({
       ok: false,

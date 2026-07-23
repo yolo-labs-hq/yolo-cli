@@ -277,13 +277,6 @@ export type FinalizeShipResult =
  * never authorizing. Omitted entirely for an interactive `yolo deploy` run
  * outside a lane (none of the vars set).
  */
-/**
- * Header the CLI sends on finalize to advertise it can complete the T3 prod
- * approval round trip via the staged-ship resume path. Its PRESENCE (any
- * value) is the capability signal the server keys the gate on for CLI ships.
- */
-export const DEPLOY_CLIENT_CAPS_HEADER = 'x-yolo-deploy-caps';
-
 export function runContextHeaders(env: Record<string, string | undefined>): Record<string, string> {
   const headers: Record<string, string> = {};
   if (env.YOLO_RUN_PLAN_ID) headers['X-Yolo-Run-Plan-Id'] = env.YOLO_RUN_PLAN_ID;
@@ -314,13 +307,6 @@ export async function finalizeShip(
   const url = `${stripTrailingSlash(ctx.commonApiUrl)}/v1/deploy/projects/${enc(projectId)}/ship/${enc(shipId)}/finalize`;
   // Substrate run-context provenance headers (best-effort; empty outside a lane).
   const runHeaders = runContextHeaders(ctx.env);
-  // Advertise the staged-ship resume capability so the server can safely
-  // ENFORCE the T3 prod gate on this CLI (a PENDING can be completed via the
-  // resume path). A pod running an OLDER baked CLI never sends this, so the
-  // server degrades the gate to unenforced for it rather than stranding the
-  // ship — the pod↔server mixed-fleet contract (CLAUDE.md). See the finalize
-  // route.
-  runHeaders[DEPLOY_CLIENT_CAPS_HEADER] = 'staged-resume';
   // Resume-after-grant: the pending-store rerun redeems the operator's grant
   // explicitly (x-approval-id → approvalNonce server-side), which yields crisp
   // approval-pending/-denied/-expired outcomes instead of the nonce-less
