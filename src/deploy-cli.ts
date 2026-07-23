@@ -307,7 +307,15 @@ export function parseInitArgs(args: string[]): ParsedInitArgs | ParseError {
 async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Promise<number> {
   const parsed = parseInitArgs(args);
   if (!parsed.ok) {
-    io.err(`yolo deploy init: ${parsed.message}\nUsage: yolo deploy init [--slug <slug>] [--type <static|worker>] [--json]\n`);
+    // Honor --json even on an ARG error (codex gpt-5.6-sol P2 r6): the flag is
+    // detected independently of the (failed) parse so a `--json` caller that
+    // always parses the final stdout object still gets a machine-readable
+    // result instead of human usage text on stderr.
+    if (args.includes('--json')) {
+      io.err(`${formatJsonResult({ kind: 'usage', message: parsed.message })}\n`);
+    } else {
+      io.err(`yolo deploy init: ${parsed.message}\nUsage: yolo deploy init [--slug <slug>] [--type <static|worker>] [--json]\n`);
+    }
     return 64;
   }
   const cwd = deps.cwd ?? process.cwd();

@@ -202,7 +202,7 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
     const resume = pendingStore.load(projectId);
     if (resume && resume.env === envFlag) {
       if (Date.now() - Date.parse(resume.createdAt) > PENDING_MAX_AGE_MS) {
-        pendingStore.clear(projectId);
+        pendingStore.clear(projectId, resume.shipId);
         progress('deploy: staged ship discarded (older than 24h) — building fresh');
       } else {
         const resolved = resolveCtx();
@@ -337,7 +337,7 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
       // orphan the grant). Best-effort: a failed save just means the rerun
       // rebuilds — same as before this existed.
       try {
-        pendingStore.save({
+        const saved = pendingStore.save({
           $version: 1,
           projectId,
           shipId,
@@ -359,7 +359,11 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
             : {}),
           ...(bundled.sourceMap ? { sourceMap: bundled.sourceMap } : {}),
         });
-        progress('deploy: staged bundle saved — a rerun after the grant resumes this exact bundle (no rebuild)');
+        progress(
+          saved
+            ? 'deploy: staged bundle saved — a rerun after the grant resumes this exact bundle (no rebuild)'
+            : 'deploy: another concurrent deploy already staged this project; its bundle is the resumable one (this one needs its own approval + rerun)',
+        );
       } catch (err) {
         progress(`deploy: warn — could not save the staged-ship resume record (${describeErrorMessage(err)}); a rerun will rebuild`);
       }
@@ -426,7 +430,7 @@ async function resumeStagedShip(
   });
 
   if (finalized.ok) {
-    pendingStore.clear(projectId);
+    pendingStore.clear(projectId, resume.shipId);
     progress('deploy: finalize ok (resumed the approved bundle — no rebuild)');
     const bootCheck = parseBootCheck(finalized.value.bootCheck);
     if (bootCheck) progress(`deploy: warn — deployed Worker failed to boot (HTTP ${bootCheck.status})`);
@@ -481,7 +485,7 @@ async function resumeStagedShip(
   // Denied is a terminal answer about THIS bundle — surface it; don't
   // silently rebuild what the operator just rejected.
   if (finalized.kind === 'approval-denied') {
-    pendingStore.clear(projectId);
+    pendingStore.clear(projectId, resume.shipId);
     return clientFail(finalized as DeployClientFailure);
   }
 
@@ -499,7 +503,7 @@ async function resumeStagedShip(
   // finalizeShip's lost-response contract: clear the record, surface the
   // failure, and direct the caller to check status before rerunning.
   if (finalized.kind === 'upload-expired') {
-    pendingStore.clear(projectId);
+    pendingStore.clear(projectId, resume.shipId);
     return {
       ok: false,
       kind: 'upload-expired',
@@ -512,7 +516,7 @@ async function resumeStagedShip(
   // Everything else (approval-expired/-consumed/-required, bundle-invalid, …):
   // the staged grant is gone but nothing finalized — fall back to a fresh
   // build+ship, which re-enters the normal approval flow if needed.
-  pendingStore.clear(projectId);
+  pendingStore.clear(projectId, resume.shipId);
   progress(
     `deploy: staged ship not resumable (${finalized.kind}: ${finalized.message}) — building fresh`,
   );

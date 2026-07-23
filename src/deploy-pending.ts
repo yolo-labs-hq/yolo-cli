@@ -46,8 +46,18 @@ export interface DeployPendingRecord {
 
 export interface PendingStore {
   load(projectId: string): DeployPendingRecord | null;
-  save(record: DeployPendingRecord): void;
-  clear(projectId: string): void;
+  /**
+   * Persist a staged-ship record. FIRST-WINS: if a non-stale record for a
+   * DIFFERENT shipId already exists (a concurrent prod deploy of the same
+   * project staged first), the existing one is KEPT and this save is a no-op
+   * — returns `false`. Re-saving the SAME shipId (or replacing a stale
+   * record) returns `true`. This prevents a second racing deploy from
+   * silently discarding the first bundle's resume record (codex P2 r6).
+   */
+  save(record: DeployPendingRecord): boolean;
+  /** Remove the record ONLY if its shipId matches — an identity-checked clear so
+   *  a racing deploy can't delete a newer deploy's record (codex P2 r6). */
+  clear(projectId: string, shipId?: string): void;
 }
 
 /** Resume records older than this are stale — the ship session is long gone. */
@@ -88,13 +98,32 @@ export function defaultPendingStore(env: Record<string, string | undefined>): Pe
       }
     },
     save(record) {
+      // First-wins: don't clobber a non-stale record for a DIFFERENT shipId
+      // (a concurrent same-project deploy staged first — its resume record
+      // must survive so its approval stays actionable).
+      const existing = this.load(record.projectId);
+      if (
+        existing &&
+        existing.shipId !== record.shipId &&
+        Date.now() - Date.parse(existing.createdAt) <= PENDING_MAX_AGE_MS
+      ) {
+        return false;
+      }
       const dir = pendingDir(env);
       fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(pendingPath(env, record.projectId), `${JSON.stringify(record, null, 2)}\n`, {
         mode: 0o600,
       });
+      return true;
     },
-    clear(projectId) {
+    clear(projectId, shipId) {
+      // Identity-checked: a racing deploy must not delete a record that now
+      // belongs to a DIFFERENT shipId. Omitting shipId forces the clear
+      // (used when the caller knows the record is theirs / stale).
+      if (shipId !== undefined) {
+        const existing = this.load(projectId);
+        if (existing && existing.shipId !== shipId) return;
+      }
       try {
         fs.unlinkSync(pendingPath(env, projectId));
       } catch {

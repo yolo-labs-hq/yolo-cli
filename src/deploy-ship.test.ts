@@ -402,8 +402,19 @@ function memoryPendingStore(seed: Record<string, DeployPendingRecord> = {}) {
   const records = new Map<string, DeployPendingRecord>(Object.entries(seed));
   const store: PendingStore = {
     load: (projectId) => records.get(projectId) ?? null,
-    save: (record) => void records.set(record.projectId, record),
-    clear: (projectId) => void records.delete(projectId),
+    save: (record) => {
+      const existing = records.get(record.projectId);
+      if (existing && existing.shipId !== record.shipId && Date.now() - Date.parse(existing.createdAt) <= 24 * 60 * 60 * 1000) {
+        return false;
+      }
+      records.set(record.projectId, record);
+      return true;
+    },
+    clear: (projectId, shipId) => {
+      const existing = records.get(projectId);
+      if (shipId !== undefined && existing && existing.shipId !== shipId) return;
+      records.delete(projectId);
+    },
   };
   return { store, records };
 }

@@ -742,6 +742,15 @@ describe('deploy-cli — init', () => {
     assert.deepEqual(payload, { status: 'already-linked', projectId: 'hp_old', slug: 'kept' });
   });
 
+  it('--json honors the flag on an ARG error too (machine-readable failure, exit 64)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(['init', '--json', '--type', 'bogus'], baseDeps(io, {}));
+    assert.equal(code, 64);
+    const payload = JSON.parse(io.stderr.join(''));
+    assert.equal(payload.kind, 'usage');
+    assert.match(String(payload.message), /--type must be/);
+  });
+
   it('adapts an existing wrangler.json into the written .yolo/deploy.json on a fresh init', async () => {
     const io = makeIo();
     const written: Array<{ config: Record<string, unknown> }> = [];
