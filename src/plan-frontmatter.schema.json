@@ -135,6 +135,13 @@
         "todoContent": { "type": "string" },
         "todoFile": { "type": "string" },
         "branch": { "type": "string" },
+        "surfacesArtifacts": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "\\S" },
+          "description": "work.report_artifact artifactTypes to relay to the requester as they land (e.g. a preview URL), instead of only at run terminal. Default: none. Max 8 unique non-blank types, each \u2264 64 chars. NOTE: currently honored ONLY for assistant quick-job (ephemeral) runs; inert on a standard Plan Run (no channel to relay to)."
+        },
         "metadata": {
           "type": "object",
           "additionalProperties": { "type": "string" },

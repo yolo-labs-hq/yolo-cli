@@ -77,7 +77,7 @@ const INPUT_FIELD_ORDER: ReadonlyArray<string> = ['name', 'required', 'default',
 
 const DECLARED_OUTPUT_FIELD_ORDER: ReadonlyArray<string> = ['name', 'artifactType', 'required'];
 
-const TEMPLATE_FIELD_ORDER: ReadonlyArray<string> = ['todoContent', 'todoFile', 'branch', 'metadata'];
+const TEMPLATE_FIELD_ORDER: ReadonlyArray<string> = ['todoContent', 'todoFile', 'branch', 'surfacesArtifacts', 'metadata'];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
