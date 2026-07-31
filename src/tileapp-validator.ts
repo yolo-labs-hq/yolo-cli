@@ -35,6 +35,13 @@ const ID_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
 // here so `yolo tileapp validate` catches them offline; the dimension/content
 // rules that need the image bytes are in
 // `docs/TILEAPP_SCREENSHOT_GUIDELINES.md` and checked at review.
+//
+// 🚨 This file mirrors the server's PUBLISH-time validator
+// (`validateManifestForPublish`), NOT its read-time one. The server splits the
+// two on purpose: on the read path a validation failure SKIPS the app and it
+// vanishes from the store, so `validateManifest` there checks structure only.
+// The CLI is a publish lint, so strict is correct here — but don't "sync" the
+// server's looser read-time rules back into this file.
 const MAX_SCREENSHOTS = 6;
 const SCREENSHOT_EXTENSIONS = ['.webp', '.png'];
 const RELATIVE_SCREENSHOT_RE = /^media\/[a-z0-9][a-z0-9._-]*$/;
