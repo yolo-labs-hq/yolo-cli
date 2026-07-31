@@ -44,6 +44,7 @@ const ID_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
 // server's looser read-time rules back into this file.
 const MAX_SCREENSHOTS = 6;
 const SCREENSHOT_EXTENSIONS = ['.webp', '.png'];
+const RELATIVE_SCREENSHOT_RE = /^media\/[a-z0-9][a-z0-9._-]*$/;
 
 function hasAllowedScreenshotExt(pathname: string): boolean {
   const lower = pathname.toLowerCase();
@@ -63,12 +64,17 @@ function validateScreenshotRef(ref: string): string | null {
     if (!hasAllowedScreenshotExt(url.pathname)) return `must end in ${SCREENSHOT_EXTENSIONS.join(' or ')}: ${ref}`;
     return null;
   }
-  // The repo-hosted `media/<file>` form is reserved for CURATED first-party
-  // apps, whose images are committed to the monorepo and baked into the API
-  // image. A personal app's bundle lives in R2 and partner ingest uploads
-  // nowhere, so that form would resolve to an API URL that 404s forever.
-  // Everything this CLI validates is one of those two — hence absolute only.
-  return `must be an absolute https:// URL — the "media/<file>" form is reserved for curated first-party apps. Host the image and reference it by URL. Got: ${ref}`;
+  // `media/<file>` is the PLATFORM-HOSTED form. It is valid here because this
+  // CLI lints personal apps, whose bundle — including a `media/` subdirectory —
+  // is uploaded to R2 by `yolo tileapp publish --personal`, and the media route
+  // serves screenshots from exactly there. (Partner ingest has no such store
+  // and is rejected server-side; see `validateManifestForPublish`.)
+  if (/^[a-z][a-z0-9+.-]*:/i.test(ref)) return `must be an https:// URL or a "media/<file>" path, got: ${ref}`;
+  if (!RELATIVE_SCREENSHOT_RE.test(ref)) {
+    return `relative refs must look like "media/<file>" with no subdirectories, got: ${ref}`;
+  }
+  if (!hasAllowedScreenshotExt(ref)) return `must end in ${SCREENSHOT_EXTENSIONS.join(' or ')}: ${ref}`;
+  return null;
 }
 
 function validateScreenshots(refs: unknown): string[] {
