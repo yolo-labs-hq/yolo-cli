@@ -164,17 +164,45 @@ export function runTileAppInit(opts: InitOptions): CmdResult {
 const status = document.getElementById('status');
 if (status) status.textContent = 'Ready — edit app.js to build your app.';
 `;
+  // Store screenshots live in `media/`. Scaffolding the directory (with a
+  // README, since an empty dir wouldn't survive and a dotfile is skipped by
+  // both the collector and the server) is what makes the feature discoverable
+  // — an author who never learns the folder exists ships a listing with no
+  // preview and no idea one was possible.
+  const mediaReadme = `# Store screenshots
+
+Drop screenshots here, then reference them from tileapp.json:
+
+    "screenshots": ["media/01-main.webp"]
+
+\`yolo tileapp publish tileapp.json --personal\` walks this directory and
+uploads whatever is in it; the platform serves each file at
+/v1/tileapps/<appId>/media/<file>.
+
+  format   1280x800 (16:10) webp, <= 400 KB each, 1-6 images, first is the hero
+  capture  render at 2x and downscale — the store card crops to ~320px wide
+  content  show the app doing its job on realistic data; an empty state or a
+           permission prompt is a wasted slot
+  budget   bundles cap at 100 files / 3 MB total
+
+An absolute https:// URL works too, and is the ONLY option for a runtime app
+(it publishes an image, not a bundle, so it has nowhere to put these).
+
+Check refs before publishing:  yolo tileapp validate tileapp.json --personal
+`;
   try {
     fs.mkdirSync(dir, { recursive: false });
     fs.writeFileSync(path.join(dir, 'tileapp.json'), `${JSON.stringify(manifest, null, 2)}\n`);
     fs.writeFileSync(path.join(dir, 'index.html'), indexHtml);
     fs.writeFileSync(path.join(dir, 'app.js'), appJs);
+    fs.mkdirSync(path.join(dir, 'media'), { recursive: false });
+    fs.writeFileSync(path.join(dir, 'media', 'README.md'), mediaReadme);
   } catch (e) {
     return { ok: false, kind: 'io', message: `scaffold failed: ${(e as Error).message}` };
   }
   return {
     ok: true,
-    output: `Created ${name}/ (tileapp.json + index.html + app.js)\n  note: bundle CSP is \`script-src 'self'\` — keep JS in app.js (no inline <script>, no eval, no network)\n  next: cd ${name} && yolo tileapp publish tileapp.json --personal`,
+    output: `Created ${name}/ (tileapp.json + index.html + app.js + media/)\n  note: bundle CSP is \`script-src 'self'\` — keep JS in app.js (no inline <script>, no eval, no network)\n  note: drop a 1280x800 webp in media/ and add \`"screenshots": ["media/01-main.webp"]\` to get a store preview (see media/README.md)\n  next: cd ${name} && yolo tileapp publish tileapp.json --personal`,
   };
 }
 
