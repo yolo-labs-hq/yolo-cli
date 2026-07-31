@@ -112,13 +112,27 @@ export function mockBrokerResponse(
 
 // ── validate ─────────────────────────────────────────────────────────────────
 
-export interface ValidateOptions { manifestPath: string; bundleDir?: string }
+export interface ValidateOptions {
+  manifestPath: string;
+  bundleDir?: string;
+  /**
+   * Lint as a PERSONAL app (`publish --personal`). Off by default because the
+   * partner path is the stricter one: partner ingest uploads no media, so a
+   * `media/<file>` screenshot ref must fail here rather than pass the lint and
+   * be rejected server-side at publish.
+   */
+  personal?: boolean;
+}
 
 export function runTileAppValidate(opts: ValidateOptions): DevResult {
   const read = readManifestFile(opts.manifestPath);
   if (!read.ok) return { ok: false, kind: 'io', message: read.message };
 
-  const v = validateManifest(read.manifest);
+  // A runtime personal app publishes an OCI archive and gets no R2 bundle, so
+  // only a PURE-UI personal manifest may use the `media/<file>` ref form.
+  const v = validateManifest(read.manifest, {
+    allowPlatformHostedScreenshots: !!opts.personal && !isRuntimeManifest(read.manifest),
+  });
   const errors = [...v.errors, ...publishGateErrors(read.manifest)];
 
   // A non-object manifest is fully reported by validateManifest; bail before the

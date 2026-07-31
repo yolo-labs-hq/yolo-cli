@@ -51,7 +51,20 @@ function hasAllowedScreenshotExt(pathname: string): boolean {
   return SCREENSHOT_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
-function validateScreenshotRef(ref: string): string | null {
+export interface ScreenshotRefOptions {
+  /**
+   * Whether the `media/<file>` form is available to this publishing path.
+   * Default FALSE — the PARTNER-SAFE default. Partner ingest uploads no media,
+   * so a relative ref would pass this lint and then be rejected server-side by
+   * `validateManifestForPublish`; a CLI that green-lights it is worse than one
+   * that is strict. Only `publish --personal` for a PURE-UI app opts in (a
+   * runtime personal app publishes an OCI archive and gets no R2 bundle
+   * either).
+   */
+  allowPlatformHostedScreenshots?: boolean;
+}
+
+function validateScreenshotRef(ref: string, opts: ScreenshotRefOptions = {}): string | null {
   if (typeof ref !== 'string' || ref.length === 0) return 'must be a non-empty string';
   if (ref.length > 500) return 'must be at most 500 characters';
   if (/^https:\/\//i.test(ref)) {
@@ -64,11 +77,12 @@ function validateScreenshotRef(ref: string): string | null {
     if (!hasAllowedScreenshotExt(url.pathname)) return `must end in ${SCREENSHOT_EXTENSIONS.join(' or ')}: ${ref}`;
     return null;
   }
-  // `media/<file>` is the PLATFORM-HOSTED form. It is valid here because this
-  // CLI lints personal apps, whose bundle — including a `media/` subdirectory —
-  // is uploaded to R2 by `yolo tileapp publish --personal`, and the media route
-  // serves screenshots from exactly there. (Partner ingest has no such store
-  // and is rejected server-side; see `validateManifestForPublish`.)
+  // `media/<file>` is the PLATFORM-HOSTED form — valid only for a publishing
+  // path that actually has a store behind it (a pure-UI personal app's R2
+  // bundle). See ScreenshotRefOptions.
+  if (!opts.allowPlatformHostedScreenshots) {
+    return `must be an absolute https:// URL — the "media/<file>" form requires platform-hosted storage, which this publishing path does not have. Host the image and reference it by URL. Got: ${ref}`;
+  }
   if (/^[a-z][a-z0-9+.-]*:/i.test(ref)) return `must be an https:// URL or a "media/<file>" path, got: ${ref}`;
   if (!RELATIVE_SCREENSHOT_RE.test(ref)) {
     return `relative refs must look like "media/<file>" with no subdirectories, got: ${ref}`;
@@ -77,7 +91,7 @@ function validateScreenshotRef(ref: string): string | null {
   return null;
 }
 
-function validateScreenshots(refs: unknown): string[] {
+function validateScreenshots(refs: unknown, opts: ScreenshotRefOptions = {}): string[] {
   if (refs === undefined) return [];
   if (!Array.isArray(refs)) return ['screenshots must be an array of strings when present'];
   if (refs.length > MAX_SCREENSHOTS) {
@@ -85,7 +99,7 @@ function validateScreenshots(refs: unknown): string[] {
   }
   const errors: string[] = [];
   for (const ref of refs) {
-    const err = validateScreenshotRef(ref as string);
+    const err = validateScreenshotRef(ref as string, opts);
     if (err) errors.push(`screenshots entry ${err}`);
   }
   return errors;
@@ -147,7 +161,7 @@ export function parsePermissionShape(raw: string): ParsedPermission | null {
  * (not fail-fast) so the author sees all problems at once — matching the
  * server. Returns `{ ok, errors }`.
  */
-export function validateManifest(raw: unknown): ManifestValidation {
+export function validateManifest(raw: unknown, opts: ScreenshotRefOptions = {}): ManifestValidation {
   const errors: string[] = [];
   if (!isObj(raw)) return { ok: false, errors: ['manifest is not an object'] };
 
@@ -221,7 +235,7 @@ export function validateManifest(raw: unknown): ManifestValidation {
   }
 
   if (raw.category !== undefined && !isStr(raw.category)) errors.push('category must be a string when present');
-  errors.push(...validateScreenshots(raw.screenshots));
+  errors.push(...validateScreenshots(raw.screenshots, opts));
   if (raw.changelog !== undefined && !isStr(raw.changelog)) errors.push('changelog must be a string when present');
   if (raw.featured !== undefined && typeof raw.featured !== 'boolean') errors.push('featured must be a boolean when present');
 

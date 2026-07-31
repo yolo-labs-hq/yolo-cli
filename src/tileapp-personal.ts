@@ -274,7 +274,9 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
   }
 
   // Pure-UI path: strict schema lint (the server re-validates authoritatively).
-  const v = validateManifest(read.manifest);
+  // This IS the path that gets an R2 bundle, so the `media/<file>` screenshot
+  // form is available to it — see ScreenshotRefOptions.
+  const v = validateManifest(read.manifest, { allowPlatformHostedScreenshots: true });
   if (v.errors.length > 0) {
     return { ok: false, kind: 'validation', message: `manifest invalid:\n  - ${v.errors.join('\n  - ')}` };
   }

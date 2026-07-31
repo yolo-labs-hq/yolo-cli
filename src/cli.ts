@@ -836,7 +836,7 @@ function tileAppUsage(sub: 'sign' | 'publish' | 'validate' | 'dev' | 'init' | 'i
     sign: 'Usage: yolo tileapp sign <manifest.json> --publisher <id> [--key <keyId>] [--stdout]\n',
     publish: 'Usage: yolo tileapp publish <manifest.json> --personal [--bundle-dir <dir>] [--context <dir>] [--dockerfile <f>] [--builder auto|podman|skopeo]   (personal app)\n'
       + '   or: yolo tileapp publish <manifest.json> [--channel beta|stable] [--image-digest <d>]   (marketplace)\n',
-    validate: 'Usage: yolo tileapp validate <manifest.json> [--bundle-dir <dir>]\n',
+    validate: 'Usage: yolo tileapp validate <manifest.json> [--bundle-dir <dir>] [--personal]\n',
     dev: 'Usage: yolo tileapp dev <manifest.json> [--port N] [--host H] [--bundle-dir <dir>] [--deny]\n',
     install: 'Usage: yolo tileapp install <appId> --workspace <workspaceId> [--accept-optional <perm>]...\n',
     'add-tile': 'Usage: yolo tileapp add-tile <appId> --workspace <workspaceId> [--name <name>] [--version <v>]\n',
@@ -1000,14 +1000,16 @@ async function runTileAppValidateCmd(args: string[]): Promise<number> {
   const { runTileAppValidate, devExitCode } = await import('./tileapp-developer.js');
   let manifestPath: string | undefined;
   let bundleDir: string | undefined;
+  let personal = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === '--bundle-dir') { bundleDir = args[++i]; if (bundleDir === undefined) return tileAppUsage('validate', '--bundle-dir requires a value'); }
+    else if (a === '--personal') { personal = true; }
     else if (!a.startsWith('-') && !manifestPath) manifestPath = a;
     else return tileAppUsage('validate', `unexpected argument '${a}'`);
   }
   if (!manifestPath) return tileAppUsage('validate', 'a manifest path is required');
-  const result = runTileAppValidate({ manifestPath, bundleDir });
+  const result = runTileAppValidate({ manifestPath, bundleDir, personal });
   if (result.ok) { process.stdout.write(`${result.output}\n`); return 0; }
   process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
   return devExitCode(result.kind);
