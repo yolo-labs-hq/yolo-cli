@@ -28,6 +28,58 @@ interface ParsedPermission {
 }
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
+
+// ── Store screenshots ───────────────────────────────────────────────────────
+// Mirror of `common-api/src/types/tileapp-screenshots.ts`. The rules a
+// publisher needs BEFORE uploading (count, ref form, extension) are checked
+// here so `yolo tileapp validate` catches them offline; the dimension/content
+// rules that need the image bytes are in
+// `docs/TILEAPP_SCREENSHOT_GUIDELINES.md` and checked at review.
+const MAX_SCREENSHOTS = 6;
+const SCREENSHOT_EXTENSIONS = ['.webp', '.png'];
+const RELATIVE_SCREENSHOT_RE = /^media\/[a-z0-9][a-z0-9._-]*$/;
+
+function hasAllowedScreenshotExt(pathname: string): boolean {
+  const lower = pathname.toLowerCase();
+  return SCREENSHOT_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+function validateScreenshotRef(ref: string): string | null {
+  if (typeof ref !== 'string' || ref.length === 0) return 'must be a non-empty string';
+  if (ref.length > 500) return 'must be at most 500 characters';
+  if (/^https:\/\//i.test(ref)) {
+    let url: URL;
+    try {
+      url = new URL(ref);
+    } catch {
+      return `is not a valid URL: ${ref}`;
+    }
+    if (!hasAllowedScreenshotExt(url.pathname)) return `must end in ${SCREENSHOT_EXTENSIONS.join(' or ')}: ${ref}`;
+    return null;
+  }
+  // `http://` is rejected rather than upgraded: the store renders these on an
+  // https page, where a mixed-content image is silently blocked.
+  if (/^[a-z][a-z0-9+.-]*:/i.test(ref)) return `must be an https:// URL or a "media/<file>" path, got: ${ref}`;
+  if (!RELATIVE_SCREENSHOT_RE.test(ref)) {
+    return `relative refs must look like "media/<file>" with no subdirectories, got: ${ref}`;
+  }
+  if (!hasAllowedScreenshotExt(ref)) return `must end in ${SCREENSHOT_EXTENSIONS.join(' or ')}: ${ref}`;
+  return null;
+}
+
+function validateScreenshots(refs: unknown): string[] {
+  if (refs === undefined) return [];
+  if (!Array.isArray(refs)) return ['screenshots must be an array of strings when present'];
+  if (refs.length > MAX_SCREENSHOTS) {
+    return [`screenshots may list at most ${MAX_SCREENSHOTS} images (got ${refs.length})`];
+  }
+  const errors: string[] = [];
+  for (const ref of refs) {
+    const err = validateScreenshotRef(ref as string);
+    if (err) errors.push(`screenshots entry ${err}`);
+  }
+  return errors;
+}
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+].+)?$/;
 
 function isObj(v: unknown): v is Record<string, unknown> {
@@ -159,9 +211,7 @@ export function validateManifest(raw: unknown): ManifestValidation {
   }
 
   if (raw.category !== undefined && !isStr(raw.category)) errors.push('category must be a string when present');
-  if (raw.screenshots !== undefined && (!Array.isArray(raw.screenshots) || !raw.screenshots.every(isStr))) {
-    errors.push('screenshots must be an array of strings when present');
-  }
+  errors.push(...validateScreenshots(raw.screenshots));
   if (raw.changelog !== undefined && !isStr(raw.changelog)) errors.push('changelog must be a string when present');
   if (raw.featured !== undefined && typeof raw.featured !== 'boolean') errors.push('featured must be a boolean when present');
 
