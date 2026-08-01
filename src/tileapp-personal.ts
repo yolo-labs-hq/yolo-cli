@@ -335,6 +335,23 @@ export async function runTileAppMediaPush(opts: MediaPushOptions): Promise<CmdRe
   // unhelpful error. Splitting keeps each request well inside that budget; the
   // per-app cap is enforced atomically server-side, so multiple requests are
   // safe and the total limit still holds.
+  //
+  // Check the TOTAL against what's already stored first: split across requests,
+  // an early batch can succeed and a later one hit the cap, leaving the command
+  // partially applied. The server's per-request guard can't see the whole set.
+  const priorRefs = Array.isArray(storedManifest.screenshots)
+    ? (storedManifest.screenshots as unknown[]).filter((r): r is string => typeof r === 'string')
+    : [];
+  const wouldBe = new Set([...priorRefs, ...files.map((f) => `media/${f.name}`)]);
+  if (wouldBe.size > 6) {
+    return {
+      ok: false,
+      kind: 'validation',
+      message: `that would leave ${wouldBe.size} screenshots and the limit is 6 — `
+        + `${priorRefs.length} already referenced, ${files.length} in ${dir}. Remove some first.`,
+    };
+  }
+
   const MAX_REQUEST_BYTES = 3 * 1024 * 1024; // encoded, comfortably under 5 MiB
   const batches: Array<typeof files> = [];
   let current: typeof files = [];
