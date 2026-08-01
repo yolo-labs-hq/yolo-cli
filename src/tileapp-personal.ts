@@ -328,20 +328,47 @@ export async function runTileAppMediaPush(opts: MediaPushOptions): Promise<CmdRe
     return { ok: false, kind: 'http', message: `list request failed: ${(e as Error).message}` };
   }
 
-  let uploaded: Array<{ ref: string; width?: number; height?: number }>;
+  // Chunk by encoded size. The server accepts 6 images of up to 1 MiB each, but
+  // the route sits behind a global 5 MiB `express.json` parser and base64
+  // inflates by ~4/3 — so a batch that is legal by every documented limit can
+  // still be rejected by the body parser before the handler runs, with an
+  // unhelpful error. Splitting keeps each request well inside that budget; the
+  // per-app cap is enforced atomically server-side, so multiple requests are
+  // safe and the total limit still holds.
+  const MAX_REQUEST_BYTES = 3 * 1024 * 1024; // encoded, comfortably under 5 MiB
+  const batches: Array<typeof files> = [];
+  let current: typeof files = [];
+  let currentBytes = 0;
+  for (const f of files) {
+    if (current.length > 0 && currentBytes + f.content.length > MAX_REQUEST_BYTES) {
+      batches.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(f);
+    currentBytes += f.content.length;
+  }
+  if (current.length > 0) batches.push(current);
+
+  const uploaded: Array<{ ref: string; width?: number; height?: number }> = [];
   let screenshots: string[] = [];
-  try {
-    const res = await fetchImpl(`${base}/tileapps/personal/${encodeURIComponent(appId)}/media`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ files }),
-    });
-    if (!res.ok) return { ok: false, kind: 'http', message: `media upload failed: HTTP ${res.status} — ${await safeText(res)}` };
-    const json = (await res.json()) as { files?: Array<{ ref: string; width?: number; height?: number }>; screenshots?: string[] };
-    uploaded = json.files ?? [];
-    screenshots = json.screenshots ?? uploaded.map((f) => f.ref);
-  } catch (e) {
-    return { ok: false, kind: 'http', message: `media upload request failed: ${(e as Error).message}` };
+  for (const batch of batches) {
+    try {
+      const res = await fetchImpl(`${base}/tileapps/personal/${encodeURIComponent(appId)}/media`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ files: batch }),
+      });
+      if (!res.ok) {
+        const sofar = uploaded.length > 0 ? ` (${uploaded.length} image(s) already uploaded)` : '';
+        return { ok: false, kind: 'http', message: `media upload failed: HTTP ${res.status} — ${await safeText(res)}${sofar}` };
+      }
+      const json = (await res.json()) as { files?: Array<{ ref: string; width?: number; height?: number }>; screenshots?: string[] };
+      uploaded.push(...(json.files ?? []));
+      screenshots = json.screenshots ?? uploaded.map((f) => f.ref);
+    } catch (e) {
+      return { ok: false, kind: 'http', message: `media upload request failed: ${(e as Error).message}` };
+    }
   }
 
   // No manifest round-trip here on purpose. The upload route merges the refs
