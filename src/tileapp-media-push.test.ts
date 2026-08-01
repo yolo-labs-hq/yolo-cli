@@ -64,7 +64,11 @@ function stubFetch(calls: Call[], listApps: unknown[]) {
     if (url.includes('/media') && method === 'POST') {
       return {
         ok: true, status: 200, text: async () => '',
-        json: async () => ({ ok: true, files: [{ ref: 'media/01-main.png', width: 1280, height: 800 }] }),
+        json: async () => ({
+          ok: true,
+          files: [{ ref: 'media/01-main.png', width: 1280, height: 800 }],
+          screenshots: ['media/01-main.png'],
+        }),
       };
     }
     if (url.endsWith('/tileapps/personal') && method === 'POST') {
@@ -102,57 +106,37 @@ describe('yolo tileapp media push', () => {
     assert.deepEqual(names, ['01-main.png']);
   });
 
-  it('re-registers the manifest so the screenshot is actually visible', async () => {
+  it('does NOT write the manifest itself — the server merges refs in-request', async () => {
+    // A client-side read-modify-write would POST a whole stale snapshot and
+    // silently roll back anything that landed in between. Merging moved into
+    // the upload route; the CLI must not re-introduce the round-trip.
     const { manifestPath } = project();
     const calls: Call[] = [];
-    await runTileAppMediaPush({
+    const res = await runTileAppMediaPush({
       manifestPath,
       fetchImpl: stubFetch(calls, [{ appId: 'pa-owner-demo', localId: 'demo', manifest: { version: '2.0.0' } }]) as never,
       env: ENV,
     });
-    const register = calls.find((c) => c.url.endsWith('/tileapps/personal') && c.method === 'POST');
-    assert.ok(register, 'must re-register the manifest — uploading bytes alone renders nothing');
-    const body = register.body as { id: string; manifest: Record<string, unknown> };
-    assert.equal(body.id, 'demo');
-    assert.deepEqual(body.manifest.screenshots, ['media/01-main.png']);
-    // Merged onto the STORED manifest, so unrelated fields survive.
-    assert.equal(body.manifest.version, '2.0.0');
-    // Manifest-only: it must never touch the bundle route.
+    assert.equal(res.ok, true, res.ok ? '' : res.message);
+    assert.ok(!calls.some((c) => c.url.endsWith('/tileapps/personal') && c.method === 'POST'), 'must not re-register the manifest');
     assert.ok(!calls.some((c) => c.url.includes('/bundle')), 'must not replace the bundle');
-  });
-
-  it('merges with existing refs instead of clobbering them', async () => {
-    const { manifestPath } = project();
-    const calls: Call[] = [];
-    await runTileAppMediaPush({
-      manifestPath,
-      fetchImpl: stubFetch(calls, [
-        { appId: 'pa-owner-demo', localId: 'demo', manifest: { screenshots: ['https://cdn/old.webp'] } },
-      ]) as never,
-      env: ENV,
-    });
-    const register = calls.find((c) => c.url.endsWith('/tileapps/personal') && c.method === 'POST')!;
-    assert.deepEqual((register.body as { manifest: { screenshots: string[] } }).manifest.screenshots, [
-      'https://cdn/old.webp',
-      'media/01-main.png',
+    // Exactly one GET to resolve the appId, and one POST to the media route.
+    assert.deepEqual(calls.map((c) => `${c.method} ${c.url.split('/v1')[1]}`), [
+      'GET /tileapps/personal',
+      'POST /tileapps/personal/pa-owner-demo/media',
     ]);
   });
 
-  it('keeps an overwritten ref in its original position (the hero must not move)', async () => {
+  it('reports the resulting screenshot array from the server response', async () => {
     const { manifestPath } = project();
     const calls: Call[] = [];
-    await runTileAppMediaPush({
+    const res = await runTileAppMediaPush({
       manifestPath,
-      fetchImpl: stubFetch(calls, [
-        { appId: 'pa-owner-demo', localId: 'demo', manifest: { screenshots: ['media/01-main.png', 'media/02-detail.webp'] } },
-      ]) as never,
+      fetchImpl: stubFetch(calls, [{ appId: 'pa-owner-demo', localId: 'demo', manifest: {} }]) as never,
       env: ENV,
     });
-    const register = calls.find((c) => c.url.endsWith('/tileapps/personal') && c.method === 'POST')!;
-    assert.deepEqual((register.body as { manifest: { screenshots: string[] } }).manifest.screenshots, [
-      'media/01-main.png',
-      'media/02-detail.webp',
-    ]);
+    assert.equal(res.ok, true);
+    if (res.ok) assert.match(res.output, /media\/01-main\.png/);
   });
 
   it('fails clearly when no published app matches', async () => {

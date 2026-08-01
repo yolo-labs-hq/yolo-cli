@@ -222,8 +222,19 @@ Check refs before publishing:  yolo tileapp validate tileapp.json --personal
  * to the server rather than rejected here.
  */
 function screenshotPreCheckError(name: string, body: Buffer): string | null {
+  // Size first — it needs no parsing and the server rejects on it too.
+  if (body.length > 1024 * 1024) {
+    return `${name}: image is ${Math.round(body.length / 1024)} KB — the limit is 1024 KB`;
+  }
   const dims = readImageDimensions(body);
   if (!dims) return null; // not a shape we can read — the server is authoritative
+  // The media route sets Content-Type from the EXTENSION, so bytes that
+  // disagree with the name would be served as a lie. The server rejects this;
+  // catching it here keeps the rejection ahead of the manifest registration.
+  const ext = name.slice(name.lastIndexOf('.') + 1).toLowerCase();
+  if (ext !== dims.format) {
+    return `${name}: file is named .${ext} but the bytes are ${dims.format}`;
+  }
   if (dims.width < 640 || dims.width > 2560) {
     return `${name}: image is ${dims.width}px wide — screenshots must be 640-2560px (1280x800 is the target)`;
   }
@@ -318,6 +329,7 @@ export async function runTileAppMediaPush(opts: MediaPushOptions): Promise<CmdRe
   }
 
   let uploaded: Array<{ ref: string; width?: number; height?: number }>;
+  let screenshots: string[] = [];
   try {
     const res = await fetchImpl(`${base}/tileapps/personal/${encodeURIComponent(appId)}/media`, {
       method: 'POST',
@@ -325,50 +337,17 @@ export async function runTileAppMediaPush(opts: MediaPushOptions): Promise<CmdRe
       body: JSON.stringify({ files }),
     });
     if (!res.ok) return { ok: false, kind: 'http', message: `media upload failed: HTTP ${res.status} — ${await safeText(res)}` };
-    const json = (await res.json()) as { files?: Array<{ ref: string; width?: number; height?: number }> };
+    const json = (await res.json()) as { files?: Array<{ ref: string; width?: number; height?: number }>; screenshots?: string[] };
     uploaded = json.files ?? [];
+    screenshots = json.screenshots ?? uploaded.map((f) => f.ref);
   } catch (e) {
     return { ok: false, kind: 'http', message: `media upload request failed: ${(e as Error).message}` };
   }
 
-  // Uploading bytes alone leaves the screenshot INVISIBLE: the store reads the
-  // stored manifest, so a ref that isn't in it is never rendered. Re-register
-  // the manifest with the refs merged in.
-  //
-  // This posts to /tileapps/personal, which upserts the MANIFEST ONLY — it does
-  // not touch the bundle. Telling the author to run `publish --personal`
-  // instead would trigger the full bundle replace this command exists to avoid,
-  // and would be impossible for anyone who no longer has the bundle locally.
-  //
-  // Merge onto the STORED manifest, not the local file: the local copy may have
-  // drifted, and the smallest possible change to a live app is the right one.
-  // Preserve ORDER. The first ref is the store hero, so re-uploading an
-  // existing screenshot must leave it where it was — filtering it out and
-  // appending would silently promote whatever came second.
-  const merged = uploaded.map((f) => f.ref);
-  const priorRefs = Array.isArray(storedManifest.screenshots)
-    ? (storedManifest.screenshots as unknown[]).filter((r): r is string => typeof r === 'string')
-    : [];
-  const screenshots = [...priorRefs, ...merged.filter((r) => !priorRefs.includes(r))];
-  const nextManifest = { ...storedManifest, screenshots };
-  try {
-    const res = await fetchImpl(`${base}/tileapps/personal`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ id: localId, manifest: nextManifest }),
-    });
-    if (!res.ok) {
-      return {
-        ok: false,
-        kind: 'http',
-        message: `images uploaded, but re-registering the manifest failed: HTTP ${res.status} — ${await safeText(res)}\n`
-          + `The bytes are stored; add "screenshots": ${JSON.stringify(screenshots)} to the app and re-register to make them visible.`,
-      };
-    }
-  } catch (e) {
-    return { ok: false, kind: 'http', message: `images uploaded, but the manifest re-register failed: ${(e as Error).message}` };
-  }
-
+  // No manifest round-trip here on purpose. The upload route merges the refs
+  // into the stored manifest in-request; doing it client-side would mean POSTing
+  // a whole stale snapshot and silently rolling back anything that landed in
+  // between.
   const lines = uploaded.map((f) => `  ${f.ref}${f.width ? `  ${f.width}x${f.height}` : ''}`);
   return {
     ok: true,
