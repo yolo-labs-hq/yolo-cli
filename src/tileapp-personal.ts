@@ -188,6 +188,10 @@ uploads whatever is in it; the platform serves each file at
 An absolute https:// URL works too, and is the ONLY option for a runtime app
 (it publishes an image, not a bundle, so it has nowhere to put these).
 
+Upload (additive — leaves the rest of your bundle alone):
+
+    yolo tileapp media push tileapp.json
+
 Check refs before publishing:  yolo tileapp validate tileapp.json --personal
 `;
   try {
@@ -204,6 +208,98 @@ Check refs before publishing:  yolo tileapp validate tileapp.json --personal
     ok: true,
     output: `Created ${name}/ (tileapp.json + index.html + app.js + media/)\n  note: bundle CSP is \`script-src 'self'\` — keep JS in app.js (no inline <script>, no eval, no network)\n  note: drop a 1280x800 webp in media/ and add \`"screenshots": ["media/01-main.webp"]\` to get a store preview (see media/README.md)\n  next: cd ${name} && yolo tileapp publish tileapp.json --personal`,
   };
+}
+
+// ── media (store screenshots) ───────────────────────────────────────────────
+
+const MEDIA_NAME_RE = /^[a-z0-9][a-z0-9._-]*$/;
+const MEDIA_EXTS = new Set(['.webp', '.png']);
+
+export interface MediaPushOptions {
+  /** Manifest path — its `id` resolves the namespaced appId server-side. */
+  manifestPath: string;
+  /** Directory of images to upload. Defaults to `media/` beside the manifest. */
+  dir?: string;
+  fetchImpl?: FetchLike;
+  env?: Record<string, string | undefined>;
+}
+
+/**
+ * Upload store screenshots for an already-published personal app.
+ *
+ * ADDITIVE — it posts to `/tileapps/personal/:appId/media`, which writes one
+ * file at a time and never reaps. This is deliberately NOT `publish`: the
+ * bundle PUT is a full replace, so using it to add a screenshot would delete
+ * the app's index.html. This command exists so adding a preview never requires
+ * re-uploading (or still having) the whole bundle.
+ */
+export async function runTileAppMediaPush(opts: MediaPushOptions): Promise<CmdResult> {
+  const auth = resolveAuth(opts.env ?? process.env);
+  if (!auth.ok) return { ok: false, kind: 'usage', message: auth.message };
+
+  const read = readManifest(opts.manifestPath);
+  if (!read.ok) return { ok: false, kind: 'io', message: read.message };
+  const localId = typeof read.manifest.id === 'string' ? read.manifest.id : '';
+  if (!LOCAL_ID_RE.test(localId)) {
+    return { ok: false, kind: 'validation', message: `manifest.id must be a lowercase kebab-case slug (got '${localId}')` };
+  }
+
+  const dir = path.resolve(opts.dir ?? path.join(path.dirname(path.resolve(opts.manifestPath)), 'media'));
+  let entries: string[];
+  try { entries = fs.readdirSync(dir); }
+  catch { return { ok: false, kind: 'io', message: `no media directory at ${dir} — create it and add your screenshots (see media/README.md from \`yolo tileapp init\`)` }; }
+
+  const files: Array<{ name: string; content: string }> = [];
+  for (const name of entries.sort()) {
+    const ext = path.extname(name).toLowerCase();
+    if (!MEDIA_EXTS.has(ext)) continue; // README.md and friends are not screenshots
+    if (!MEDIA_NAME_RE.test(name)) {
+      return { ok: false, kind: 'validation', message: `invalid media filename '${name}' — lowercase, one segment, e.g. 01-main.webp` };
+    }
+    files.push({ name, content: fs.readFileSync(path.join(dir, name)).toString('base64') });
+  }
+  if (files.length === 0) {
+    return { ok: false, kind: 'io', message: `no .webp/.png files in ${dir}` };
+  }
+
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const base = apiBase(auth.commonApiUrl);
+  const headers = { 'content-type': 'application/json', authorization: `Bearer ${auth.userToken}` };
+
+  // Resolve the namespaced appId (pa-<ownerId>-<localId>) — the caller only
+  // knows the local slug; the owner half is server-side.
+  let appId: string;
+  try {
+    const res = await fetchImpl(`${base}/tileapps/personal`, { headers });
+    if (!res.ok) return { ok: false, kind: 'http', message: `could not list personal apps: HTTP ${res.status} — ${await safeText(res)}` };
+    const json = (await res.json()) as { apps?: Array<{ id?: string }> };
+    const match = (json.apps ?? []).find((a) => typeof a.id === 'string' && a.id.endsWith(`-${localId}`));
+    if (!match?.id) {
+      return { ok: false, kind: 'validation', message: `no published personal app matching '${localId}' — publish it first: yolo tileapp publish ${opts.manifestPath} --personal` };
+    }
+    appId = match.id;
+  } catch (e) {
+    return { ok: false, kind: 'http', message: `list request failed: ${(e as Error).message}` };
+  }
+
+  try {
+    const res = await fetchImpl(`${base}/tileapps/personal/${encodeURIComponent(appId)}/media`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ files }),
+    });
+    if (!res.ok) return { ok: false, kind: 'http', message: `media upload failed: HTTP ${res.status} — ${await safeText(res)}` };
+    const json = (await res.json()) as { files?: Array<{ ref: string; width?: number; height?: number }> };
+    const uploaded = json.files ?? [];
+    const lines = uploaded.map((f) => `  ${f.ref}${f.width ? `  ${f.width}x${f.height}` : ''}`);
+    const refs = JSON.stringify(uploaded.map((f) => f.ref));
+    return {
+      ok: true,
+      output: `Uploaded ${uploaded.length} screenshot(s) to ${appId}:\n${lines.join('\n')}\n\nAdd them to ${opts.manifestPath}:\n  "screenshots": ${refs}\nthen re-register:  yolo tileapp publish ${opts.manifestPath} --personal`,
+    };
+  } catch (e) {
+    return { ok: false, kind: 'http', message: `media upload request failed: ${(e as Error).message}` };
+  }
 }
 
 // ── publish --personal ───────────────────────────────────────────────────────
