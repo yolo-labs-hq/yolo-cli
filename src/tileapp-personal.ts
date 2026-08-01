@@ -239,6 +239,11 @@ export async function runTileAppMediaPush(opts: MediaPushOptions): Promise<CmdRe
 
   const read = readManifest(opts.manifestPath);
   if (!read.ok) return { ok: false, kind: 'io', message: read.message };
+  // `null` and arrays are valid JSON but not manifests — deref would throw a
+  // TypeError past the CLI's exit handling instead of reporting a failure.
+  if (typeof read.manifest !== 'object' || read.manifest === null || Array.isArray(read.manifest)) {
+    return { ok: false, kind: 'validation', message: `manifest '${opts.manifestPath}' must be a JSON object` };
+  }
   const localId = typeof read.manifest.id === 'string' ? read.manifest.id : '';
   if (!LOCAL_ID_RE.test(localId)) {
     return { ok: false, kind: 'validation', message: `manifest.id must be a lowercase kebab-case slug (got '${localId}')` };
@@ -269,19 +274,23 @@ export async function runTileAppMediaPush(opts: MediaPushOptions): Promise<CmdRe
   // Resolve the namespaced appId (pa-<ownerId>-<localId>) — the caller only
   // knows the local slug; the owner half is server-side.
   let appId: string;
+  let storedManifest: Record<string, unknown>;
   try {
     const res = await fetchImpl(`${base}/tileapps/personal`, { headers });
     if (!res.ok) return { ok: false, kind: 'http', message: `could not list personal apps: HTTP ${res.status} — ${await safeText(res)}` };
-    const json = (await res.json()) as { apps?: Array<{ id?: string }> };
-    const match = (json.apps ?? []).find((a) => typeof a.id === 'string' && a.id.endsWith(`-${localId}`));
-    if (!match?.id) {
-      return { ok: false, kind: 'validation', message: `no published personal app matching '${localId}' — publish it first: yolo tileapp publish ${opts.manifestPath} --personal` };
+    // Shape is { appId, localId, manifest, … } — match on localId exactly.
+    const json = (await res.json()) as { apps?: Array<{ appId?: string; localId?: string; manifest?: Record<string, unknown> }> };
+    const match = (json.apps ?? []).find((a) => a.localId === localId);
+    if (!match?.appId) {
+      return { ok: false, kind: 'validation', message: `no published personal app with id '${localId}' — publish it first: yolo tileapp publish ${opts.manifestPath} --personal` };
     }
-    appId = match.id;
+    appId = match.appId;
+    storedManifest = match.manifest ?? {};
   } catch (e) {
     return { ok: false, kind: 'http', message: `list request failed: ${(e as Error).message}` };
   }
 
+  let uploaded: Array<{ ref: string; width?: number; height?: number }>;
   try {
     const res = await fetchImpl(`${base}/tileapps/personal/${encodeURIComponent(appId)}/media`, {
       method: 'POST',
@@ -290,16 +299,51 @@ export async function runTileAppMediaPush(opts: MediaPushOptions): Promise<CmdRe
     });
     if (!res.ok) return { ok: false, kind: 'http', message: `media upload failed: HTTP ${res.status} — ${await safeText(res)}` };
     const json = (await res.json()) as { files?: Array<{ ref: string; width?: number; height?: number }> };
-    const uploaded = json.files ?? [];
-    const lines = uploaded.map((f) => `  ${f.ref}${f.width ? `  ${f.width}x${f.height}` : ''}`);
-    const refs = JSON.stringify(uploaded.map((f) => f.ref));
-    return {
-      ok: true,
-      output: `Uploaded ${uploaded.length} screenshot(s) to ${appId}:\n${lines.join('\n')}\n\nAdd them to ${opts.manifestPath}:\n  "screenshots": ${refs}\nthen re-register:  yolo tileapp publish ${opts.manifestPath} --personal`,
-    };
+    uploaded = json.files ?? [];
   } catch (e) {
     return { ok: false, kind: 'http', message: `media upload request failed: ${(e as Error).message}` };
   }
+
+  // Uploading bytes alone leaves the screenshot INVISIBLE: the store reads the
+  // stored manifest, so a ref that isn't in it is never rendered. Re-register
+  // the manifest with the refs merged in.
+  //
+  // This posts to /tileapps/personal, which upserts the MANIFEST ONLY — it does
+  // not touch the bundle. Telling the author to run `publish --personal`
+  // instead would trigger the full bundle replace this command exists to avoid,
+  // and would be impossible for anyone who no longer has the bundle locally.
+  //
+  // Merge onto the STORED manifest, not the local file: the local copy may have
+  // drifted, and the smallest possible change to a live app is the right one.
+  const merged = uploaded.map((f) => f.ref);
+  const priorRefs = Array.isArray(storedManifest.screenshots) ? (storedManifest.screenshots as unknown[]).filter((r): r is string => typeof r === 'string') : [];
+  const screenshots = [...priorRefs.filter((r) => !merged.includes(r)), ...merged];
+  const nextManifest = { ...storedManifest, screenshots };
+  try {
+    const res = await fetchImpl(`${base}/tileapps/personal`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ id: localId, manifest: nextManifest }),
+    });
+    if (!res.ok) {
+      return {
+        ok: false,
+        kind: 'http',
+        message: `images uploaded, but re-registering the manifest failed: HTTP ${res.status} — ${await safeText(res)}\n`
+          + `The bytes are stored; add "screenshots": ${JSON.stringify(screenshots)} to the app and re-register to make them visible.`,
+      };
+    }
+  } catch (e) {
+    return { ok: false, kind: 'http', message: `images uploaded, but the manifest re-register failed: ${(e as Error).message}` };
+  }
+
+  const lines = uploaded.map((f) => `  ${f.ref}${f.width ? `  ${f.width}x${f.height}` : ''}`);
+  return {
+    ok: true,
+    output: `Uploaded ${uploaded.length} screenshot(s) to ${appId}:\n${lines.join('\n')}\n\n`
+      + `Manifest updated — "screenshots": ${JSON.stringify(screenshots)}\n`
+      + `Keep ${opts.manifestPath} in sync by adding the same array, so your next publish doesn't drop them.`,
+  };
 }
 
 // ── publish --personal ───────────────────────────────────────────────────────
