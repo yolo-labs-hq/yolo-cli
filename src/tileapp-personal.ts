@@ -21,6 +21,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { resolveUserToken } from './auth-context.js';
 import { validateManifest, isRuntimeManifest } from './tileapp-validator.js';
+import { readImageDimensions } from './image-dimensions.js';
 import { resolveBundleDir } from './tileapp-developer.js';
 import { parseDockerfile, assembleOciArchive } from './tileapp-oci-assembler.js';
 
@@ -188,6 +189,10 @@ uploads whatever is in it; the platform serves each file at
 An absolute https:// URL works too, and is the ONLY option for a runtime app
 (it publishes an image, not a bundle, so it has nowhere to put these).
 
+Upload (additive — leaves the rest of your bundle alone):
+
+    yolo tileapp media push tileapp.json
+
 Check refs before publishing:  yolo tileapp validate tileapp.json --personal
 `;
   try {
@@ -203,6 +208,196 @@ Check refs before publishing:  yolo tileapp validate tileapp.json --personal
   return {
     ok: true,
     output: `Created ${name}/ (tileapp.json + index.html + app.js + media/)\n  note: bundle CSP is \`script-src 'self'\` — keep JS in app.js (no inline <script>, no eval, no network)\n  note: drop a 1280x800 webp in media/ and add \`"screenshots": ["media/01-main.webp"]\` to get a store preview (see media/README.md)\n  next: cd ${name} && yolo tileapp publish tileapp.json --personal`,
+  };
+}
+
+/**
+ * Offline screenshot pre-check, applied to `media/<file>` images.
+ *
+ * Runs BEFORE any server call so `publish --personal` can't register a manifest
+ * and then fail on the bundle upload, which would leave the app registered with
+ * no bundle (or a new manifest over an old bundle) while reporting failure.
+ * Header-only — the server still fully decodes; this just catches the mistake
+ * people actually make offline. Unparseable bytes return null and are deferred
+ * to the server rather than rejected here.
+ */
+function screenshotPreCheckError(name: string, body: Buffer): string | null {
+  // Size first — it needs no parsing and the server rejects on it too.
+  if (body.length > 1024 * 1024) {
+    return `${name}: image is ${Math.round(body.length / 1024)} KB — the limit is 1024 KB`;
+  }
+  const dims = readImageDimensions(body);
+  if (!dims) return null; // not a shape we can read — the server is authoritative
+  // The media route sets Content-Type from the EXTENSION, so bytes that
+  // disagree with the name would be served as a lie. The server rejects this;
+  // catching it here keeps the rejection ahead of the manifest registration.
+  const ext = name.slice(name.lastIndexOf('.') + 1).toLowerCase();
+  if (ext !== dims.format) {
+    return `${name}: file is named .${ext} but the bytes are ${dims.format}`;
+  }
+  if (dims.width < 640 || dims.width > 2560) {
+    return `${name}: image is ${dims.width}px wide — screenshots must be 640-2560px (1280x800 is the target)`;
+  }
+  const aspect = dims.width / dims.height;
+  if (Math.abs(aspect - 1.6) / 1.6 > 0.04) {
+    return `${name}: image is ${dims.width}x${dims.height} (${aspect.toFixed(2)}:1) — screenshots must be 16:10, e.g. 1280x800`;
+  }
+  return null;
+}
+
+// ── media (store screenshots) ───────────────────────────────────────────────
+
+const MEDIA_NAME_RE = /^[a-z0-9][a-z0-9._-]*$/;
+const MEDIA_EXTS = new Set(['.webp', '.png']);
+
+export interface MediaPushOptions {
+  /** Manifest path — its `id` resolves the namespaced appId server-side. */
+  manifestPath: string;
+  /** Directory of images to upload. Defaults to `media/` beside the manifest. */
+  dir?: string;
+  fetchImpl?: FetchLike;
+  env?: Record<string, string | undefined>;
+}
+
+/**
+ * Upload store screenshots for an already-published personal app.
+ *
+ * ADDITIVE — it posts to `/tileapps/personal/:appId/media`, which writes one
+ * file at a time and never reaps. This is deliberately NOT `publish`: the
+ * bundle PUT is a full replace, so using it to add a screenshot would delete
+ * the app's index.html. This command exists so adding a preview never requires
+ * re-uploading (or still having) the whole bundle.
+ */
+export async function runTileAppMediaPush(opts: MediaPushOptions): Promise<CmdResult> {
+  const auth = resolveAuth(opts.env ?? process.env);
+  if (!auth.ok) return { ok: false, kind: 'usage', message: auth.message };
+
+  const read = readManifest(opts.manifestPath);
+  if (!read.ok) return { ok: false, kind: 'io', message: read.message };
+  // `null` and arrays are valid JSON but not manifests — deref would throw a
+  // TypeError past the CLI's exit handling instead of reporting a failure.
+  if (typeof read.manifest !== 'object' || read.manifest === null || Array.isArray(read.manifest)) {
+    return { ok: false, kind: 'validation', message: `manifest '${opts.manifestPath}' must be a JSON object` };
+  }
+  const localId = typeof read.manifest.id === 'string' ? read.manifest.id : '';
+  if (!LOCAL_ID_RE.test(localId)) {
+    return { ok: false, kind: 'validation', message: `manifest.id must be a lowercase kebab-case slug (got '${localId}')` };
+  }
+
+  const dir = path.resolve(opts.dir ?? path.join(path.dirname(path.resolve(opts.manifestPath)), 'media'));
+  let entries: string[];
+  try { entries = fs.readdirSync(dir); }
+  catch { return { ok: false, kind: 'io', message: `no media directory at ${dir} — create it and add your screenshots (see media/README.md from \`yolo tileapp init\`)` }; }
+
+  const files: Array<{ name: string; content: string }> = [];
+  for (const name of entries.sort()) {
+    const ext = path.extname(name).toLowerCase();
+    if (!MEDIA_EXTS.has(ext)) continue; // README.md and friends are not screenshots
+    if (!MEDIA_NAME_RE.test(name)) {
+      return { ok: false, kind: 'validation', message: `invalid media filename '${name}' — lowercase, one segment, e.g. 01-main.webp` };
+    }
+    const bytes = fs.readFileSync(path.join(dir, name));
+    const preCheck = screenshotPreCheckError(name, bytes);
+    if (preCheck) return { ok: false, kind: 'validation', message: preCheck };
+    files.push({ name, content: bytes.toString('base64') });
+  }
+  if (files.length === 0) {
+    return { ok: false, kind: 'io', message: `no .webp/.png files in ${dir}` };
+  }
+
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const base = apiBase(auth.commonApiUrl);
+  const headers = { 'content-type': 'application/json', authorization: `Bearer ${auth.userToken}` };
+
+  // Resolve the namespaced appId (pa-<ownerId>-<localId>) — the caller only
+  // knows the local slug; the owner half is server-side.
+  let appId: string;
+  let storedManifest: Record<string, unknown>;
+  try {
+    const res = await fetchImpl(`${base}/tileapps/personal`, { headers });
+    if (!res.ok) return { ok: false, kind: 'http', message: `could not list personal apps: HTTP ${res.status} — ${await safeText(res)}` };
+    // Shape is { appId, localId, manifest, … } — match on localId exactly.
+    const json = (await res.json()) as { apps?: Array<{ appId?: string; localId?: string; manifest?: Record<string, unknown> }> };
+    const match = (json.apps ?? []).find((a) => a.localId === localId);
+    if (!match?.appId) {
+      return { ok: false, kind: 'validation', message: `no published personal app with id '${localId}' — publish it first: yolo tileapp publish ${opts.manifestPath} --personal` };
+    }
+    appId = match.appId;
+    storedManifest = match.manifest ?? {};
+  } catch (e) {
+    return { ok: false, kind: 'http', message: `list request failed: ${(e as Error).message}` };
+  }
+
+  // Chunk by encoded size. The server accepts 6 images of up to 1 MiB each, but
+  // the route sits behind a global 5 MiB `express.json` parser and base64
+  // inflates by ~4/3 — so a batch that is legal by every documented limit can
+  // still be rejected by the body parser before the handler runs, with an
+  // unhelpful error. Splitting keeps each request well inside that budget; the
+  // per-app cap is enforced atomically server-side, so multiple requests are
+  // safe and the total limit still holds.
+  //
+  // Check the TOTAL against what's already stored first: split across requests,
+  // an early batch can succeed and a later one hit the cap, leaving the command
+  // partially applied. The server's per-request guard can't see the whole set.
+  const priorRefs = Array.isArray(storedManifest.screenshots)
+    ? (storedManifest.screenshots as unknown[]).filter((r): r is string => typeof r === 'string')
+    : [];
+  const wouldBe = new Set([...priorRefs, ...files.map((f) => `media/${f.name}`)]);
+  if (wouldBe.size > 6) {
+    return {
+      ok: false,
+      kind: 'validation',
+      message: `that would leave ${wouldBe.size} screenshots and the limit is 6 — `
+        + `${priorRefs.length} already referenced, ${files.length} in ${dir}. Remove some first.`,
+    };
+  }
+
+  const MAX_REQUEST_BYTES = 3 * 1024 * 1024; // encoded, comfortably under 5 MiB
+  const batches: Array<typeof files> = [];
+  let current: typeof files = [];
+  let currentBytes = 0;
+  for (const f of files) {
+    if (current.length > 0 && currentBytes + f.content.length > MAX_REQUEST_BYTES) {
+      batches.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(f);
+    currentBytes += f.content.length;
+  }
+  if (current.length > 0) batches.push(current);
+
+  const uploaded: Array<{ ref: string; width?: number; height?: number }> = [];
+  let screenshots: string[] = [];
+  for (const batch of batches) {
+    try {
+      const res = await fetchImpl(`${base}/tileapps/personal/${encodeURIComponent(appId)}/media`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ files: batch }),
+      });
+      if (!res.ok) {
+        const sofar = uploaded.length > 0 ? ` (${uploaded.length} image(s) already uploaded)` : '';
+        return { ok: false, kind: 'http', message: `media upload failed: HTTP ${res.status} — ${await safeText(res)}${sofar}` };
+      }
+      const json = (await res.json()) as { files?: Array<{ ref: string; width?: number; height?: number }>; screenshots?: string[] };
+      uploaded.push(...(json.files ?? []));
+      screenshots = json.screenshots ?? uploaded.map((f) => f.ref);
+    } catch (e) {
+      return { ok: false, kind: 'http', message: `media upload request failed: ${(e as Error).message}` };
+    }
+  }
+
+  // No manifest round-trip here on purpose. The upload route merges the refs
+  // into the stored manifest in-request; doing it client-side would mean POSTing
+  // a whole stale snapshot and silently rolling back anything that landed in
+  // between.
+  const lines = uploaded.map((f) => `  ${f.ref}${f.width ? `  ${f.width}x${f.height}` : ''}`);
+  return {
+    ok: true,
+    output: `Uploaded ${uploaded.length} screenshot(s) to ${appId}:\n${lines.join('\n')}\n\n`
+      + `Manifest updated — "screenshots": ${JSON.stringify(screenshots)}\n`
+      + `Keep ${opts.manifestPath} in sync by adding the same array, so your next publish doesn't drop them.`,
   };
 }
 
@@ -315,6 +510,18 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
   if (!resolved.ok) return { ok: false, kind: 'io', message: `bundle: ${resolved.message}` };
   const collected = collectBundleFiles(resolved.dir, opts.manifestPath);
   if (!collected.ok) return { ok: false, kind: 'io', message: collected.message };
+
+  // Screenshots ride along in the bundle, and the server rejects a bad one
+  // during the UPLOAD — which happens after the manifest is already registered.
+  // Check them here, before the first mutating call, so a wrong-aspect image
+  // can't leave a half-published app behind.
+  for (const f of collected.files) {
+    if (!f.path.startsWith('media/') || f.path.slice(6).includes('/')) continue;
+    const ext = path.extname(f.path).toLowerCase();
+    if (ext !== '.webp' && ext !== '.png') continue;
+    const err = screenshotPreCheckError(f.path, Buffer.from(f.content, f.encoding));
+    if (err) return { ok: false, kind: 'validation', message: err };
+  }
 
   const fetchImpl = opts.fetchImpl ?? fetch;
   const base = apiBase(auth.commonApiUrl);

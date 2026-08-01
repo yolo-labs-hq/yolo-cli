@@ -181,6 +181,7 @@ function printHelp(): void {
       '    [--json]                                Pretty-print raw JSON instead of the table.',
       '  tileapp init <name>                       Scaffold a personal app (./<name>/tileapp.json + index.html).',
       '  tileapp validate <manifest> [opts]        Offline lint: manifest schema + bundle layout (no auth).',
+      '  tileapp media push <manifest> [--dir d]   Upload store screenshots (additive — leaves the rest of the bundle alone).',
       '    [--bundle-dir <dir>]                    Override the static-bundle directory to check.',
       '  tileapp dev <manifest> [opts]             Serve the bundle locally + a mock broker (offline iterate).',
       '    [--port N] [--host H]                   Bind (default: 127.0.0.1:$PORT|3000).',
@@ -829,7 +830,7 @@ function parseRunGetArgs(args: string[]): ParsedRunGetArgs | ParseError {
   return { ok: true, planRunId, workspaceFlag, jsonOutput };
 }
 
-function tileAppUsage(sub: 'sign' | 'publish' | 'validate' | 'dev' | 'init' | 'install' | 'add-tile', message: string): number {
+function tileAppUsage(sub: 'sign' | 'publish' | 'validate' | 'dev' | 'init' | 'install' | 'add-tile' | 'media', message: string): number {
   process.stderr.write(`yolo tileapp ${sub}: ${message}\n`);
   const usage: Record<string, string> = {
     init: 'Usage: yolo tileapp init <name>   (scaffolds ./<name>/tileapp.json + index.html)\n',
@@ -840,6 +841,7 @@ function tileAppUsage(sub: 'sign' | 'publish' | 'validate' | 'dev' | 'init' | 'i
     dev: 'Usage: yolo tileapp dev <manifest.json> [--port N] [--host H] [--bundle-dir <dir>] [--deny]\n',
     install: 'Usage: yolo tileapp install <appId> --workspace <workspaceId> [--accept-optional <perm>]...\n',
     'add-tile': 'Usage: yolo tileapp add-tile <appId> --workspace <workspaceId> [--name <name>] [--version <v>]\n',
+    media: 'Usage: yolo tileapp media push <manifest.json> [--dir <dir>]   (uploads store screenshots; additive, never touches the rest of the bundle)\n',
   };
   process.stderr.write(usage[sub]);
   return 64;
@@ -991,6 +993,29 @@ async function runTileAppInitCmd(args: string[]): Promise<number> {
   if (!name) return tileAppUsage('init', 'an app name (slug) is required');
   const { runTileAppInit, exitCodeForFailure } = await import('./tileapp-personal.js');
   const result = runTileAppInit({ name });
+  if (result.ok) { process.stdout.write(`${result.output}\n`); return 0; }
+  process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
+  return exitCodeForFailure(result.kind);
+}
+
+async function runTileAppMediaCmd(args: string[]): Promise<number> {
+  // `exitCodeForFailure` (not devExitCode) — this command can fail with
+  // auth/http kinds that the offline dev helper's narrower union doesn't cover.
+  const { runTileAppMediaPush, exitCodeForFailure } = await import('./tileapp-personal.js');
+  const action = args[0];
+  if (action !== 'push') {
+    return tileAppUsage('media', action ? `unknown action '${action}' (expected: push)` : 'an action is required (push)');
+  }
+  let manifestPath: string | undefined;
+  let dir: string | undefined;
+  for (let i = 1; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--dir') { dir = args[++i]; if (dir === undefined) return tileAppUsage('media', '--dir requires a value'); }
+    else if (!a.startsWith('-') && !manifestPath) manifestPath = a;
+    else return tileAppUsage('media', `unexpected argument '${a}'`);
+  }
+  if (!manifestPath) return tileAppUsage('media', 'a manifest path is required');
+  const result = await runTileAppMediaPush({ manifestPath, dir });
   if (result.ok) { process.stdout.write(`${result.output}\n`); return 0; }
   process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
   return exitCodeForFailure(result.kind);
@@ -1479,12 +1504,13 @@ async function main(argv: string[]): Promise<number> {
     if (sub === 'dev') return runTileAppDevCmd(args.slice(2));
     if (sub === 'install') return runTileAppInstallCmd(args.slice(2));
     if (sub === 'add-tile') return runTileAppAddTileCmd(args.slice(2));
+    if (sub === 'media') return runTileAppMediaCmd(args.slice(2));
     if (!sub) {
-      process.stderr.write('yolo: tileapp requires a subcommand (init, validate, dev, sign, publish, install, add-tile)\n');
+      process.stderr.write('yolo: tileapp requires a subcommand (init, validate, dev, sign, publish, media, install, add-tile)\n');
       return 64;
     }
     process.stderr.write(`yolo: unknown tileapp subcommand '${sub}'\n`);
-    process.stderr.write('Subcommands: init, validate, dev, sign, publish, install, add-tile\n');
+    process.stderr.write('Subcommands: init, validate, dev, sign, publish, media, install, add-tile\n');
     return 64;
   }
 
