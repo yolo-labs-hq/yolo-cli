@@ -19,11 +19,23 @@ import { runTileAppMediaPush } from './tileapp-personal.js';
 
 const ENV = { YOLO_COMMON_API_URL: 'https://api.test', YOLO_API_TOKEN: 't0ken' };
 
-/** A 1×1 png — the server validates pixels, these tests validate wiring. */
-const PNG = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
-  'base64',
-);
+/**
+ * A PNG whose IHDR declares 1280x800.
+ *
+ * The CLI's pre-check reads headers only (it ships no image library), so a
+ * header-accurate fixture is exactly what exercises it. Full pixel decoding is
+ * the SERVER's job and is tested against real sharp output in
+ * `common-api/src/services/tileapp/screenshot-image.test.ts`.
+ */
+function pngHeader(width: number, height: number): Buffer {
+  const b = Buffer.alloc(64);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0);
+  b.write('IHDR', 12, 'ascii');
+  b.writeUInt32BE(width, 16);
+  b.writeUInt32BE(height, 20);
+  return b;
+}
+const PNG = pngHeader(1280, 800);
 
 function project(opts: { withMedia?: boolean; manifest?: unknown } = {}): { dir: string; manifestPath: string } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mediapush-'));
@@ -126,6 +138,23 @@ describe('yolo tileapp media push', () => {
     ]);
   });
 
+  it('keeps an overwritten ref in its original position (the hero must not move)', async () => {
+    const { manifestPath } = project();
+    const calls: Call[] = [];
+    await runTileAppMediaPush({
+      manifestPath,
+      fetchImpl: stubFetch(calls, [
+        { appId: 'pa-owner-demo', localId: 'demo', manifest: { screenshots: ['media/01-main.png', 'media/02-detail.webp'] } },
+      ]) as never,
+      env: ENV,
+    });
+    const register = calls.find((c) => c.url.endsWith('/tileapps/personal') && c.method === 'POST')!;
+    assert.deepEqual((register.body as { manifest: { screenshots: string[] } }).manifest.screenshots, [
+      'media/01-main.png',
+      'media/02-detail.webp',
+    ]);
+  });
+
   it('fails clearly when no published app matches', async () => {
     const { manifestPath } = project();
     const res = await runTileAppMediaPush({
@@ -142,6 +171,25 @@ describe('yolo tileapp media push', () => {
     const res = await runTileAppMediaPush({ manifestPath, fetchImpl: stubFetch([], []) as never, env: ENV });
     assert.equal(res.ok, false);
     if (!res.ok) assert.match(res.message, /no media directory/);
+  });
+
+  it('rejects a wrong-aspect screenshot locally, before any server call', async () => {
+    // The publish flow registers the manifest BEFORE uploading, so a
+    // server-side rejection would leave a half-published app. This must fail
+    // without touching the network at all.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mediapush-'));
+    fs.writeFileSync(path.join(dir, 'tileapp.json'), JSON.stringify({ id: 'demo', version: '1.0.0' }));
+    fs.mkdirSync(path.join(dir, 'media'));
+    fs.writeFileSync(path.join(dir, 'media', '01-wide.png'), pngHeader(1280, 720));
+    const calls: Call[] = [];
+    const res = await runTileAppMediaPush({
+      manifestPath: path.join(dir, 'tileapp.json'),
+      fetchImpl: stubFetch(calls, [{ appId: 'pa-o-demo', localId: 'demo', manifest: {} }]) as never,
+      env: ENV,
+    });
+    assert.equal(res.ok, false);
+    if (!res.ok) assert.match(res.message, /16:10/);
+    assert.equal(calls.length, 0, 'must not have called the server');
   });
 
   it('rejects a JSON null manifest instead of throwing a TypeError', async () => {

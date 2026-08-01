@@ -21,6 +21,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { resolveUserToken } from './auth-context.js';
 import { validateManifest, isRuntimeManifest } from './tileapp-validator.js';
+import { readImageDimensions } from './image-dimensions.js';
 import { resolveBundleDir } from './tileapp-developer.js';
 import { parseDockerfile, assembleOciArchive } from './tileapp-oci-assembler.js';
 
@@ -210,6 +211,29 @@ Check refs before publishing:  yolo tileapp validate tileapp.json --personal
   };
 }
 
+/**
+ * Offline screenshot pre-check, applied to `media/<file>` images.
+ *
+ * Runs BEFORE any server call so `publish --personal` can't register a manifest
+ * and then fail on the bundle upload, which would leave the app registered with
+ * no bundle (or a new manifest over an old bundle) while reporting failure.
+ * Header-only — the server still fully decodes; this just catches the mistake
+ * people actually make offline. Unparseable bytes return null and are deferred
+ * to the server rather than rejected here.
+ */
+function screenshotPreCheckError(name: string, body: Buffer): string | null {
+  const dims = readImageDimensions(body);
+  if (!dims) return null; // not a shape we can read — the server is authoritative
+  if (dims.width < 640 || dims.width > 2560) {
+    return `${name}: image is ${dims.width}px wide — screenshots must be 640-2560px (1280x800 is the target)`;
+  }
+  const aspect = dims.width / dims.height;
+  if (Math.abs(aspect - 1.6) / 1.6 > 0.04) {
+    return `${name}: image is ${dims.width}x${dims.height} (${aspect.toFixed(2)}:1) — screenshots must be 16:10, e.g. 1280x800`;
+  }
+  return null;
+}
+
 // ── media (store screenshots) ───────────────────────────────────────────────
 
 const MEDIA_NAME_RE = /^[a-z0-9][a-z0-9._-]*$/;
@@ -261,7 +285,10 @@ export async function runTileAppMediaPush(opts: MediaPushOptions): Promise<CmdRe
     if (!MEDIA_NAME_RE.test(name)) {
       return { ok: false, kind: 'validation', message: `invalid media filename '${name}' — lowercase, one segment, e.g. 01-main.webp` };
     }
-    files.push({ name, content: fs.readFileSync(path.join(dir, name)).toString('base64') });
+    const bytes = fs.readFileSync(path.join(dir, name));
+    const preCheck = screenshotPreCheckError(name, bytes);
+    if (preCheck) return { ok: false, kind: 'validation', message: preCheck };
+    files.push({ name, content: bytes.toString('base64') });
   }
   if (files.length === 0) {
     return { ok: false, kind: 'io', message: `no .webp/.png files in ${dir}` };
@@ -315,9 +342,14 @@ export async function runTileAppMediaPush(opts: MediaPushOptions): Promise<CmdRe
   //
   // Merge onto the STORED manifest, not the local file: the local copy may have
   // drifted, and the smallest possible change to a live app is the right one.
+  // Preserve ORDER. The first ref is the store hero, so re-uploading an
+  // existing screenshot must leave it where it was — filtering it out and
+  // appending would silently promote whatever came second.
   const merged = uploaded.map((f) => f.ref);
-  const priorRefs = Array.isArray(storedManifest.screenshots) ? (storedManifest.screenshots as unknown[]).filter((r): r is string => typeof r === 'string') : [];
-  const screenshots = [...priorRefs.filter((r) => !merged.includes(r)), ...merged];
+  const priorRefs = Array.isArray(storedManifest.screenshots)
+    ? (storedManifest.screenshots as unknown[]).filter((r): r is string => typeof r === 'string')
+    : [];
+  const screenshots = [...priorRefs, ...merged.filter((r) => !priorRefs.includes(r))];
   const nextManifest = { ...storedManifest, screenshots };
   try {
     const res = await fetchImpl(`${base}/tileapps/personal`, {
@@ -455,6 +487,18 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
   if (!resolved.ok) return { ok: false, kind: 'io', message: `bundle: ${resolved.message}` };
   const collected = collectBundleFiles(resolved.dir, opts.manifestPath);
   if (!collected.ok) return { ok: false, kind: 'io', message: collected.message };
+
+  // Screenshots ride along in the bundle, and the server rejects a bad one
+  // during the UPLOAD — which happens after the manifest is already registered.
+  // Check them here, before the first mutating call, so a wrong-aspect image
+  // can't leave a half-published app behind.
+  for (const f of collected.files) {
+    if (!f.path.startsWith('media/') || f.path.slice(6).includes('/')) continue;
+    const ext = path.extname(f.path).toLowerCase();
+    if (ext !== '.webp' && ext !== '.png') continue;
+    const err = screenshotPreCheckError(f.path, Buffer.from(f.content, f.encoding));
+    if (err) return { ok: false, kind: 'validation', message: err };
+  }
 
   const fetchImpl = opts.fetchImpl ?? fetch;
   const base = apiBase(auth.commonApiUrl);
