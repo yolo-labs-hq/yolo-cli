@@ -547,6 +547,27 @@ export async function renameProject(
   return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/slug`, { method: 'PUT', jsonBody: request });
 }
 
+/**
+ * PUT /v1/deploy/projects/:id/parent — re-parent the project (nesting S5).
+ *
+ * `null` DETACHES it to a root. The CLI only passes the id through: the server
+ * resolves the parent via an ownership-asserted read and enforces depth,
+ * child-count and project-state, so its 4xx `reason` is the authority
+ * (`project-nesting-disabled`, `project-nesting-too-deep`,
+ * `project-has-children`, `project-not-active`, `not-published`,
+ * `project-busy`, `project-not-found`).
+ */
+export async function setProjectParent(
+  ctx: DeployContext,
+  projectId: string,
+  parentProjectId: string | null,
+): Promise<ClientResult<unknown>> {
+  return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/parent`, {
+    method: 'PUT',
+    jsonBody: { parentProjectId },
+  });
+}
+
 /** POST /v1/deploy/projects/:id/aliases — add an alias hostname (slug). */
 export async function addAlias(
   ctx: DeployContext,

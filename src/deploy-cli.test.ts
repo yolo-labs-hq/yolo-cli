@@ -16,6 +16,7 @@ import {
   parseRenameArgs,
   parseAliasArgs,
   parseRedirectArgs,
+  parseSetParentArgs,
   parseDeleteArgs,
   parseCloneArgs,
   formatRowsTable,
@@ -1492,6 +1493,160 @@ describe('deploy-cli — redirect', () => {
     assert.equal(await runDeployCmd(['redirect', 'only-one'], baseDeps(io)), 64);
     assert.equal(parseRedirectArgs(['a']).ok, false);
     assert.equal(parseRedirectArgs(['a', 'b', 'c']).ok, false);
+  });
+});
+
+describe('deploy-cli — set-parent', () => {
+  it('🚨 --json keeps stderr EMPTY on EARLY failures too (parse / not-linked / auth)', async () => {
+    // The stream-split contract has to hold on every failure path, not just the
+    // ones after a successful parse — automation parses stdout and treats
+    // stderr as diagnostics.
+
+    // 1. parse failure (no parent, no --none)
+    const a = makeIo();
+    assert.equal(await runDeployCmd(['set-parent', '--json'], baseDeps(a, {})), 64);
+    assert.equal(a.stderr.join(''), '');
+    assert.match(a.stdout.join(''), /"status": ?"failed"/);
+
+    // 2. not linked
+    const b = makeIo();
+    const codeB = await runDeployCmd(
+      ['set-parent', 'some-parent', '--json'],
+      baseDeps(b, { readDeployConfigImpl: () => linked(null) }),
+    );
+    assert.notEqual(codeB, 0);
+    assert.equal(b.stderr.join(''), '');
+    assert.match(b.stdout.join(''), /not-linked/);
+  });
+
+
+  it('resolves a SLUG to an id and PUTs it for the LINKED project', async () => {
+    // Slug-first resolution (a slug may legally be 24 hex chars), same as
+    // `init --parent`. The target is always the linked project, like rename.
+    const io = makeIo();
+    let seen: { projectId?: string; parentProjectId?: string | null } = {};
+    const code = await runDeployCmd(
+      ['set-parent', 'my-site'],
+      baseDeps(io, {
+        listProjectsImpl: async () => ({
+          ok: true,
+          value: [{ id: '6a736e980ebe7300095936e6', slug: 'my-site' }],
+        }),
+        setProjectParentImpl: async (_ctx, projectId, parentProjectId) => {
+          seen = { projectId, parentProjectId };
+          return { ok: true, value: { project: { id: 'hp_8f3a', slug: 'my-app' } } };
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.deepEqual(seen, { projectId: 'hp_8f3a', parentProjectId: '6a736e980ebe7300095936e6' });
+    assert.match(io.stdout.join(''), /OK: my-app is now nested under my-site/);
+  });
+
+  it('passes an id-shaped value through when no owned slug matches', async () => {
+    const io = makeIo();
+    let seen: string | null | undefined;
+    const code = await runDeployCmd(
+      ['set-parent', '6a736e980ebe7300095936e6'],
+      baseDeps(io, {
+        listProjectsImpl: async () => ({ ok: true, value: [] }),
+        setProjectParentImpl: async (_ctx, _projectId, parentProjectId) => {
+          seen = parentProjectId;
+          return { ok: true, value: {} };
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.equal(seen, '6a736e980ebe7300095936e6');
+  });
+
+  it('--none sends parentProjectId: null (detach to root) without a slug lookup', async () => {
+    const io = makeIo();
+    let seen: string | null | undefined = 'unset';
+    let listed = false;
+    const code = await runDeployCmd(
+      ['set-parent', '--none'],
+      baseDeps(io, {
+        listProjectsImpl: async () => {
+          listed = true;
+          return { ok: true, value: [] };
+        },
+        setProjectParentImpl: async (_ctx, _projectId, parentProjectId) => {
+          seen = parentProjectId;
+          return { ok: true, value: {} };
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    assert.equal(seen, null);
+    assert.equal(listed, false);
+    assert.match(io.stdout.join(''), /OK: detached my-app — it is now a root project/);
+  });
+
+  it('fails clearly when no owned project matches the parent (never calls the route)', async () => {
+    const io = makeIo();
+    let called = false;
+    const code = await runDeployCmd(
+      ['set-parent', 'no-such-project'],
+      baseDeps(io, {
+        listProjectsImpl: async () => ({ ok: true, value: [] }),
+        setProjectParentImpl: async () => {
+          called = true;
+          return { ok: true, value: {} };
+        },
+      }),
+    );
+    assert.notEqual(code, 0);
+    assert.equal(called, false);
+    assert.match(io.stderr.join(''), /no project of yours matches parent/);
+  });
+
+  it('surfaces a server refusal verbatim as a FAIL line + exit 2', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['set-parent', '6a736e980ebe7300095936e6'],
+      baseDeps(io, {
+        listProjectsImpl: async () => ({ ok: true, value: [] }),
+        setProjectParentImpl: async () => ({
+          ok: false,
+          kind: 'project-nesting-too-deep',
+          message: 'nesting is limited to 2 levels',
+        }),
+      }),
+    );
+    assert.equal(code, 2);
+    assert.match(io.stderr.join(''), /FAIL \[project-nesting-too-deep\]: nesting is limited to 2 levels/);
+  });
+
+  it('refusals keep stderr EMPTY under --json (stream-split contract)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['set-parent', '6a736e980ebe7300095936e6', '--json'],
+      baseDeps(io, {
+        listProjectsImpl: async () => ({ ok: true, value: [] }),
+        setProjectParentImpl: async () => ({
+          ok: false,
+          kind: 'project-has-children',
+          message: 'detach its children first',
+        }),
+      }),
+    );
+    assert.notEqual(code, 0);
+    // Automation treats stderr as diagnostics; the machine result goes to stdout.
+    assert.equal(io.stderr.join(''), '');
+    assert.match(io.stdout.join(''), /"kind": ?"project-has-children"/);
+  });
+
+  it('requires a parent or --none, and rejects both together (exit 64)', async () => {
+    const io = makeIo();
+    assert.equal(await runDeployCmd(['set-parent'], baseDeps(io)), 64);
+    assert.equal(parseSetParentArgs([]).ok, false);
+    assert.equal(parseSetParentArgs(['my-site', '--none']).ok, false);
+    assert.equal(parseSetParentArgs(['a', 'b']).ok, false);
+    assert.equal(parseSetParentArgs(['--frobnicate']).ok, false);
+    const r = parseSetParentArgs(['my-site', '--json']);
+    assert.equal(r.ok, true);
+    if (r.ok) assert.deepEqual([r.parent, r.detach, r.jsonOutput], ['my-site', false, true]);
   });
 });
 

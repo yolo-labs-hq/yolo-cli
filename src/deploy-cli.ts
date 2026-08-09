@@ -7,6 +7,8 @@
  *   yolo deploy status [--json]
  *   yolo deploy logs [--tail] [--since <dur>] [--json]
  *   yolo deploy rollback [releaseId] [--json]
+ *   yolo deploy set-parent <id|slug> [--json]        ← re-parent the linked project
+ *   yolo deploy set-parent --none [--json]           ← detach it to a root
  *   (yolo deploy db query — Phase 2, deliberately NOT wired)
  *
  * Output contract (spec §4/§5):
@@ -55,6 +57,7 @@ import {
   unpublishProject,
   republishProject,
   renameProject,
+  setProjectParent,
   addAlias,
   removeAlias,
   setRedirect,
@@ -100,6 +103,7 @@ export interface DeployCliDeps {
   unpublishProjectImpl?: typeof unpublishProject;
   republishProjectImpl?: typeof republishProject;
   renameProjectImpl?: typeof renameProject;
+  setProjectParentImpl?: typeof setProjectParent;
   addAliasImpl?: typeof addAlias;
   removeAliasImpl?: typeof removeAlias;
   setRedirectImpl?: typeof setRedirect;
@@ -131,6 +135,8 @@ const USAGE = [
   '       yolo deploy alias <slug> [--json]',
   '       yolo deploy alias rm <slug> [--json]',
   '       yolo deploy redirect <slug> <url> [--json]',
+  '       yolo deploy set-parent <id|slug> [--json]',
+  '       yolo deploy set-parent --none [--json]',
   '       yolo deploy delete [--confirm <slug>] [--json]',
   '       yolo deploy clone [--name <name>] [--slug <slug>] [--json]',
   '       yolo deploy db query "<sql>" [--json]',
@@ -160,6 +166,7 @@ export async function runDeployCmd(args: string[], deps: DeployCliDeps = {}): Pr
   if (sub === 'rename') return runRenameCmd(args.slice(1), deps, io);
   if (sub === 'alias') return runAliasCmd(args.slice(1), deps, io);
   if (sub === 'redirect') return runRedirectCmd(args.slice(1), deps, io);
+  if (sub === 'set-parent') return runSetParentCmd(args.slice(1), deps, io);
   if (sub === 'delete') return runDeleteCmd(args.slice(1), deps, io);
   if (sub === 'clone') return runCloneCmd(args.slice(1), deps, io);
   if (sub === 'db') return runDbCmd(args.slice(1), deps, io);
@@ -1602,6 +1609,133 @@ async function runRedirectCmd(args: string[], deps: DeployCliDeps, io: DeployIo)
   return 0;
 }
 
+// ─── set-parent ─────────────────────────────────────────────────────────────
+//
+// Nesting S5 — re-parent the LINKED project (the rename/alias/redirect family:
+// restructure an existing project, never create one). `--none` detaches it back
+// to a root. The server owns every rule (ownership, depth, child count, project
+// state) and its refusal reason passes through verbatim as the failure kind.
+
+const SET_PARENT_USAGE =
+  'Usage: yolo deploy set-parent <id|slug> [--json]\n       yolo deploy set-parent --none [--json]\n';
+
+interface ParsedSetParentArgs {
+  ok: true;
+  /** New parent as an id OR a slug — resolved to an id before the call. Absent when detaching. */
+  parent?: string;
+  /** `--none` — detach to a root (sends `parentProjectId: null`). */
+  detach: boolean;
+  jsonOutput: boolean;
+}
+
+export function parseSetParentArgs(args: string[]): ParsedSetParentArgs | ParseError {
+  let parent: string | undefined;
+  let detach = false;
+  let jsonOutput = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--json') {
+      jsonOutput = true;
+    } else if (a === '--none') {
+      detach = true;
+    } else if (a.startsWith('--')) {
+      return { ok: false, message: `unknown option: ${a}` };
+    } else if (parent === undefined) {
+      parent = a;
+    } else {
+      return { ok: false, message: `unexpected positional argument: ${a}` };
+    }
+  }
+  if (detach && parent !== undefined) {
+    // Either/or: honoring one would silently discard the other, contradictory intent.
+    return { ok: false, message: 'pass either a parent <id|slug> or --none, not both' };
+  }
+  if (!detach && (parent === undefined || parent.trim() === '')) {
+    return {
+      ok: false,
+      message: 'a parent is required: yolo deploy set-parent <id|slug> (or --none to detach)',
+    };
+  }
+  return { ok: true, parent, detach, jsonOutput };
+}
+
+async function runSetParentCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Promise<number> {
+  // `--json` must be honoured on EVERY failure path, not only the ones after a
+  // successful parse — automation parses stdout and treats stderr as
+  // diagnostics. Read the flag straight from argv here, because a parse
+  // FAILURE has no parsed result to read it from.
+  const wantsJson = args.includes('--json');
+  const parsed = parseSetParentArgs(args);
+  if (!parsed.ok) {
+    if (wantsJson) io.out(`${formatJsonResult({ status: 'failed', message: parsed.message })}\n`);
+    else io.err(`yolo deploy set-parent: ${parsed.message}\n${SET_PARENT_USAGE}`);
+    return 64;
+  }
+  const linked = requireLink(deps, io, { silent: parsed.jsonOutput });
+  if (!linked.ok) {
+    if (parsed.jsonOutput) io.out(`${formatJsonResult(linked.failure)}\n`);
+    return linked.exitCode;
+  }
+  const auth = resolveAuth(deps);
+  if (!auth.ok) {
+    const failure = { kind: 'auth', message: auth.message };
+    if (parsed.jsonOutput) io.out(`${formatJsonResult(failure)}\n`);
+    else io.err(`${formatFail(failure)}\n`);
+    return 78;
+  }
+
+  // Resolve the new parent when given as a SLUG, exactly like `init --parent`:
+  // SLUG FIRST, then id. A slug may legally be 24 hex characters, so a shape
+  // test alone is ambiguous; the slug lookup resolves both forms with one call
+  // and gives slugs precedence — the form a human typed on purpose.
+  let resolvedParentId: string | null = null;
+  if (!parsed.detach) {
+    let target = parsed.parent!;
+    const lookup = await findOwnedProjectBySlug(deps, auth.context, target);
+    if (!lookup.ok) {
+      // A list failure (auth/network) is NOT "not found" — surface the real
+      // error and its exit code, matching `init --parent`.
+      if (parsed.jsonOutput) io.out(`${formatJsonResult(lookup)}\n`);
+      else io.err(`${formatFail(lookup)}\n`);
+      return exitCodeForFailure(lookup.kind);
+    }
+    const bySlug = lookup.project ? resolveProjectId(lookup.project) : undefined;
+    if (bySlug) {
+      target = bySlug;
+    } else if (!/^[a-f0-9]{24}$/i.test(target)) {
+      const message = `no project of yours matches parent '${target}' — pass its slug or 24-hex id`;
+      if (parsed.jsonOutput) io.out(`${formatJsonResult({ status: 'failed', message })}\n`);
+      else io.err(`FAIL: ${message}\n`);
+      return 1;
+    }
+    // Else: not a slug of ours, but id-shaped — pass through and let the
+    // server's ownership-asserted read be the authority.
+    resolvedParentId = target;
+  }
+
+  const setParent = deps.setProjectParentImpl ?? setProjectParent;
+  const result = await setParent(auth.context, linked.projectId, resolvedParentId);
+  if (!result.ok) {
+    // JSON mode keeps stderr EMPTY — automation treats it as diagnostics and
+    // the machine-readable result is the single stdout object.
+    if (parsed.jsonOutput) io.out(`${formatJsonResult(result)}\n`);
+    else io.err(`${formatFail(result)}\n`);
+    return exitCodeForFailure(result.kind);
+  }
+  if (parsed.jsonOutput) {
+    io.out(`${JSON.stringify(result.value, null, 2)}\n`);
+    return 0;
+  }
+  const name = linked.slug ?? linked.projectId;
+  if (parsed.detach) {
+    io.out(`OK: detached ${name} — it is now a root project\n`);
+  } else {
+    io.out(`OK: ${name} is now nested under ${parsed.parent}\n`);
+  }
+  return 0;
+}
+
 // ─── delete ─────────────────────────────────────────────────────────────────
 
 interface ParsedDeleteArgs {
@@ -1881,27 +2015,36 @@ function parseFlagOnlyArgs(args: string[], _name: string): { ok: true; jsonOutpu
   return { ok: true, jsonOutput };
 }
 
+/**
+ * `opts.silent` suppresses the stderr write and hands the failure back instead,
+ * so a `--json` caller can emit it on stdout and keep stderr EMPTY (the
+ * stream-split contract). Defaults to the pre-existing write-to-stderr
+ * behaviour, so every other subcommand is unchanged.
+ */
 function requireLink(
   deps: DeployCliDeps,
   io: DeployIo,
-): { ok: true; projectId: string; slug?: string } | { ok: false; exitCode: number } {
+  opts: { silent?: boolean } = {},
+):
+  | { ok: true; projectId: string; slug?: string }
+  | { ok: false; exitCode: number; failure: { kind: string; message: string; hint?: string } } {
   const cwd = deps.cwd ?? process.cwd();
   const readConfig = deps.readDeployConfigImpl ?? readDeployConfig;
   const readResult = readConfig(cwd);
   if (!readResult.ok) {
-    io.err(`${formatFail({ kind: readResult.kind, message: readResult.message })}\n`);
-    return { ok: false, exitCode: exitCodeForFailure(readResult.kind) };
+    const failure = { kind: readResult.kind, message: readResult.message };
+    if (!opts.silent) io.err(`${formatFail(failure)}\n`);
+    return { ok: false, exitCode: exitCodeForFailure(readResult.kind), failure };
   }
   const config: DeployConfig | null = readResult.config;
   if (!config?.projectId) {
-    io.err(
-      `${formatFail({
-        kind: 'not-linked',
-        message: 'this directory is not linked to a hosting project (.yolo/deploy.json missing or has no projectId)',
-        hint: "run 'yolo deploy init' to create or link a hosting project",
-      })}\n`,
-    );
-    return { ok: false, exitCode: exitCodeForFailure('not-linked') };
+    const failure = {
+      kind: 'not-linked',
+      message: 'this directory is not linked to a hosting project (.yolo/deploy.json missing or has no projectId)',
+      hint: "run 'yolo deploy init' to create or link a hosting project",
+    };
+    if (!opts.silent) io.err(`${formatFail(failure)}\n`);
+    return { ok: false, exitCode: exitCodeForFailure('not-linked'), failure };
   }
   return { ok: true, projectId: config.projectId, slug: config.slug };
 }
