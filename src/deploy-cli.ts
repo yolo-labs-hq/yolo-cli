@@ -3,7 +3,7 @@
  * (docs/MANAGED_HOSTING_CLI_SPEC.md §1).
  *
  *   yolo deploy [--env <staging|prod>] [--dry-run] [--json]   ← bare = ship
- *   yolo deploy init [--slug <slug>] [--type <static|worker>] [--json]
+ *   yolo deploy init [--slug <slug>] [--type <static|worker>] [--parent <id|slug>] [--json]
  *   yolo deploy status [--json]
  *   yolo deploy logs [--tail] [--since <dur>] [--json]
  *   yolo deploy rollback [releaseId] [--json]
@@ -117,7 +117,7 @@ export interface DeployCliDeps {
 
 const USAGE = [
   'Usage: yolo deploy [--env <staging|prod>] [--dry-run] [--json]',
-  '       yolo deploy init [--slug <slug>] [--type <static|worker>] [--json]',
+  '       yolo deploy init [--slug <slug>] [--type <static|worker>] [--parent <id|slug>] [--json]',
   '       yolo deploy link (--project-id <id> | --slug <slug>) [--type <static|worker>]',
   '       yolo deploy validate [--json]',
   '       yolo deploy doctor [--json]',
@@ -269,12 +269,15 @@ interface ParsedInitArgs {
   ok: true;
   slug?: string;
   type?: 'static' | 'worker';
+  /** Nesting S4 — link the new project under an existing one. */
+  parentProjectId?: string;
   jsonOutput: boolean;
 }
 
 export function parseInitArgs(args: string[]): ParsedInitArgs | ParseError {
   let slug: string | undefined;
   let type: 'static' | 'worker' | undefined;
+  let parentProjectId: string | undefined;
   let jsonOutput = false;
 
   for (let i = 0; i < args.length; i++) {
@@ -292,6 +295,12 @@ export function parseInitArgs(args: string[]): ParsedInitArgs | ParseError {
       if (!v || v.startsWith('--')) return { ok: false, message: '--type requires a value (static|worker)' };
       if (v !== 'static' && v !== 'worker') return { ok: false, message: `--type must be 'static' or 'worker' (got '${v}')` };
       type = v;
+    } else if (a === '--parent') {
+      const v = args[++i];
+      if (!v || v.startsWith('--')) return { ok: false, message: '--parent requires a project id' };
+      parentProjectId = v;
+    } else if (a.startsWith('--parent=')) {
+      parentProjectId = a.slice('--parent='.length);
     } else if (a.startsWith('--type=')) {
       const v = a.slice('--type='.length);
       if (v !== 'static' && v !== 'worker') return { ok: false, message: `--type must be 'static' or 'worker' (got '${v}')` };
@@ -302,7 +311,10 @@ export function parseInitArgs(args: string[]): ParsedInitArgs | ParseError {
       return { ok: false, message: `unexpected positional argument: ${a}` };
     }
   }
-  return { ok: true, slug, type, jsonOutput };
+  if (parentProjectId !== undefined && parentProjectId.length === 0) {
+    return { ok: false, message: '--parent requires a project id or slug' };
+  }
+  return { ok: true, slug, type, parentProjectId, jsonOutput };
 }
 
 async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Promise<number> {
@@ -332,6 +344,29 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
     return exitCodeForFailure(readResult.kind);
   }
   const existing: DeployConfig | null = readResult.config;
+  if (existing?.projectId && parsed.parentProjectId) {
+    // 🚨 `--parent` on an ALREADY-LINKED directory would otherwise report
+    // `already-linked` and exit 0, having silently ignored the flag — the same
+    // false-success the slug-reconciliation guard below exists to prevent.
+    // Parent links are create-only, so there is nothing `init` can do here.
+    const message =
+      'this directory is already linked to a project; --parent only applies when creating one';
+    // JSON mode keeps stderr EMPTY — automation treats it as diagnostics, and
+    // the init contract is a clean stream split.
+    if (parsed.jsonOutput) {
+      io.out(`${formatJsonResult({ status: 'failed', message })}\n`);
+    } else {
+      io.err(
+        `FAIL: ${message}.\n`
+        // Only advice that actually works: parent links are create-only and
+        // there is no re-parent route or console control, so the recovery is
+        // to create the child as a NEW project.
+        + '      Nesting is set at creation. Create the child in its own directory with\n'
+        + '      `yolo deploy init --parent <id|slug>`, or from the Hosting console\'s New project dialog.\n',
+      );
+    }
+    return 1;
+  }
   if (existing?.projectId) {
     // Idempotent: a committed link means future sessions ship to the SAME
     // project instead of forking a new slug — never silently re-create.
@@ -357,6 +392,38 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
     return 78;
   }
 
+  // Resolve `--parent` when given as a SLUG rather than an id. A CLI-only user
+  // has no way to discover an opaque 24-hex id (there is no `deploy list`
+  // subcommand), but slugs are the handle they already use everywhere else —
+  // so accept either and look the slug up through the same owned-projects
+  // helper `link` uses (codex P2).
+  let resolvedParentId = parsed.parentProjectId;
+  if (resolvedParentId) {
+    // SLUG FIRST, then id. A slug may legally be 24 hex characters, so a
+    // shape test alone is ambiguous; looking the slug up first resolves both
+    // forms with one call and gives slugs precedence — which is the form a
+    // human typed on purpose.
+    const parentLookup = await findOwnedProjectBySlug(deps, auth.context, resolvedParentId);
+    if (!parentLookup.ok) {
+      // A list failure (auth/network) is NOT "not found" — surface the real
+      // error and its exit code, matching how `link` treats the same helper.
+      if (parsed.jsonOutput) io.out(`${formatJsonResult(parentLookup)}\n`);
+      else io.err(`${formatFail(parentLookup)}\n`);
+      return exitCodeForFailure(parentLookup.kind);
+    }
+    const bySlug = parentLookup.project ? resolveProjectId(parentLookup.project) : undefined;
+    if (bySlug) {
+      resolvedParentId = bySlug;
+    } else if (!/^[a-f0-9]{24}$/i.test(resolvedParentId)) {
+      const message = `no project of yours matches parent '${resolvedParentId}' — pass its slug or 24-hex id`;
+      if (parsed.jsonOutput) io.out(`${formatJsonResult({ status: 'failed', message })}\n`);
+      else io.err(`FAIL: ${message}\n`);
+      return 1;
+    }
+    // Else: not a slug of ours, but id-shaped — pass through and let the
+    // server's ownership-asserted read be the authority.
+  }
+
   const create = deps.createProjectImpl ?? createProject;
   const created = await create(auth.context, {
     name: parsed.slug ?? path.basename(cwd),
@@ -366,6 +433,9 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
     // (and therefore to VibeAssist event watchers). Local CLI use remains
     // unchanged because the field is optional.
     ...(deps.env?.WORKSPACE_ID ? { workspaceId: deps.env.WORKSPACE_ID } : {}),
+    // Nesting S4 — passed straight through; the server verifies ownership,
+    // depth and parent state. Not written to `.yolo/deploy.json`.
+    ...(resolvedParentId ? { parentProjectId: resolvedParentId } : {}),
   });
   if (!created.ok) {
     // create-or-LINK: a `slug-taken` on a slug the caller ALREADY OWNS means a
@@ -383,7 +453,19 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
         const lookup = await findOwnedProjectBySlug(deps, auth.context, takenSlug);
         const owned = lookup.ok ? lookup.project : undefined;
         const projectId = owned ? resolveProjectId(owned) : undefined;
-        if (projectId) {
+        // 🚨 Do NOT reconcile into a project that is not already under the
+        // requested parent (codex P2). Parent links are CREATE-ONLY server
+        // side, so linking here would report a successful nesting that never
+        // happened — the caller believes the family exists and it does not.
+        // Fall through to the plain slug-taken refusal instead.
+        // Case-normalized: `--parent` accepts either case (the regex is /i) but
+        // the API serializes an ObjectId lowercase, so a raw compare would
+        // report a mismatch for the very same parent (codex P2).
+        const parentMismatch =
+          parsed.parentProjectId !== undefined
+          && str((owned as Record<string, unknown> | undefined)?.parentProjectId)?.toLowerCase()
+            !== resolvedParentId?.toLowerCase();
+        if (projectId && !parentMismatch) {
           return writeLinkFile(
             cwd,
             writeConfig,

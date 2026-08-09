@@ -678,6 +678,103 @@ describe('deploy-cli — bare ship', () => {
 // ─── init ─────────────────────────────────────────────────────────────────
 
 describe('deploy-cli — init', () => {
+  // Nesting S4 — `--parent` links the new project under an existing one.
+  it('--parent passes the id through to create and does NOT persist it locally', async () => {
+    const io = makeIo();
+    const written: Array<{ cwd: string; config: Record<string, unknown> }> = [];
+    const code = await runDeployCmd(
+      ['init', '--slug', 'my-api', '--type', 'worker', '--parent', '6a736e980ebe7300095936e6'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => linked(null),
+        // Resolution tries SLUG first (a slug may legally be 24 hex chars);
+        // no match, so the id-shaped value passes through.
+        listProjectsImpl: async () => ({ ok: true, value: [] }),
+        createProjectImpl: async (_ctx, request) => {
+          assert.equal(request.parentProjectId, '6a736e980ebe7300095936e6');
+          return { ok: true, value: { project: { id: 'hp_child', slug: 'my-api' } } };
+        },
+        writeDeployConfigImpl: (cwd, config) => {
+          written.push({ cwd, config: config as unknown as Record<string, unknown> });
+          return CONFIG_PATH;
+        },
+      }),
+    );
+    assert.equal(code, 0);
+    // The parent link lives on the project document, not in deploy.json —
+    // duplicating it locally would just create a second thing to drift.
+    assert.equal('parentProjectId' in written[0]!.config, false);
+  });
+
+  it('--parent accepts a SLUG and resolves it to an id', async () => {
+    // A CLI-only user has no way to discover an opaque 24-hex id (there is no
+    // `deploy list` subcommand), but slugs are the handle they already use.
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['init', '--slug', 'my-api', '--parent', 'my-site'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => linked(null),
+        listProjectsImpl: async () => ({
+          ok: true,
+          value: [{ id: '6a736e980ebe7300095936e6', slug: 'my-site' }],
+        }),
+        createProjectImpl: async (_ctx, request) => {
+          // Resolved to the id, not passed through as the slug.
+          assert.equal(request.parentProjectId, '6a736e980ebe7300095936e6');
+          return { ok: true, value: { project: { id: 'hp_child', slug: 'my-api' } } };
+        },
+        writeDeployConfigImpl: () => CONFIG_PATH,
+      }),
+    );
+    assert.equal(code, 0);
+  });
+
+  it('--parent fails clearly when no owned project matches', async () => {
+    const io = makeIo();
+    let created = false;
+    const code = await runDeployCmd(
+      ['init', '--parent', 'no-such-project'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => linked(null),
+        listProjectsImpl: async () => ({ ok: true, value: [] }),
+        createProjectImpl: async () => {
+          created = true;
+          return { ok: true, value: { project: { id: 'x', slug: 'y' } } };
+        },
+      }),
+    );
+    assert.notEqual(code, 0);
+    assert.equal(created, false);
+    assert.match(io.stderr.join(''), /no project of yours matches parent/);
+  });
+
+  it('--parent failures keep stderr EMPTY under --json (stream-split contract)', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['init', '--parent', '6a736e980ebe7300095936e6', '--json'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => linked({ $version: 1, projectId: 'hp_existing', slug: 'existing' }),
+      }),
+    );
+    assert.notEqual(code, 0);
+    // Automation treats stderr as diagnostics; the machine result goes to stdout.
+    assert.equal(io.stderr.join(''), '');
+    assert.match(io.stdout.join(''), /"status": ?"failed"/);
+  });
+
+  it('🚨 --parent on an ALREADY-LINKED directory fails instead of silently ignoring it', async () => {
+    // Parent links are create-only, so reporting `already-linked` here would be
+    // a false success: the caller believes a family exists and it does not.
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['init', '--parent', '6a736e980ebe7300095936e6'],
+      baseDeps(io, {
+        readDeployConfigImpl: () => linked({ $version: 1, projectId: 'hp_existing', slug: 'existing' }),
+      }),
+    );
+    assert.notEqual(code, 0);
+    assert.match(io.stderr.join(''), /--parent only applies when creating one/);
+  });
+
   it('creates the project, writes .yolo/deploy.json, prints the committed-by-design note', async () => {
     const io = makeIo();
     const written: Array<{ cwd: string; config: Record<string, unknown> }> = [];

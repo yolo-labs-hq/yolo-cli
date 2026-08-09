@@ -402,6 +402,13 @@ export interface CreateProjectRequest {
   name: string;
   slug?: string;
   workspaceId?: string;
+  /**
+   * Nest this project under an existing one (nesting S4). Server-verified —
+   * the CLI only passes the id through. Not persisted in `.yolo/deploy.json`:
+   * the parent link lives on the project document, and duplicating it locally
+   * would just create a second thing to drift.
+   */
+  parentProjectId?: string;
 }
 
 /** POST /v1/deploy/projects */
