@@ -439,7 +439,7 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
   if (bootCheck) progress(`deploy: warn — deployed Worker failed to boot (HTTP ${bootCheck.status})`);
   const pageCheck = parsePageCheck(finalized.value.pageCheck);
   if (pageCheckHasProblems(pageCheck)) {
-    progress(`deploy: warn — ${describeCliPageCheck(pageCheck!)}`);
+    for (const line of pageCheckLines(pageCheck!)) progress(line);
   }
 
   return {
@@ -492,7 +492,7 @@ async function resumeStagedShip(
     if (bootCheck) progress(`deploy: warn — deployed Worker failed to boot (HTTP ${bootCheck.status})`);
     const pageCheck = parsePageCheck(finalized.value.pageCheck);
     if (pageCheckHasProblems(pageCheck)) {
-      progress(`deploy: warn — ${describeCliPageCheck(pageCheck!)}`);
+      for (const line of pageCheckLines(pageCheck!)) progress(line);
     }
     return {
       ok: true,
@@ -614,6 +614,20 @@ function parseBootCheck(raw: unknown): { status: number; detail: string } | unde
 function pageCheckHasProblems(p: DeployShipSuccess['pageCheck']): boolean {
   if (!p) return false;
   return p.consoleErrors > 0 || p.failedRequests > 0 || (!!p.httpStatus && p.httpStatus >= 500);
+}
+
+/**
+ * The warn line PLUS the captured samples.
+ *
+ * Counts alone are not actionable: "23 console errors" does not tell anyone the
+ * allow-list is missing `x-cart-token`, and finalize cannot be safely re-run
+ * just to get `--json`, so whatever the human path omits here is lost for good.
+ * The samples are already bounded and truncated server-side.
+ */
+function pageCheckLines(p: NonNullable<DeployShipSuccess['pageCheck']>): string[] {
+  const lines = [`deploy: warn — ${describeCliPageCheck(p)}`];
+  for (const sample of p.samples ?? []) lines.push(`deploy:   ${sample}`);
+  return lines;
 }
 
 /** One-line human summary for the warn output. */
