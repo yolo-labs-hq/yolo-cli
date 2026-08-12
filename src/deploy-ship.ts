@@ -507,6 +507,10 @@ async function resumeStagedShip(
       releaseId: finalized.value.releaseId,
       url: finalized.value.url,
       ...(bootCheck ? { bootCheck } : {}),
+      // Must be on the RESULT, not only the progress line: under --json the
+      // warning goes to stderr and the structured verdict + samples would
+      // otherwise be lost entirely for a resumed (approval-parked) ship.
+      ...(pageCheck ? { pageCheck } : {}),
     };
   }
 
