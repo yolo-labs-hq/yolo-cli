@@ -104,6 +104,22 @@ export interface DeployShipSuccess {
    * staged/live); this is an advisory that the live URL won't serve until fixed.
    */
   bootCheck?: { status: number; detail: string };
+  /**
+   * What the shipped page did in a real browser. Present ONLY when the backend
+   * actually ran the check — its absence means "not checked" (no session pod,
+   * an older pod image, kill-switched, timed out), NEVER "page clean". Do not
+   * print a reassuring line on absence.
+   *
+   * Separate from `bootCheck` on purpose: a Worker can boot perfectly and still
+   * serve a page whose every request dies in a CORS preflight, which is exactly
+   * the failure `curl` cannot see.
+   */
+  pageCheck?: {
+    consoleErrors: number;
+    failedRequests: number;
+    samples: string[];
+    url: string;
+  };
 }
 
 /** The T3 prod gate outcome — NOT an error; never blind-retried (exit 3). */
@@ -413,6 +429,13 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
 
   const bootCheck = parseBootCheck(finalized.value.bootCheck);
   if (bootCheck) progress(`deploy: warn — deployed Worker failed to boot (HTTP ${bootCheck.status})`);
+  const pageCheck = parsePageCheck(finalized.value.pageCheck);
+  if (pageCheck && (pageCheck.consoleErrors > 0 || pageCheck.failedRequests > 0)) {
+    progress(
+      `deploy: warn — page reported ${pageCheck.consoleErrors} console error(s), ` +
+      `${pageCheck.failedRequests} failed request(s)`,
+    );
+  }
 
   return {
     ok: true,
@@ -422,6 +445,7 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
     releaseId: finalized.value.releaseId,
     url: finalized.value.url,
     ...(bootCheck ? { bootCheck } : {}),
+    ...(pageCheck ? { pageCheck } : {}),
   };
 }
 
@@ -461,6 +485,13 @@ async function resumeStagedShip(
     progress('deploy: finalize ok (resumed the approved bundle — no rebuild)');
     const bootCheck = parseBootCheck(finalized.value.bootCheck);
     if (bootCheck) progress(`deploy: warn — deployed Worker failed to boot (HTTP ${bootCheck.status})`);
+    const pageCheck = parsePageCheck(finalized.value.pageCheck);
+    if (pageCheck && (pageCheck.consoleErrors > 0 || pageCheck.failedRequests > 0)) {
+      progress(
+        `deploy: warn — page reported ${pageCheck.consoleErrors} console error(s), ` +
+        `${pageCheck.failedRequests} failed request(s)`,
+      );
+    }
     return {
       ok: true,
       dryRun: false,
@@ -564,6 +595,26 @@ function parseBootCheck(raw: unknown): { status: number; detail: string } | unde
   const r = raw as Record<string, unknown>;
   if (typeof r.status !== 'number' || typeof r.detail !== 'string') return undefined;
   return { status: r.status, detail: r.detail };
+}
+
+/**
+ * Narrow the backend's optional `pageCheck` envelope; ignore anything malformed.
+ *
+ * A malformed payload narrows to `undefined`, which the caller renders as "not
+ * checked" — the safe direction. Inventing zeros instead would manufacture a
+ * clean bill of health out of a parse failure.
+ */
+function parsePageCheck(raw: unknown): DeployShipSuccess['pageCheck'] | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.consoleErrors !== 'number' || typeof r.failedRequests !== 'number') return undefined;
+  const samples = Array.isArray(r.samples) ? r.samples.filter((s): s is string => typeof s === 'string') : [];
+  return {
+    consoleErrors: r.consoleErrors,
+    failedRequests: r.failedRequests,
+    samples,
+    url: typeof r.url === 'string' ? r.url : '',
+  };
 }
 
 // ─── Exit codes (spec §5 — EXACT) ─────────────────────────────────────────
