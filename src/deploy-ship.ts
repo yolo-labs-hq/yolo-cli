@@ -119,6 +119,8 @@ export interface DeployShipSuccess {
     failedRequests: number;
     samples: string[];
     url: string;
+    /** Top-level document status. >= 500 is a page failure in its own right. */
+    httpStatus?: number;
   };
 }
 
@@ -430,11 +432,8 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
   const bootCheck = parseBootCheck(finalized.value.bootCheck);
   if (bootCheck) progress(`deploy: warn — deployed Worker failed to boot (HTTP ${bootCheck.status})`);
   const pageCheck = parsePageCheck(finalized.value.pageCheck);
-  if (pageCheck && (pageCheck.consoleErrors > 0 || pageCheck.failedRequests > 0)) {
-    progress(
-      `deploy: warn — page reported ${pageCheck.consoleErrors} console error(s), ` +
-      `${pageCheck.failedRequests} failed request(s)`,
-    );
+  if (pageCheckHasProblems(pageCheck)) {
+    progress(`deploy: warn — ${describeCliPageCheck(pageCheck!)}`);
   }
 
   return {
@@ -486,11 +485,8 @@ async function resumeStagedShip(
     const bootCheck = parseBootCheck(finalized.value.bootCheck);
     if (bootCheck) progress(`deploy: warn — deployed Worker failed to boot (HTTP ${bootCheck.status})`);
     const pageCheck = parsePageCheck(finalized.value.pageCheck);
-    if (pageCheck && (pageCheck.consoleErrors > 0 || pageCheck.failedRequests > 0)) {
-      progress(
-        `deploy: warn — page reported ${pageCheck.consoleErrors} console error(s), ` +
-        `${pageCheck.failedRequests} failed request(s)`,
-      );
+    if (pageCheckHasProblems(pageCheck)) {
+      progress(`deploy: warn — ${describeCliPageCheck(pageCheck!)}`);
     }
     return {
       ok: true,
@@ -602,6 +598,28 @@ function parseBootCheck(raw: unknown): { status: number; detail: string } | unde
 }
 
 /**
+ * True when the page check found something worth a warning line. Mirrors
+ * `pageCheckHasProblems` in common-api — a 5xx document is a failure in its own
+ * right, not just a source of console noise.
+ *
+ * Takes `undefined` deliberately: absence means NOT CHECKED, so it returns
+ * false and the CLI stays silent rather than printing a reassuring line.
+ */
+function pageCheckHasProblems(p: DeployShipSuccess['pageCheck']): boolean {
+  if (!p) return false;
+  return p.consoleErrors > 0 || p.failedRequests > 0 || (!!p.httpStatus && p.httpStatus >= 500);
+}
+
+/** One-line human summary for the warn output. */
+function describeCliPageCheck(p: NonNullable<DeployShipSuccess['pageCheck']>): string {
+  const parts: string[] = [];
+  if (p.httpStatus && p.httpStatus >= 500) parts.push(`the page returned HTTP ${p.httpStatus}`);
+  if (p.consoleErrors > 0) parts.push(`${p.consoleErrors} console error(s)`);
+  if (p.failedRequests > 0) parts.push(`${p.failedRequests} failed request(s)`);
+  return `page check: ${parts.join(', ')}`;
+}
+
+/**
  * Narrow the backend's optional `pageCheck` envelope; ignore anything malformed.
  *
  * A malformed payload narrows to `undefined`, which the caller renders as "not
@@ -618,6 +636,7 @@ function parsePageCheck(raw: unknown): DeployShipSuccess['pageCheck'] | undefine
     failedRequests: r.failedRequests,
     samples,
     url: typeof r.url === 'string' ? r.url : '',
+    ...(typeof r.httpStatus === 'number' ? { httpStatus: r.httpStatus } : {}),
   };
 }
 
