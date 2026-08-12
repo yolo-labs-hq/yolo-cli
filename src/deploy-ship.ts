@@ -121,6 +121,12 @@ export interface DeployShipSuccess {
     url: string;
     /** Top-level document status. >= 500 is a page failure in its own right. */
     httpStatus?: number;
+    /**
+     * Which ORIGIN was checked. Always 'preview' today, even for a prod ship —
+     * CORS allow-lists are origin-exact, so a clean preview does NOT prove
+     * production is fine. Named in the warning line for that reason.
+     */
+    origin?: 'preview' | 'prod';
   };
 }
 
@@ -616,7 +622,11 @@ function describeCliPageCheck(p: NonNullable<DeployShipSuccess['pageCheck']>): s
   if (p.httpStatus && p.httpStatus >= 500) parts.push(`the page returned HTTP ${p.httpStatus}`);
   if (p.consoleErrors > 0) parts.push(`${p.consoleErrors} console error(s)`);
   if (p.failedRequests > 0) parts.push(`${p.failedRequests} failed request(s)`);
-  return `page check: ${parts.join(', ')}`;
+  // Name the URL actually checked. A clean-or-dirty verdict about the PREVIEW
+  // origin must not be read as one about production — origin-exact CORS is
+  // exactly the failure class this check exists for.
+  const where = p.url ? ` on ${p.url}` : '';
+  return `page check${where}: ${parts.join(', ')}`;
 }
 
 /**
@@ -637,6 +647,7 @@ function parsePageCheck(raw: unknown): DeployShipSuccess['pageCheck'] | undefine
     samples,
     url: typeof r.url === 'string' ? r.url : '',
     ...(typeof r.httpStatus === 'number' ? { httpStatus: r.httpStatus } : {}),
+    ...(r.origin === 'preview' || r.origin === 'prod' ? { origin: r.origin } : {}),
   };
 }
 
