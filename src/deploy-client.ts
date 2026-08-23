@@ -166,6 +166,14 @@ export interface StartShipRequest {
   worker?: { mainModule: string; sizeBytes: number };
   compatibilityFlags?: string[];
   gitSha?: string;
+  /**
+   * `git remote get-url origin` for the bundled directory — the source repo
+   * these bytes came from. Sent RAW; the server normalizes it and strips any
+   * credentials in the userinfo before storing.
+   */
+  repoUrl?: string;
+  /** The branch that was checked out at ship time. Absent when detached. */
+  branch?: string;
   bundleDigest: string;
 }
 

@@ -67,6 +67,11 @@ export interface DeployShipDeps {
   readAssetFileImpl?: (absolutePath: string) => Uint8Array;
   /** Best-effort git sha for the ship/start body. Default: `git rev-parse HEAD`. */
   resolveGitShaImpl?: (cwd: string) => string | undefined;
+  /**
+   * Best-effort source repo for the ship/start body. Default: `git remote
+   * get-url origin` + the current branch, read in the directory being bundled.
+   */
+  resolveRepoOriginImpl?: (cwd: string) => { repoUrl?: string; branch?: string };
   /** Staged-ship resume store (T3 approval round-trip). Default: ~/.config/yolo. */
   pendingStoreImpl?: PendingStore;
 }
@@ -175,6 +180,7 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
   const runBuild = deps.runBuildImpl ?? defaultRunBuild;
   const readAssetFile = deps.readAssetFileImpl ?? defaultReadAssetFile;
   const resolveGitSha = deps.resolveGitShaImpl ?? defaultResolveGitSha;
+  const resolveRepoOrigin = deps.resolveRepoOriginImpl ?? defaultResolveRepoOrigin;
 
   // 1. Link — .yolo/deploy.json with a projectId is the durable bond.
   const readResult = readConfig(cwd);
@@ -351,6 +357,15 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
   }
   const gitSha = resolveGitSha(cwd);
   if (gitSha) request.gitSha = gitSha;
+  // The source repo these exact bytes were built from. This is the only place
+  // in the system that can know it — the server sees a bundle, and the owning
+  // workspace may be gone by the time anyone asks. Best-effort in the same
+  // shape as gitSha: a non-git directory or a remote-less checkout just ships
+  // without it. The server re-normalizes and strips credentials; never assume
+  // this string is safe to store as sent.
+  const origin = resolveRepoOrigin(cwd);
+  if (origin.repoUrl) request.repoUrl = origin.repoUrl;
+  if (origin.branch) request.branch = origin.branch;
 
   const started = await startShipLeg(ctx, projectId, request);
   if (!started.ok) return clientFail(started);
@@ -833,6 +848,42 @@ export function defaultRunBuild(command: string, cwd: string, onOutput: (chunk: 
 
 function defaultReadAssetFile(absolutePath: string): Uint8Array {
   return fs.readFileSync(absolutePath);
+}
+
+/**
+ * `git remote get-url origin` + the checked-out branch, best-effort.
+ *
+ * `origin` specifically, not "any remote": a checkout can carry several, and
+ * picking one by guesswork would attribute a site to a fork or a mirror. No
+ * origin ⇒ no claim.
+ *
+ * Deliberately NOT credential-stripped here — normalizing is the server's job
+ * (`services/hosting/repo-ref.ts`), and doing it in two places would let the
+ * two definitions drift. The URL never leaves this process except over TLS to
+ * the deploy API.
+ */
+function defaultResolveRepoOrigin(cwd: string): { repoUrl?: string; branch?: string } {
+  const git = (args: string[]): string | undefined => {
+    try {
+      const out = execFileSync('git', args, {
+        cwd,
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 5000,
+      })
+        .toString()
+        .trim();
+      return out.length > 0 ? out : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const repoUrl = git(['remote', 'get-url', 'origin']);
+  const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  return {
+    ...(repoUrl ? { repoUrl } : {}),
+    // 'HEAD' is git's detached-HEAD answer, not a branch name.
+    ...(branch && branch !== 'HEAD' ? { branch } : {}),
+  };
 }
 
 function defaultResolveGitSha(cwd: string): string | undefined {

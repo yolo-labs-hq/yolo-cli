@@ -1,6 +1,6 @@
 {
   "name": "@yolo-labs/yolo-cli",
-  "version": "0.41.0",
+  "version": "0.42.0",
   "description": "YOLO Studio substrate CLI \u2014 owns yolo plan/workspace/artifact substrate-tooling commands. Distinct from yolo-code (the agent CLI) and yolo-router (the LLM gateway client).",
   "license": "MIT",
   "type": "module",

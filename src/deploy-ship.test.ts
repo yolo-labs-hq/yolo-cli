@@ -96,6 +96,7 @@ function makeDeps(overrides: Partial<DeployShipDeps> = {}): { deps: DeployShipDe
     },
     readAssetFileImpl: () => new TextEncoder().encode('file-bytes'),
     resolveGitShaImpl: () => 'f'.repeat(40),
+    resolveRepoOriginImpl: () => ({ repoUrl: 'git@github.com:acme/site.git', branch: 'main' }),
     ...overrides,
   };
   return { deps, recorded };
@@ -154,6 +155,11 @@ describe('deploy-ship — happy path (static)', () => {
     });
     assert.equal(request.bundleDigest, 'sha256:91c2aabbccdd');
     assert.equal(request.gitSha, 'f'.repeat(40));
+    // Source-repo provenance rides the SAME body as gitSha — a commit hash is
+    // useless without the repo it lives in, and the server can learn neither
+    // from the bundle. Sent raw; the server normalizes + strips credentials.
+    assert.equal(request.repoUrl, 'git@github.com:acme/site.git');
+    assert.equal(request.branch, 'main');
     assert.equal(request.worker, undefined);
 
     // Upload: ONLY the missing hash (h2), base64-encoded with a content type.
@@ -166,6 +172,25 @@ describe('deploy-ship — happy path (static)', () => {
 
     // Pure static → finalize with zero modules.
     assert.deepEqual(recorded.finalizeCalls, [{ shipId: 'shp_77', modules: [] }]);
+  });
+
+  it('omits repo provenance entirely when the directory has no git origin', async () => {
+    // A non-git directory or a remote-less checkout must still ship. The fields
+    // are ABSENT, not empty strings — an empty `repoUrl` would reach the server
+    // as a claim it then has to reject, and `branch: ''` would look like a
+    // detached HEAD that we know something about.
+    const { deps, recorded } = makeDeps({
+      resolveGitShaImpl: () => undefined,
+      resolveRepoOriginImpl: () => ({}),
+    });
+    const { promise } = runShip(deps);
+    const result = await promise;
+
+    assert.equal(result.ok, true);
+    const request = recorded.startCalls[0]!.request;
+    assert.equal('gitSha' in request, false);
+    assert.equal('repoUrl' in request, false);
+    assert.equal('branch' in request, false);
   });
 
   it('surfaces a bootCheck from the finalize response into the success result + a progress warn', async () => {
