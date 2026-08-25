@@ -6,7 +6,7 @@
  * schema + canonical + no-coercion) on each. Catches:
  *
  *   - Non-canonical files (wrong field order, missing lex sort, body
- *     normalization drift) — would break `yolo plan import` round-trip.
+ *     normalization drift).
  *   - Schema regressions (e.g., a future PR introduces a value the
  *     Draft-07 schema rejects).
  *   - Silent YAML coercion in free-form maps (`gate.config`,
@@ -18,12 +18,11 @@
  * Phase 8c.5 round-trip CI check the design called for: a committed
  * plan file MUST be in canonical, schema-valid, no-coercion form.
  *
- * (The full network round-trip — `import` then `export` byte-compare
- * against a live common-api — is intentionally NOT here. It would
- * require CI secrets + a running stack. The offline canonical-form
- * check is sufficient: the canonicalizer is pure, its output is
- * deterministic, and `validate`'s "canonical" check IS the byte-equal
- * round-trip parity.)
+ * (`yolo plan import`/`export` — the network round-trip this check
+ * originally stood in for — were removed as dead CLI surface in the Plan
+ * Run substrate tear-down; they had no backing common-api route. `yolo
+ * plan validate` is the only surviving `plan` subcommand, and this sweep
+ * is now the only thing enforcing canonical form on committed plan files.)
  */
 
 import { describe, it } from 'node:test';
@@ -116,14 +115,10 @@ describe('repo-plans — every committed plan file is canonical, schema-valid, n
       if (!result.ok) {
         assert.fail(
           `${file} failed validation:\n${formatErrors(result.errors)}\n\n` +
-            `Run \`yolo plan validate ${file}\` locally to reproduce. To fix:\n` +
-            `  - If the plan already exists in the DB, run \`yolo plan export <planId> -o ${file}\` ` +
-            `to overwrite from the canonical DB shape.\n` +
-            `  - Otherwise fix the file by hand. Canonical = schema-defined field order at every ` +
-            `level, lex-sorted keys in free-form maps (gate.config, integrationPolicy, ` +
-            `template.metadata), strings (not booleans/numbers) at every leaf of those maps, ` +
-            `LF endings, single trailing newline.\n` +
-            `(Note: \`yolo plan import\` does NOT rewrite the file — it rejects non-canonical input.)`,
+            `Run \`yolo plan validate ${file}\` locally to reproduce. To fix, edit the file by ` +
+            `hand. Canonical = schema-defined field order at every level, lex-sorted keys in ` +
+            `free-form maps (gate.config, integrationPolicy, template.metadata), strings (not ` +
+            `booleans/numbers) at every leaf of those maps, LF endings, single trailing newline.`,
         );
       }
     });

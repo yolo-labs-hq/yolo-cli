@@ -12,8 +12,8 @@
  *      keyed by that workspaceId — `--workspace` is optional in containers
  *      because the session record IS the source of truth.
  *
- *   2. `authenticatedRequest` is the helper used by `yolo plan
- *      import/export` (8c.3+) to call `/internal/work/*`. It sends
+ *   2. `authenticatedRequest` is the helper used by `yolo run list` /
+ *      `yolo artifact get/list` to call `/internal/work/*`. It sends
  *      `Authorization: Bearer <delegated>` — the delegated MCP token is the
  *      capability (the per-agent allowedScopes check at the work routes is
  *      satisfied by the token's claims). The CLI is user-JWT-only; the
@@ -25,34 +25,30 @@
  * globally — `engines: ">=20"` is pinned in package.json.
  *
  * Substrate-CLI v1 scopes (capped per agents.json `substrate-cli`):
- *   - Plan authoring: work.create_plan, work.update_plan,
- *     work.get_plan, work.list_plans
  *   - Run lifecycle:  work.start_run, work.get_run,
  *     work.list_runs, work.pause_run, work.resume_run,
  *     work.cancel_run, work.transfer_run_operator
  *   - Artifact reads: work.get_artifact, work.list_artifacts, work.transfer_run_operator
  *
+ * (The Plan-authoring scopes — work.create_plan/update_plan/get_plan/
+ * list_plans — backed `yolo plan import/export/get/list/open/activate/
+ * archive`. Those subcommands had no backing `/internal/work` route and
+ * were removed as dead CLI surface during the Plan Run substrate
+ * tear-down; `SUBSTRATE_CLI_PLAN_SCOPES` was removed with them. `yolo
+ * plan validate` is unaffected — it's a pure offline file check with no
+ * network call and no scope requirement.)
+ *
  * Run-lifecycle implication: `work.start_run` binds the calling agent
- * as the Run's Operator (route handler, Phase 4/6 R4). So a Run started
- * via `yolo run start` has `operatorAgentId === 'substrate-cli'`, and
- * only the substrate CLI can pause/resume/cancel it via MCP. The
- * natural handoff loop is `yolo run transfer <runId> --to claude` —
- * substrate-cli is the current Operator, claude/codex is an
- * Operator-tier target, route's R4 self-transfer path applies.
- * Substrate-cli is NOT itself Operator-tier (per
- * `OPERATOR_TIER_AGENT_IDS` in operator-binding.ts), so `--to
- * substrate-cli` is rejected by the route's `isValidOperatorTarget`
- * check.
+ * as the Run's Operator (route handler, Phase 4/6 R4). Historically a Run
+ * started via `yolo run start` had `operatorAgentId === 'substrate-cli'`,
+ * and only the substrate CLI could pause/resume/cancel it via MCP, with
+ * `yolo run transfer <runId> --to claude` as the handoff. `run start`,
+ * `run get`, `run pause/resume/cancel`, and `run transfer` were all
+ * removed as dead CLI surface (no backing route) in the same tear-down;
+ * `yolo run list` is the only survivor.
  */
 
 export const SUBSTRATE_CLI_AGENT_ID = 'substrate-cli';
-
-export const SUBSTRATE_CLI_PLAN_SCOPES = [
-  'work.create_plan',
-  'work.update_plan',
-  'work.get_plan',
-  'work.list_plans',
-] as const;
 
 export const SUBSTRATE_CLI_RUN_SCOPES = [
   'work.start_run',
@@ -69,11 +65,9 @@ export const SUBSTRATE_CLI_ARTIFACT_SCOPES = [
   'work.list_artifacts',
 ] as const;
 
-export type SubstrateCliPlanScope = (typeof SUBSTRATE_CLI_PLAN_SCOPES)[number];
 export type SubstrateCliRunScope = (typeof SUBSTRATE_CLI_RUN_SCOPES)[number];
 export type SubstrateCliArtifactScope = (typeof SUBSTRATE_CLI_ARTIFACT_SCOPES)[number];
 export type SubstrateCliScope =
-  | SubstrateCliPlanScope
   | SubstrateCliRunScope
   | SubstrateCliArtifactScope;
 
@@ -115,10 +109,13 @@ export interface MintTokenResult {
   expiresAt: string;
   /** Resolved from the session record at mint time — keys the lockfile. */
   workspaceId: string;
-  /** Resolved from the session record at mint time. Used by user-driven
-   *  CLI fallbacks (e.g. `yolo run cancel --user-driven`) to address
-   *  the user-facing routes via `X-Internal-Auth` + `X-User-Id`,
-   *  bypassing the MCP delegated path's R4 operator-binding check. */
+  /** Resolved from the session record at mint time. Historically used by
+   *  user-driven CLI fallbacks (`yolo run cancel --user-driven` and its
+   *  pause/resume siblings — removed as dead CLI surface in the Plan Run
+   *  substrate tear-down) to address the user-facing routes, bypassing the
+   *  MCP delegated path's R4 operator-binding check. Still part of the mint
+   *  response contract; validated below even though no current subcommand
+   *  consumes it. */
   userId: string;
   /** Audit-trace correlation id; logged but not used for routing. */
   jti: string;
@@ -269,8 +266,11 @@ export async function authenticatedRequest(
  * start with a slash, e.g. `/workspaces/${workspaceId}/runs/${planRunId}/cancel`.
  *
  * Use this when the substrate CLI deliberately acts as the workspace owner
- * (e.g. `yolo run cancel --user-driven` for a Run the user started from the
- * webapp). Default lifecycle calls go through `authenticatedRequest` (MCP path).
+ * rather than a delegated MCP agent — today that's `deploy-client.ts`'s
+ * `/v1/...` hosting routes. (It also historically backed `yolo run cancel
+ * --user-driven` and its pause/resume siblings, removed as dead CLI surface
+ * in the Plan Run substrate tear-down.) Delegated MCP calls go through
+ * `authenticatedRequest` instead.
  */
 export interface UserRouteRequestOptions {
   commonApiUrl: string;

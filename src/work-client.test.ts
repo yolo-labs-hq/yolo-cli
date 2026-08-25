@@ -14,7 +14,6 @@ import {
   authenticatedRequest,
   WorkClientError,
   SUBSTRATE_CLI_AGENT_ID,
-  SUBSTRATE_CLI_PLAN_SCOPES,
   SUBSTRATE_CLI_RUN_SCOPES,
   SUBSTRATE_CLI_ARTIFACT_SCOPES,
   type FetchLike,
@@ -92,7 +91,7 @@ describe('work-client — mintSubstrateToken request shape', () => {
       commonApiUrl: 'https://api.example.com/',
       userToken: 'jwt',
       sessionId: 's',
-      scopes: SUBSTRATE_CLI_PLAN_SCOPES,
+      scopes: SUBSTRATE_CLI_RUN_SCOPES,
       fetchImpl: fetch,
     });
     assert.equal(calls[0]!.url, 'https://api.example.com/internal/mcp/tokens');
@@ -104,7 +103,7 @@ describe('work-client — mintSubstrateToken request shape', () => {
       commonApiUrl: 'https://api.example.com',
       userToken: 'user-jwt-abc',
       sessionId: 's',
-      scopes: SUBSTRATE_CLI_PLAN_SCOPES,
+      scopes: SUBSTRATE_CLI_RUN_SCOPES,
       fetchImpl: fetch,
     });
     assert.equal(calls[0]!.headers['Authorization'], 'Bearer user-jwt-abc');
@@ -118,7 +117,7 @@ describe('work-client — mintSubstrateToken request shape', () => {
         commonApiUrl: 'https://api.example.com',
         userToken: '',
         sessionId: 's',
-        scopes: SUBSTRATE_CLI_PLAN_SCOPES,
+        scopes: SUBSTRATE_CLI_RUN_SCOPES,
         fetchImpl: fetch,
       }),
       (err: unknown) => err instanceof WorkClientError && /no user token/.test(err.message),
@@ -360,15 +359,6 @@ describe('work-client — authenticatedRequest', () => {
 
 // ─── Constants stay in sync with agents.json (substrate-cli scopes) ─────
 describe('work-client — substrate scope constants', () => {
-  it('exposes the expected v1 plan scopes (capped per agents.json substrate-cli)', () => {
-    assert.deepEqual(SUBSTRATE_CLI_PLAN_SCOPES, [
-      'work.create_plan',
-      'work.update_plan',
-      'work.get_plan',
-      'work.list_plans',
-    ]);
-  });
-
   it('exposes the expected v1 run-lifecycle scopes', () => {
     assert.deepEqual(SUBSTRATE_CLI_RUN_SCOPES, [
       'work.start_run',
