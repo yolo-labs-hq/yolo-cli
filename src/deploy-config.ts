@@ -27,7 +27,7 @@
  * surfaces in `yolo deploy validate` instead of misleading the author.
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import type { ReadFileImpl } from './auth-context.js';
@@ -122,6 +122,106 @@ export class DeployConfigError extends Error {
 /** Resolve the deploy.json path for a project root. */
 export function deployConfigPath(cwd: string): string {
   return path.join(cwd, '.yolo', 'deploy.json');
+}
+
+/** An ancestor directory that is already linked to a hosting project. */
+export interface AncestorDeployLink {
+  projectId: string;
+  slug?: string;
+  /** The ancestor directory itself (not the `.yolo` path). */
+  dir: string;
+  /** Its `.yolo/deploy.json`, for the message that explains the inference. */
+  path: string;
+}
+
+/** How far up to look before giving up. A backstop against a pathological tree. */
+const ANCESTOR_WALK_MAX_DEPTH = 24;
+
+/**
+ * Walk UP from `cwd` looking for an ancestor already linked to a hosting project.
+ *
+ * WHY: `yolo deploy init` inside `apps/api` mints a fully independent project
+ * named after the directory — which is exactly how `El Paso Ballroom API` came
+ * to exist as an unrelated top-level card next to the site it serves. The
+ * relationship already exists in the filesystem; nothing recorded it. This finds
+ * it so `init` can offer it (nesting plan §10 S4).
+ *
+ * 🚨 THE STOP CONDITIONS ARE THE DESIGN. An unbounded walk is actively harmful:
+ *
+ *   - **Never `cwd` itself.** That is the already-linked case, which `init`
+ *     handles separately; treating it as an ancestor would make every project
+ *     its own parent.
+ *   - **Stop at a `.git` directory.** That is the repo boundary and therefore
+ *     the monorepo boundary. The repo root is CHECKED first and only then
+ *     becomes a stopping point, so a deployed monorepo root is still found.
+ *   - **Stop BEFORE `$HOME`, and never inspect it.** Someone who once ran
+ *     `yolo deploy init` in their home directory would otherwise have every
+ *     future project on the machine silently adopted by that one — a
+ *     machine-wide capture from a single stray file.
+ *   - **Depth cap** as a backstop, and the filesystem root always terminates.
+ *
+ * Pure and injectable so the walk is testable without touching a real tree.
+ */
+export function findAncestorDeployLink(
+  cwd: string,
+  readFileImpl: ReadFileImpl = defaultReadFile,
+  opts: {
+    /** Absolute path to the user's home. Omit to disable the home guard. */
+    home?: string;
+    existsImpl?: (p: string) => boolean;
+    maxDepth?: number;
+  } = {},
+): AncestorDeployLink | null {
+  const exists = opts.existsImpl ?? ((p: string) => existsSync(p));
+  const maxDepth = opts.maxDepth ?? ANCESTOR_WALK_MAX_DEPTH;
+  const home = opts.home ? path.resolve(opts.home) : undefined;
+
+  const start = path.resolve(cwd);
+  // The repo boundary applies to `cwd` ITSELF (codex P2). Running `init` at the
+  // root of a nested repository would otherwise begin the walk one level ABOVE
+  // it and adopt a parent from the enclosing tree — crossing exactly the
+  // boundary the ancestor-level check below exists to hold.
+  if (exists(path.join(start, '.git'))) return null;
+
+  let dir = path.dirname(start);
+  for (let depth = 0; depth < maxDepth; depth += 1) {
+    // Home is a hard FLOOR: reaching it ends the walk, and it is never
+    // inspected. Walking upward from anywhere inside home always arrives here
+    // before `/`, so this one check covers the whole case — an earlier version
+    // tried to test "is dir inside home" and had the sense inverted, which
+    // refused every directory UNDER home and quietly disabled the feature for
+    // every user whose repos live there (i.e. almost all of them).
+    if (home && dir === home) return null;
+
+    const filePath = deployConfigPath(dir);
+    const text = readFileImpl(filePath);
+    if (text !== undefined && text.trim() !== '') {
+      try {
+        const parsed = JSON.parse(text) as { projectId?: unknown; slug?: unknown };
+        if (typeof parsed.projectId === 'string' && parsed.projectId.length > 0) {
+          return {
+            projectId: parsed.projectId,
+            ...(typeof parsed.slug === 'string' && parsed.slug ? { slug: parsed.slug } : {}),
+            dir,
+            path: filePath,
+          };
+        }
+      } catch {
+        // A malformed ancestor link is not this command's problem to report —
+        // it belongs to that directory, and failing `init` here would block a
+        // child on a file the user may not even know exists. Keep walking.
+      }
+    }
+
+    // Repo boundary. Checked AFTER the link above so a deployed monorepo root
+    // still counts as an ancestor.
+    if (exists(path.join(dir, '.git'))) return null;
+
+    const parent = path.dirname(dir);
+    if (parent === dir) return null; // filesystem root
+    dir = parent;
+  }
+  return null;
 }
 
 /**

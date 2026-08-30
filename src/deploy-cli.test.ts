@@ -706,6 +706,342 @@ describe('deploy-cli — init', () => {
     assert.equal('parentProjectId' in written[0]!.config, false);
   });
 
+  // ── Inferred parent — the upward walk (nesting §10 S4) ──────────────────
+  // `yolo deploy init` inside `apps/api` used to mint a fully independent
+  // project named after the directory. That is how `El Paso Ballroom API` came
+  // to sit as an unrelated top-level card beside the site it serves.
+
+  const PARENT_ID = '6a736e980ebe7300095936e6';
+  const ancestorFs = (files: Record<string, string>) => (p: string) => files[p];
+  const ancestorAt = (dir: string, id = PARENT_ID) => ({
+    [`${dir}/.yolo/deploy.json`]: JSON.stringify({ projectId: id, slug: 'my-site' }),
+  });
+  const rootParent = [{ id: PARENT_ID, slug: 'my-site', parentProjectId: null, status: 'active' }];
+
+  it('infers the parent from an ancestor link and passes it to create', async () => {
+    const io = makeIo();
+    let sent: string | undefined;
+    const code = await runDeployCmd(
+      ['init', '--slug', 'my-api'],
+      baseDeps(io, {
+        cwd: '/repo/apps/api',
+        readFileImpl: ancestorFs(ancestorAt('/repo')),
+        readDeployConfigImpl: () => linked(null),
+        listProjectsImpl: async () => ({ ok: true, value: rootParent }),
+        createProjectImpl: async (_ctx, request) => {
+          sent = request.parentProjectId;
+          return { ok: true, value: { project: { id: 'hp_child', slug: 'my-api' } } };
+        },
+        writeDeployConfigImpl: () => CONFIG_PATH,
+      }),
+    );
+    assert.equal(code, 0);
+    assert.equal(sent, PARENT_ID);
+  });
+
+  it('🚨 SAYS it inferred, names the source file, and gives the undo', async () => {
+    // A parent nobody asked for, applied silently, is the worst outcome here —
+    // the caller would only find out from the console.
+    const io = makeIo();
+    await runDeployCmd(
+      ['init', '--slug', 'my-api'],
+      baseDeps(io, {
+        cwd: '/repo/apps/api',
+        readFileImpl: ancestorFs(ancestorAt('/repo')),
+        readDeployConfigImpl: () => linked(null),
+        listProjectsImpl: async () => ({ ok: true, value: rootParent }),
+        createProjectImpl: async () => ({ ok: true, value: { project: { id: 'hp_child', slug: 'my-api' } } }),
+        writeDeployConfigImpl: () => CONFIG_PATH,
+      }),
+    );
+    const out = io.stdout.join('');
+    assert.match(out, /nested under my-site/);
+    assert.match(out, /inferred from .*\/repo\/\.yolo\/deploy\.json/);
+    assert.match(out, /--no-parent/);
+    assert.match(out, /set-parent --none/);
+  });
+
+  it('--json carries parentProjectId and parentInferredFrom', async () => {
+    // Nesting is invisible in deploy.json by design, so JSON callers would
+    // otherwise have no way to see it happened.
+    const io = makeIo();
+    await runDeployCmd(
+      ['init', '--slug', 'my-api', '--json'],
+      baseDeps(io, {
+        cwd: '/repo/apps/api',
+        readFileImpl: ancestorFs(ancestorAt('/repo')),
+        readDeployConfigImpl: () => linked(null),
+        listProjectsImpl: async () => ({ ok: true, value: rootParent }),
+        createProjectImpl: async () => ({ ok: true, value: { project: { id: 'hp_child', slug: 'my-api' } } }),
+        writeDeployConfigImpl: () => CONFIG_PATH,
+      }),
+    );
+    const payload = JSON.parse(io.stdout.join(''));
+    assert.equal(payload.parentProjectId, PARENT_ID);
+    assert.match(String(payload.parentInferredFrom), /\/repo\/\.yolo\/deploy\.json$/);
+    assert.equal(io.stderr.join(''), '', 'JSON mode keeps stderr empty');
+  });
+
+  it('--no-parent suppresses the walk and creates a root', async () => {
+    const io = makeIo();
+    let sent: unknown = 'unset';
+    const code = await runDeployCmd(
+      ['init', '--slug', 'my-api', '--no-parent'],
+      baseDeps(io, {
+        cwd: '/repo/apps/api',
+        readFileImpl: ancestorFs(ancestorAt('/repo')),
+        readDeployConfigImpl: () => linked(null),
+        listProjectsImpl: async () => ({ ok: true, value: rootParent }),
+        createProjectImpl: async (_ctx, request) => {
+          sent = request.parentProjectId;
+          return { ok: true, value: { project: { id: 'hp_child', slug: 'my-api' } } };
+        },
+        writeDeployConfigImpl: () => CONFIG_PATH,
+      }),
+    );
+    assert.equal(code, 0);
+    assert.equal(sent, undefined);
+    assert.doesNotMatch(io.stdout.join(''), /inferred from/);
+  });
+
+  it('rejects --parent together with --no-parent', async () => {
+    const io = makeIo();
+    const code = await runDeployCmd(['init', '--parent', 'x', '--no-parent'], baseDeps(io));
+    assert.notEqual(code, 0);
+    assert.match(io.stderr.join('') + io.stdout.join(''), /mutually exclusive/);
+  });
+
+  it('🚨 an ancestor that is NOT a root is dropped — init still succeeds', async () => {
+    // The server accepts roots only. An inference is a suggestion, so a
+    // disqualified one must degrade to a top-level project, never fail the init.
+    const io = makeIo();
+    let sent: unknown = 'unset';
+    const code = await runDeployCmd(
+      ['init', '--slug', 'my-api'],
+      baseDeps(io, {
+        cwd: '/repo/apps/api',
+        readFileImpl: ancestorFs(ancestorAt('/repo')),
+        readDeployConfigImpl: () => linked(null),
+        listProjectsImpl: async () => ({
+          ok: true,
+          value: [{ id: PARENT_ID, slug: 'my-site', parentProjectId: 'aaaaaaaaaaaaaaaaaaaaaaaa', status: 'active' }],
+        }),
+        createProjectImpl: async (_ctx, request) => {
+          sent = request.parentProjectId;
+          return { ok: true, value: { project: { id: 'hp_child', slug: 'my-api' } } };
+        },
+        writeDeployConfigImpl: () => CONFIG_PATH,
+      }),
+    );
+    assert.equal(code, 0);
+    assert.equal(sent, undefined);
+  });
+
+  it('🚨 an ancestor the caller does not own is dropped — init still succeeds', async () => {
+    const io = makeIo();
+    let sent: unknown = 'unset';
+    const code = await runDeployCmd(
+      ['init', '--slug', 'my-api'],
+      baseDeps(io, {
+        cwd: '/repo/apps/api',
+        readFileImpl: ancestorFs(ancestorAt('/repo')),
+        readDeployConfigImpl: () => linked(null),
+        listProjectsImpl: async () => ({ ok: true, value: [] }),
+        createProjectImpl: async (_ctx, request) => {
+          sent = request.parentProjectId;
+          return { ok: true, value: { project: { id: 'hp_child', slug: 'my-api' } } };
+        },
+        writeDeployConfigImpl: () => CONFIG_PATH,
+      }),
+    );
+    assert.equal(code, 0);
+    assert.equal(sent, undefined);
+  });
+
+  it('🚨 a projects-list FAILURE must not fail init — it only cost us a default', async () => {
+    const io = makeIo();
+    let sent: unknown = 'unset';
+    const code = await runDeployCmd(
+      ['init', '--slug', 'my-api'],
+      baseDeps(io, {
+        cwd: '/repo/apps/api',
+        readFileImpl: ancestorFs(ancestorAt('/repo')),
+        readDeployConfigImpl: () => linked(null),
+        listProjectsImpl: async () => ({ ok: false, kind: 'network', message: 'upstream down' } as never),
+        createProjectImpl: async (_ctx, request) => {
+          sent = request.parentProjectId;
+          return { ok: true, value: { project: { id: 'hp_child', slug: 'my-api' } } };
+        },
+        writeDeployConfigImpl: () => CONFIG_PATH,
+      }),
+    );
+    assert.equal(code, 0, 'a lookup failure while guessing a default must not fail the command');
+    assert.equal(sent, undefined);
+  });
+
+  it('a suspended ancestor is dropped', async () => {
+    const io = makeIo();
+    let sent: unknown = 'unset';
+    await runDeployCmd(
+      ['init', '--slug', 'my-api'],
+      baseDeps(io, {
+        cwd: '/repo/apps/api',
+        readFileImpl: ancestorFs(ancestorAt('/repo')),
+        readDeployConfigImpl: () => linked(null),
+        listProjectsImpl: async () => ({
+          ok: true,
+          value: [{ id: PARENT_ID, slug: 'my-site', parentProjectId: null, status: 'suspended' }],
+        }),
+        createProjectImpl: async (_ctx, request) => {
+          sent = request.parentProjectId;
+          return { ok: true, value: { project: { id: 'hp_child', slug: 'my-api' } } };
+        },
+        writeDeployConfigImpl: () => CONFIG_PATH,
+      }),
+    );
+    assert.equal(sent, undefined);
+  });
+
+  it('🚨 an explicit --parent wins and is never overridden by the walk', async () => {
+    const io = makeIo();
+    let sent: string | undefined;
+    await runDeployCmd(
+      ['init', '--slug', 'my-api', '--parent', 'bbbbbbbbbbbbbbbbbbbbbbbb'],
+      baseDeps(io, {
+        cwd: '/repo/apps/api',
+        readFileImpl: ancestorFs(ancestorAt('/repo')),
+        readDeployConfigImpl: () => linked(null),
+        listProjectsImpl: async () => ({ ok: true, value: rootParent }),
+        createProjectImpl: async (_ctx, request) => {
+          sent = request.parentProjectId;
+          return { ok: true, value: { project: { id: 'hp_child', slug: 'my-api' } } };
+        },
+        writeDeployConfigImpl: () => CONFIG_PATH,
+      }),
+    );
+    assert.equal(sent, 'bbbbbbbbbbbbbbbbbbbbbbbb');
+    assert.doesNotMatch(io.stdout.join(''), /inferred from/);
+  });
+
+  it('🚨 says when reconciliation dropped an inferred parent, and how to fix it', async () => {
+    // Reconciliation is right — refusing would strand a project the caller
+    // already owns. But they were about to get a nested project and are getting
+    // a link to an existing one elsewhere in the tree, so it must not be silent.
+    const io = makeIo();
+    const code = await runDeployCmd(
+      ['init', '--slug', 'my-api'],
+      baseDeps(io, {
+        cwd: '/repo/apps/api',
+        readFileImpl: ancestorFs(ancestorAt('/repo')),
+        readDeployConfigImpl: () => linked(null),
+        listProjectsImpl: async () => ({
+          ok: true,
+          value: [
+            { id: PARENT_ID, slug: 'my-site', parentProjectId: null, status: 'active' },
+            { id: 'hp_existing', slug: 'my-api', parentProjectId: null, status: 'active' },
+          ],
+        }),
+        createProjectImpl: async () => ({ ok: false, kind: 'slug-taken', message: 'taken', detail: { slug: 'my-api' } } as never),
+        writeDeployConfigImpl: () => CONFIG_PATH,
+      }),
+    );
+    assert.equal(code, 0, 'must not strand a project the caller already owns');
+    const out = io.stdout.join('');
+    assert.match(out, /already existed and is NOT under my-site/);
+    assert.match(out, /set-parent my-site/);
+  });
+
+  it('reconciliation reports the dropped parent as a FIELD in --json, never as applied', async () => {
+    const io = makeIo();
+    await runDeployCmd(
+      ['init', '--slug', 'my-api', '--json'],
+      baseDeps(io, {
+        cwd: '/repo/apps/api',
+        readFileImpl: ancestorFs(ancestorAt('/repo')),
+        readDeployConfigImpl: () => linked(null),
+        listProjectsImpl: async () => ({
+          ok: true,
+          value: [
+            { id: PARENT_ID, slug: 'my-site', parentProjectId: null, status: 'active' },
+            { id: 'hp_existing', slug: 'my-api', parentProjectId: null, status: 'active' },
+          ],
+        }),
+        createProjectImpl: async () => ({ ok: false, kind: 'slug-taken', message: 'taken', detail: { slug: 'my-api' } } as never),
+        writeDeployConfigImpl: () => CONFIG_PATH,
+      }),
+    );
+    const payload = JSON.parse(io.stdout.join(''));
+    assert.equal(payload.status, 'linked-existing');
+    assert.equal(payload.parentNotApplied, PARENT_ID);
+    assert.equal(payload.parentProjectId, undefined, 'must never claim the nesting happened');
+  });
+
+  it('🚨 falls back to process.env — deps.env is a TEST SEAM, not the environment', async () => {
+    // The real CLI calls `runDeployCmd(args)` with no deps (`cli.ts:739`), so
+    // `deps.env?.X` is always undefined in production. Two things sat behind
+    // that shape: this walk's $HOME floor, and WORKSPACE_ID on create.
+    const io = makeIo();
+    const prevHome = process.env.HOME;
+    process.env.HOME = '/home/dev';
+    try {
+      let sent: unknown = 'unset';
+      await runDeployCmd(
+        ['init', '--slug', 'my-api'],
+        {
+          // NO env key at all — exactly how production arrives here.
+          cwd: '/home/dev/scratch/api',
+          io,
+          readFileImpl: ancestorFs({
+            '/home/dev/.yolo/deploy.json': JSON.stringify({ projectId: PARENT_ID, slug: 'my-site' }),
+          }),
+          readDeployConfigImpl: () => linked(null),
+          listProjectsImpl: async () => ({ ok: true, value: rootParent }),
+          createProjectImpl: async (_ctx: unknown, request: Record<string, unknown>) => {
+            sent = request.parentProjectId;
+            return { ok: true, value: { project: { id: 'hp_child', slug: 'my-api' } } };
+          },
+          writeDeployConfigImpl: () => CONFIG_PATH,
+        } as never,
+      );
+      assert.equal(
+        sent, undefined,
+        'the $HOME floor must hold in production — one stray ~/.yolo/deploy.json '
+        + 'would otherwise adopt every project on the machine',
+      );
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+    }
+  });
+
+  it('🚨 stamps WORKSPACE_ID from process.env — dead since it shipped', async () => {
+    // A hosting project made by `yolo deploy init` inside a session pod carries
+    // `workspaceId` so deploy lifecycle events route back to the workspace. It
+    // was read as `deps.env?.WORKSPACE_ID`, which production never populates.
+    const io = makeIo();
+    const prev = process.env.WORKSPACE_ID;
+    process.env.WORKSPACE_ID = 'ws_from_pod';
+    try {
+      let sent: unknown;
+      await runDeployCmd(
+        ['init', '--slug', 'my-api', '--no-parent'],
+        {
+          cwd: '/repo/apps/api',
+          io,
+          readFileImpl: () => undefined,
+          readDeployConfigImpl: () => linked(null),
+          createProjectImpl: async (_ctx: unknown, request: Record<string, unknown>) => {
+            sent = request.workspaceId;
+            return { ok: true, value: { project: { id: 'hp_child', slug: 'my-api' } } };
+          },
+          writeDeployConfigImpl: () => CONFIG_PATH,
+        } as never,
+      );
+      assert.equal(sent, 'ws_from_pod');
+    } finally {
+      if (prev === undefined) delete process.env.WORKSPACE_ID; else process.env.WORKSPACE_ID = prev;
+    }
+  });
+
   it('--parent accepts a SLUG and resolves it to an id', async () => {
     // A CLI-only user has no way to discover an opaque 24-hex id (there is no
     // `deploy list` subcommand), but slugs are the handle they already use.

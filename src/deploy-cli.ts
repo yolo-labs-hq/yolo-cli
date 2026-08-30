@@ -3,7 +3,7 @@
  * (docs/MANAGED_HOSTING_CLI_SPEC.md §1).
  *
  *   yolo deploy [--env <staging|prod>] [--dry-run] [--json]   ← bare = ship
- *   yolo deploy init [--slug <slug>] [--type <static|worker>] [--parent <id|slug>] [--json]
+ *   yolo deploy init [--slug <slug>] [--type <static|worker>] [--parent <id|slug> | --no-parent] [--json]
  *   yolo deploy status [--json]
  *   yolo deploy logs [--tail] [--since <dur>] [--json]
  *   yolo deploy rollback [releaseId] [--json]
@@ -72,7 +72,13 @@ import {
   type DeployProjectSummary,
   type D1QueryRow,
 } from './deploy-client.js';
-import { readDeployConfig, writeDeployConfig, type DeployConfig } from './deploy-config.js';
+import {
+  readDeployConfig,
+  writeDeployConfig,
+  findAncestorDeployLink as findAncestorLink,
+  type AncestorDeployLink,
+  type DeployConfig,
+} from './deploy-config.js';
 import { adaptWrangler, detectProjectShape, type ProjectShape } from './deploy-detect.js';
 import { collectNodeBuiltinsFromText } from './deploy-bundle.js';
 import { runDeployDev, type DevServerOptions } from './deploy-dev.js';
@@ -121,7 +127,7 @@ export interface DeployCliDeps {
 
 const USAGE = [
   'Usage: yolo deploy [--env <staging|prod>] [--dry-run] [--json]',
-  '       yolo deploy init [--slug <slug>] [--type <static|worker>] [--parent <id|slug>] [--json]',
+  '       yolo deploy init [--slug <slug>] [--type <static|worker>] [--parent <id|slug> | --no-parent] [--json]',
   '       yolo deploy link (--project-id <id> | --slug <slug>) [--type <static|worker>]',
   '       yolo deploy validate [--json]',
   '       yolo deploy doctor [--json]',
@@ -278,6 +284,8 @@ interface ParsedInitArgs {
   type?: 'static' | 'worker';
   /** Nesting S4 — link the new project under an existing one. */
   parentProjectId?: string;
+  /** Suppress the ancestor walk and create a ROOT, even inside a linked tree. */
+  noParent?: boolean;
   jsonOutput: boolean;
 }
 
@@ -285,6 +293,7 @@ export function parseInitArgs(args: string[]): ParsedInitArgs | ParseError {
   let slug: string | undefined;
   let type: 'static' | 'worker' | undefined;
   let parentProjectId: string | undefined;
+  let noParent = false;
   let jsonOutput = false;
 
   for (let i = 0; i < args.length; i++) {
@@ -306,6 +315,8 @@ export function parseInitArgs(args: string[]): ParsedInitArgs | ParseError {
       const v = args[++i];
       if (!v || v.startsWith('--')) return { ok: false, message: '--parent requires a project id' };
       parentProjectId = v;
+    } else if (a === '--no-parent') {
+      noParent = true;
     } else if (a.startsWith('--parent=')) {
       parentProjectId = a.slice('--parent='.length);
     } else if (a.startsWith('--type=')) {
@@ -321,7 +332,12 @@ export function parseInitArgs(args: string[]): ParsedInitArgs | ParseError {
   if (parentProjectId !== undefined && parentProjectId.length === 0) {
     return { ok: false, message: '--parent requires a project id or slug' };
   }
-  return { ok: true, slug, type, parentProjectId, jsonOutput };
+  // Refuse rather than pick a winner: the two flags express opposite intents,
+  // and silently honouring one would create a project the caller did not ask for.
+  if (noParent && parentProjectId !== undefined) {
+    return { ok: false, message: '--parent and --no-parent are mutually exclusive' };
+  }
+  return { ok: true, slug, type, parentProjectId, noParent, jsonOutput };
 }
 
 async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Promise<number> {
@@ -341,6 +357,19 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
   const cwd = deps.cwd ?? process.cwd();
   const readConfig = deps.readDeployConfigImpl ?? readDeployConfig;
   const writeConfig = deps.writeDeployConfigImpl ?? writeDeployConfig;
+  // 🚨 `deps.env` is a TEST SEAM, not the environment. The real CLI reaches here
+  // as `runDeployCmd(args)` with no deps at all (`cli.ts:739`), so `deps.env?.X`
+  // is always undefined in production — a shape that reads like an env lookup and
+  // silently is not one. `resolveDeployContext` already uses the `?? process.env`
+  // form; these two had not. Behind it were:
+  //   - the ancestor walk's `$HOME` floor, which would have been DISABLED in
+  //     production, permitting exactly the machine-wide capture it exists to stop;
+  //   - `WORKSPACE_ID` on create, so a hosting project made by `yolo deploy init`
+  //     inside a session pod has NEVER carried the `workspaceId` that routes deploy
+  //     lifecycle events back to the workspace (and to VibeAssist watchers).
+  //     Pre-existing, and dead since it shipped.
+  // Injection still wins, so tests are unaffected.
+  const env = deps.env ?? process.env;
 
   const readResult = readConfig(cwd);
   if (!readResult.ok) {
@@ -355,7 +384,10 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
     // 🚨 `--parent` on an ALREADY-LINKED directory would otherwise report
     // `already-linked` and exit 0, having silently ignored the flag — the same
     // false-success the slug-reconciliation guard below exists to prevent.
-    // Parent links are create-only, so there is nothing `init` can do here.
+    // `init` itself can do nothing here — its parent link is create-only — but
+    // re-parenting IS possible since S5 (2026-08-09): `yolo deploy set-parent`.
+    // The advice below used to say there was no re-parent route at all, which
+    // sent people to recreate a project when one command would have done.
     const message =
       'this directory is already linked to a project; --parent only applies when creating one';
     // JSON mode keeps stderr EMPTY — automation treats it as diagnostics, and
@@ -368,8 +400,8 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
         // Only advice that actually works: parent links are create-only and
         // there is no re-parent route or console control, so the recovery is
         // to create the child as a NEW project.
-        + '      Nesting is set at creation. Create the child in its own directory with\n'
-        + '      `yolo deploy init --parent <id|slug>`, or from the Hosting console\'s New project dialog.\n',
+        + '      To re-parent THIS project: `yolo deploy set-parent <id|slug>`.\n'
+        + '      To create a NEW child: `yolo deploy init --parent <id|slug>` in its own directory.\n',
       );
     }
     return 1;
@@ -431,6 +463,49 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
     // server's ownership-asserted read be the authority.
   }
 
+  // ── Inferred parent (nesting §10 S4) ────────────────────────────────────
+  // No `--parent` given: look UP for an ancestor that is already a hosting
+  // project. `yolo deploy init` inside `apps/api` otherwise mints a fully
+  // independent project named after the directory — which is exactly how
+  // `El Paso Ballroom API` came to sit as an unrelated top-level card beside the
+  // site it serves. The relationship already exists in the filesystem; this
+  // records it.
+  //
+  // 🚨 INFERRED IS BEST-EFFORT; EXPLICIT IS AUTHORITATIVE. An inference must
+  // never fail an `init` that would otherwise succeed, so the candidate is
+  // VALIDATED against the caller's own projects before use and simply dropped if
+  // it does not qualify. A bad `--parent`, by contrast, still fails loudly above
+  // — the user asked for that specific parent and did not get it.
+  let inferredParent: { link: AncestorDeployLink; slug?: string } | undefined;
+  if (!resolvedParentId && !parsed.noParent) {
+    const ancestor = findAncestorLink(
+      cwd,
+      deps.readFileImpl,
+      { ...(env.HOME ? { home: env.HOME } : {}) },
+    );
+    if (ancestor) {
+      const listImpl = deps.listProjectsImpl ?? listProjects;
+      const listed = await listImpl(auth.context);
+      // A list failure is NOT a reason to fail: we are only looking for a
+      // default. Fall through and create a root.
+      if (listed.ok) {
+        const match = listed.value.find((p) => resolveProjectId(p) === ancestor.projectId);
+        // Roots only, and only a project in a state the server will accept as a
+        // parent — the same rule the console's picker applies. Anything else is
+        // dropped silently: it is a suggestion, not an instruction.
+        const parentOfParent = match ? (match as { parentProjectId?: unknown }).parentProjectId : undefined;
+        const status = match ? str((match as { status?: unknown }).status) : undefined;
+        const eligible = !!match
+          && (parentOfParent === null || parentOfParent === undefined)
+          && (status === undefined || status === 'active' || status === 'published');
+        if (eligible) {
+          resolvedParentId = ancestor.projectId;
+          inferredParent = { link: ancestor, ...(str(match!.slug) ? { slug: str(match!.slug) } : {}) };
+        }
+      }
+    }
+  }
+
   const create = deps.createProjectImpl ?? createProject;
   const created = await create(auth.context, {
     name: parsed.slug ?? path.basename(cwd),
@@ -439,7 +514,7 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
     // lets server-side deploy lifecycle events route back to the workspace
     // (and therefore to VibeAssist event watchers). Local CLI use remains
     // unchanged because the field is optional.
-    ...(deps.env?.WORKSPACE_ID ? { workspaceId: deps.env.WORKSPACE_ID } : {}),
+    ...(env.WORKSPACE_ID ? { workspaceId: env.WORKSPACE_ID } : {}),
     // Nesting S4 — passed straight through; the server verifies ownership,
     // depth and parent state. Not written to `.yolo/deploy.json`.
     ...(resolvedParentId ? { parentProjectId: resolvedParentId } : {}),
@@ -473,6 +548,24 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
           && str((owned as Record<string, unknown> | undefined)?.parentProjectId)?.toLowerCase()
             !== resolvedParentId?.toLowerCase();
         if (projectId && !parentMismatch) {
+          // 🚨 An INFERRED parent must not silently evaporate here (codex P2).
+          // Reconciliation is still right — refusing would strand a project the
+          // caller already owns, which `init` must never do, and parent links
+          // are create-only so this path cannot apply one. But the caller was
+          // about to get a nested project and is instead getting a link to an
+          // existing one that may sit elsewhere in the tree. Say so, and name
+          // the command that closes the gap.
+          const existingParent = str((owned as Record<string, unknown> | undefined)?.parentProjectId);
+          const inferenceLost =
+            !!inferredParent
+            && existingParent?.toLowerCase() !== resolvedParentId?.toLowerCase();
+          if (inferenceLost && !parsed.jsonOutput) {
+            io.out(
+              `note: this project already existed and is NOT under ${inferredParent!.slug ?? resolvedParentId}.\n`
+              + `      Nesting was inferred from ${inferredParent!.link.path} but only applies when creating.\n`
+              + `      Run \`yolo deploy set-parent ${inferredParent!.slug ?? resolvedParentId}\` to nest it.\n`,
+            );
+          }
           return writeLinkFile(
             cwd,
             writeConfig,
@@ -485,6 +578,9 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
               adapted,
               jsonOutput: parsed.jsonOutput,
               jsonStatus: 'linked-existing',
+              // Machine callers get the same fact as a field, never a claim
+              // that the nesting happened.
+              ...(inferenceLost ? { parentNotApplied: resolvedParentId } : {}),
             },
             `OK: slug '${takenSlug}' was already yours — linked existing project ${projectId} — wrote .yolo/deploy.json`,
           );
@@ -507,11 +603,36 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
     return 2;
   }
 
+  // 🚨 SAY SO. A parent nobody asked for, applied silently, is the worst
+  // outcome available here — the caller would only discover the nesting from
+  // the console. Human mode names the ancestor file it came from and the exact
+  // command to undo it; JSON mode carries the same facts as fields.
+  if (inferredParent && !parsed.jsonOutput) {
+    const label = inferredParent.slug ? `${inferredParent.slug} (${resolvedParentId})` : resolvedParentId;
+    io.out(
+      `note: nested under ${label}, inferred from ${inferredParent.link.path}\n`
+      + '      Use --no-parent to create a top-level project instead,\n'
+      + '      or `yolo deploy set-parent --none` to detach this one.\n',
+    );
+  }
+
   return writeLinkFile(
     cwd,
     writeConfig,
     io,
-    { projectId, slug, type: parsed.type, existing, adapted, jsonOutput: parsed.jsonOutput, jsonStatus: 'created' },
+    {
+      projectId,
+      slug,
+      type: parsed.type,
+      existing,
+      adapted,
+      jsonOutput: parsed.jsonOutput,
+      jsonStatus: 'created',
+      ...(resolvedParentId ? { parentProjectId: resolvedParentId } : {}),
+      ...(inferredParent
+        ? { parentInferredFrom: inferredParent.link.path }
+        : {}),
+    },
     `OK: linked project ${projectId}${slug ? ` (slug ${slug})` : ''} — wrote .yolo/deploy.json`,
   );
 }
@@ -2088,6 +2209,12 @@ function writeLinkFile(
     /** `--json` mode: emit one machine-readable object instead of OK/note lines. */
     jsonOutput?: boolean;
     jsonStatus?: 'created' | 'linked-existing';
+    /** The parent the project was created under, explicit or inferred. */
+    parentProjectId?: string;
+    /** Set ONLY when the parent was inferred: the ancestor link it came from. */
+    parentInferredFrom?: string;
+    /** An inferred parent that reconciliation could NOT apply — never a claim it did. */
+    parentNotApplied?: string;
   },
   message: string,
 ): number {
@@ -2121,6 +2248,13 @@ function writeLinkFile(
         ...(params.slug ? { slug: params.slug } : {}),
         ...(params.type ? { type: params.type } : {}),
         configPath: '.yolo/deploy.json',
+        // Nesting is invisible in `.yolo/deploy.json` by design (the link lives
+        // on the project document), so JSON callers would have no way to see it
+        // happened. `parentInferredFrom` is present ONLY when the CLI chose the
+        // parent — its absence means the caller asked for it or there is none.
+        ...(params.parentProjectId ? { parentProjectId: params.parentProjectId } : {}),
+        ...(params.parentInferredFrom ? { parentInferredFrom: params.parentInferredFrom } : {}),
+        ...(params.parentNotApplied ? { parentNotApplied: params.parentNotApplied } : {}),
         ...(params.adapted
           ? { adapted: { sourceFile: params.adapted.sourceFile, migrated: params.adapted.migrated, warnings: params.adapted.warnings } }
           : {}),
