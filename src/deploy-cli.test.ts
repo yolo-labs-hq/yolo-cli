@@ -976,14 +976,45 @@ describe('deploy-cli — init', () => {
     assert.equal(payload.parentProjectId, undefined, 'must never claim the nesting happened');
   });
 
+/**
+ * These two cases deliberately pass NO `deps.env`, so the code under test reads
+ * the REAL `process.env` — which is the property they exist to pin. That also
+ * makes them the only cases here that inherit the ambient environment, and it
+ * broke main: a session pod exports `YOLO_API_TOKEN`, `YOLO_COMMON_API_URL` and
+ * `WORKSPACE_ID`, so `resolveDeployContext` succeeded on the author's machine
+ * and `createProjectImpl` ran. On CI none of those exist, the context resolver
+ * refused with `auth` before reaching create, and `sent` stayed at its initial
+ * value — the assertion reported `'unset'` vs `undefined`, which reads like a
+ * fallback bug rather than a missing credential.
+ *
+ * So supply the deploy credentials explicitly, alongside the variables each
+ * case is actually testing. Hermetic either way: pod or CI.
+ */
+function withProcessEnv<T>(vars: Record<string, string | undefined>, run: () => T): T {
+  const prev = new Map(Object.keys(vars).map((k) => [k, process.env[k]]));
+  for (const [k, v] of Object.entries(vars)) {
+    if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  }
+  try {
+    return run();
+  } finally {
+    for (const [k, v] of prev) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
+}
+
+const DEPLOY_CREDS = {
+  YOLO_API_TOKEN: 'test-user-jwt',
+  YOLO_COMMON_API_URL: 'https://api.test.invalid',
+};
+
   it('🚨 falls back to process.env — deps.env is a TEST SEAM, not the environment', async () => {
     // The real CLI calls `runDeployCmd(args)` with no deps (`cli.ts:739`), so
     // `deps.env?.X` is always undefined in production. Two things sat behind
     // that shape: this walk's $HOME floor, and WORKSPACE_ID on create.
     const io = makeIo();
-    const prevHome = process.env.HOME;
-    process.env.HOME = '/home/dev';
-    try {
+    await withProcessEnv({ ...DEPLOY_CREDS, HOME: '/home/dev' }, async () => {
       let sent: unknown = 'unset';
       await runDeployCmd(
         ['init', '--slug', 'my-api'],
@@ -1008,9 +1039,7 @@ describe('deploy-cli — init', () => {
         'the $HOME floor must hold in production — one stray ~/.yolo/deploy.json '
         + 'would otherwise adopt every project on the machine',
       );
-    } finally {
-      if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
-    }
+    });
   });
 
   it('🚨 stamps WORKSPACE_ID from process.env — dead since it shipped', async () => {
@@ -1018,9 +1047,7 @@ describe('deploy-cli — init', () => {
     // `workspaceId` so deploy lifecycle events route back to the workspace. It
     // was read as `deps.env?.WORKSPACE_ID`, which production never populates.
     const io = makeIo();
-    const prev = process.env.WORKSPACE_ID;
-    process.env.WORKSPACE_ID = 'ws_from_pod';
-    try {
+    await withProcessEnv({ ...DEPLOY_CREDS, WORKSPACE_ID: 'ws_from_pod' }, async () => {
       let sent: unknown;
       await runDeployCmd(
         ['init', '--slug', 'my-api', '--no-parent'],
@@ -1037,9 +1064,7 @@ describe('deploy-cli — init', () => {
         } as never,
       );
       assert.equal(sent, 'ws_from_pod');
-    } finally {
-      if (prev === undefined) delete process.env.WORKSPACE_ID; else process.env.WORKSPACE_ID = prev;
-    }
+    });
   });
 
   it('--parent accepts a SLUG and resolves it to an id', async () => {
