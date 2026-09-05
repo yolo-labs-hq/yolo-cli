@@ -309,10 +309,10 @@ function loadDockerignore(contextDir: string): (rel: string) => boolean {
     const hasSlash = line.includes('/');
     if (/[*?]/.test(line)) {
       const re = new RegExp('^' + line.split('').map((ch) => {
-        if (ch === '*') return ' STAR ';
+        if (ch === '*') return '\x00STAR\x00';
         if (ch === '?') return '[^/]';
         return ch.replace(/[.+^${}()|[\]\\]/g, '\\$&');
-      }).join('').replace(/ STAR  STAR /g, '.*').replace(/ STAR /g, '[^/]*') + '$');
+      }).join('').replace(/\x00STAR\x00\x00STAR\x00/g, '.*').replace(/\x00STAR\x00/g, '[^/]*') + '$');
       // Slash-less glob (`*.log`) matches by BASENAME at any depth; a glob with
       // `/` matches the full path.
       rules.push({ negate, test: (rel) => hasSlash ? re.test(rel) : re.test(rel.split('/').pop() ?? rel) });
