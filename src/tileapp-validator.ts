@@ -238,6 +238,7 @@ export function validateManifest(raw: unknown, opts: ScreenshotRefOptions = {}):
   errors.push(...validateScreenshots(raw.screenshots, opts));
   if (raw.changelog !== undefined && !isStr(raw.changelog)) errors.push('changelog must be a string when present');
   if (raw.featured !== undefined && typeof raw.featured !== 'boolean') errors.push('featured must be a boolean when present');
+  if (raw.marketplaceListed !== undefined && typeof raw.marketplaceListed !== 'boolean') errors.push('marketplaceListed must be a boolean when present');
 
   if (raw.pricing !== undefined) {
     const p = raw.pricing as Record<string, unknown>;

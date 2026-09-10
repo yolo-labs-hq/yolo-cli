@@ -30,6 +30,15 @@ const base = {
 
 const errorsFor = (m: Record<string, unknown>, opts = {}) => validateManifest(m, opts).errors;
 
+describe('marketplace visibility', () => {
+  it('accepts legacy manifests and boolean visibility, rejects string booleans', () => {
+    for (const manifest of [base, { ...base, marketplaceListed: true }, { ...base, marketplaceListed: false }]) {
+      assert.deepEqual(errorsFor(manifest), []);
+    }
+    assert.deepEqual(errorsFor({ ...base, marketplaceListed: 'false' }), ['marketplaceListed must be a boolean when present']);
+  });
+});
+
 describe('screenshot refs — the partner-safe default', () => {
   it('REJECTS the media/<file> form unless the caller opts in', () => {
     // The default is false on purpose: partner ingest uploads no media, so this
