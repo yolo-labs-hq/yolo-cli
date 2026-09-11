@@ -1,75 +1,14 @@
-/**
- * Substrate-CLI work client (Phase 8c.2).
- *
- * Replaces the 8a Group 9 scaffold stub with the real auth flow:
- *
- *   1. `mintSubstrateToken` POSTs to `/internal/mcp/tokens` with
- *      `Authorization: Bearer <user JWT>` and the session-bound payload
- *      `{ sessionId, agentId: 'substrate-cli', scopes: [...] }`. The endpoint
- *      (`internalOrUserAuth`) verifies the JWT's userId owns the session,
- *      derives `workspaceId`, and returns a delegated JWT in `result.token`
- *      plus `result.claims.workspaceId`. The substrate CLI's lockfile is
- *      keyed by that workspaceId — `--workspace` is optional in containers
- *      because the session record IS the source of truth.
- *
- *   2. `authenticatedRequest` is the helper used by `yolo run list` /
- *      `yolo artifact get/list` to call `/internal/work/*`. It sends
- *      `Authorization: Bearer <delegated>` — the delegated MCP token is the
- *      capability (the per-agent allowedScopes check at the work routes is
- *      satisfied by the token's claims). The CLI is user-JWT-only; the
- *      INTERNAL_API_KEY / X-Internal-Auth path was removed.
- *
- * Both calls take an injectable `fetchImpl` so unit tests can stub
- * the transport without touching real `globalThis.fetch`. In v1 the
- * substrate CLI requires Node 20+, which guarantees `fetch` exists
- * globally — `engines: ">=20"` is pinned in package.json.
- *
- * Substrate-CLI v1 scopes (capped per agents.json `substrate-cli`):
- *   - Run lifecycle:  work.start_run, work.get_run,
- *     work.list_runs, work.pause_run, work.resume_run,
- *     work.cancel_run, work.transfer_run_operator
- *   - Artifact reads: work.get_artifact, work.list_artifacts, work.transfer_run_operator
- *
- * (The Plan-authoring scopes — work.create_plan/update_plan/get_plan/
- * list_plans — backed `yolo plan import/export/get/list/open/activate/
- * archive`. Those subcommands had no backing `/internal/work` route and
- * were removed as dead CLI surface during the Plan Run substrate
- * tear-down; `SUBSTRATE_CLI_PLAN_SCOPES` was removed with them. `yolo
- * plan validate` is unaffected — it's a pure offline file check with no
- * network call and no scope requirement.)
- *
- * Run-lifecycle implication: `work.start_run` binds the calling agent
- * as the Run's Operator (route handler, Phase 4/6 R4). Historically a Run
- * started via `yolo run start` had `operatorAgentId === 'substrate-cli'`,
- * and only the substrate CLI could pause/resume/cancel it via MCP, with
- * `yolo run transfer <runId> --to claude` as the handoff. `run start`,
- * `run get`, `run pause/resume/cancel`, and `run transfer` were all
- * removed as dead CLI surface (no backing route) in the same tear-down;
- * `yolo run list` is the only survivor.
- */
+/** Session-bound delegated authentication and workspace artifact transport. */
 
 export const SUBSTRATE_CLI_AGENT_ID = 'substrate-cli';
-
-export const SUBSTRATE_CLI_RUN_SCOPES = [
-  'work.start_run',
-  'work.get_run',
-  'work.list_runs',
-  'work.pause_run',
-  'work.resume_run',
-  'work.cancel_run',
-  'work.transfer_run_operator',
-] as const;
 
 export const SUBSTRATE_CLI_ARTIFACT_SCOPES = [
   'work.get_artifact',
   'work.list_artifacts',
 ] as const;
 
-export type SubstrateCliRunScope = (typeof SUBSTRATE_CLI_RUN_SCOPES)[number];
 export type SubstrateCliArtifactScope = (typeof SUBSTRATE_CLI_ARTIFACT_SCOPES)[number];
-export type SubstrateCliScope =
-  | SubstrateCliRunScope
-  | SubstrateCliArtifactScope;
+export type SubstrateCliScope = SubstrateCliArtifactScope;
 
 /**
  * Minimal subset of the global `fetch` shape the work client needs.
@@ -107,15 +46,9 @@ export interface MintTokenResult {
   token: string;
   /** ISO-8601 expiry; substrate CLI re-mints if it ever crosses this. */
   expiresAt: string;
-  /** Resolved from the session record at mint time — keys the lockfile. */
+  /** Resolved from the session record at mint time. */
   workspaceId: string;
-  /** Resolved from the session record at mint time. Historically used by
-   *  user-driven CLI fallbacks (`yolo run cancel --user-driven` and its
-   *  pause/resume siblings — removed as dead CLI surface in the Plan Run
-   *  substrate tear-down) to address the user-facing routes, bypassing the
-   *  MCP delegated path's R4 operator-binding check. Still part of the mint
-   *  response contract; validated below even though no current subcommand
-   *  consumes it. */
+  /** User identity returned by the mint endpoint. */
   userId: string;
   /** Audit-trace correlation id; logged but not used for routing. */
   jti: string;
@@ -263,14 +196,8 @@ export async function authenticatedRequest(
  * with `Authorization: Bearer <user JWT>` — `flexibleAuth` falls through to
  * `userAuth`, so the JWT IS the user identity (no `X-Internal-Auth` + `X-User-Id`
  * impersonation). `routePath` is appended verbatim to `${commonApiUrl}/v1` —
- * start with a slash, e.g. `/workspaces/${workspaceId}/runs/${planRunId}/cancel`.
- *
- * Use this when the substrate CLI deliberately acts as the workspace owner
- * rather than a delegated MCP agent — today that's `deploy-client.ts`'s
- * `/v1/...` hosting routes. (It also historically backed `yolo run cancel
- * --user-driven` and its pause/resume siblings, removed as dead CLI surface
- * in the Plan Run substrate tear-down.) Delegated MCP calls go through
- * `authenticatedRequest` instead.
+ * start with a slash. Hosting commands use these owner-authenticated routes.
+ * Delegated MCP calls use `authenticatedRequest`.
  */
 export interface UserRouteRequestOptions {
   commonApiUrl: string;

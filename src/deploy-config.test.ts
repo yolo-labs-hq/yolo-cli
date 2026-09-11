@@ -1,7 +1,7 @@
 /**
  * `.yolo/deploy.json` read/validate/write tests (managed-hosting CLI
  * spec §3). Pin the canonical write discipline (2-space JSON, fixed
- * key order, trailing newline, idempotent re-write — the lockfile.ts
+ * key order, trailing newline, idempotent re-write — the configuration
  * rules) and the structured validation errors the deploy verb prints.
  */
 

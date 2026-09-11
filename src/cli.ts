@@ -1,13 +1,6 @@
 #!/usr/bin/env node
 /**
- * `yolo` — YOLO Studio substrate CLI (Phase 8a Group 9 scaffold).
- *
- * Owns substrate-tooling subcommands (plan import/export/validate;
- * future: workspace, artifact). v1 ships only `yolo --version` and
- * `yolo context`; full plan import/export lands in Phase 8c.
- *
- * NOT the agent CLI. The agent CLI is `yolo-code`. NOT the LLM router
- * client. The LLM router client is `yolo-router`.
+ * `yolo` — YOLO Studio workspace, artifact, app and hosting CLI.
  *
  * Auth contract (AUTH_AND_ONBOARDING Slice 0 — user-JWT-only):
  * `SESSION_ID` + `YOLO_COMMON_API_URL` + a USER ACCESS JWT, resolved by
@@ -21,12 +14,6 @@
  */
 
 import { readSessionContext, formatContext, ContextResolutionError } from './context.js';
-import { validatePlanFile, formatErrors } from './plan-validate.js';
-import {
-  runRunList,
-  exitCodeForFailure as runListExitCode,
-  type RunExecutionState,
-} from './run-list.js';
 import {
   runArtifactGet,
   exitCodeForFailure as artifactGetExitCode,
@@ -74,11 +61,6 @@ function printHelp(): void {
       '',
       'Commands:',
       '  context                                   Print resolved session/workspace/API context.',
-      '  plan validate <file>                      Validate a .yolo/plans/<slug>.md plan file (offline).',
-      '  run list [opts]                           List Plan Runs in the current workspace (work.list_runs).',
-      '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
-      '    [--state <pending|running|paused|...>]  Server-side executionState filter.',
-      '    [--json]                                Pretty-print raw JSON instead of the table.',
       '  artifact get <key> [opts]                 Read a workspace artifact (work.get_artifact).',
       '    [--version <n>]                         Pin to a specific version. Default: latest.',
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
@@ -131,7 +113,7 @@ function printHelp(): void {
       '  deploy status [--json]                    Project + release status (incl. pending approvals).',
       '  deploy logs [--tail] [--since <dur>]      Recent logs; --tail streams NDJSON.',
       '  deploy rollback [releaseId] [--json]      Repoint the project to a previous release.',
-      '  --version                                 Print substrate CLI version.',
+      '  --version                                 Print CLI version.',
       '  --help                                    Print this help.',
       '',
       'Distinct from:',
@@ -140,30 +122,6 @@ function printHelp(): void {
       '',
     ].join('\n'),
   );
-}
-
-function runPlanValidate(args: string[]): number {
-  const file = args[0];
-  if (!file) {
-    process.stderr.write('yolo: plan validate requires a file path\n');
-    process.stderr.write('Usage: yolo plan validate <file>\n');
-    return 64; // EX_USAGE
-  }
-  let result;
-  try {
-    result = validatePlanFile(file);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`yolo: cannot read plan file '${file}': ${msg}\n`);
-    return 64;
-  }
-  if (result.ok) {
-    process.stdout.write(`OK: ${file} is canonical and schema-valid (planId=${result.planId}, ${result.bytes} bytes)\n`);
-    return 0;
-  }
-  process.stderr.write(`FAIL: ${file}\n`);
-  process.stderr.write(`${formatErrors(result.errors)}\n`);
-  return 1;
 }
 
 interface ParseError {
@@ -196,7 +154,7 @@ async function runTileAppInstallCmd(args: string[]): Promise<number> {
     const a = args[i]!;
     // A following flag must never be consumed as a value (`--workspace
     // --accept-optional=x`), so reject empty values and `--`-leading values —
-    // same pattern as the run/plan parsers (codex gpt-5.6-sol P3, 2026-07-18).
+    // Reject flags in value positions.
     if (a === '--workspace') { const v = args[++i]; if (!v || v.startsWith('--')) return tileAppUsage('install', '--workspace requires a value'); workspaceId = v; }
     else if (a.startsWith('--workspace=')) { const v = a.slice('--workspace='.length); if (!v) return tileAppUsage('install', '--workspace requires a value'); workspaceId = v; }
     else if (a === '--accept-optional') { const v = args[++i]; if (!v || v.startsWith('--')) return tileAppUsage('install', '--accept-optional requires a value'); acceptOptional.push(v); }
@@ -402,64 +360,6 @@ async function runTileAppDevCmd(args: string[]): Promise<number> {
   return runTileAppDev({ manifestPath, port, host, bundleDir, allow });
 }
 
-interface ParsedRunListArgs {
-  ok: true;
-  workspaceFlag?: string;
-  stateFilter?: RunExecutionState;
-  jsonOutput: boolean;
-}
-
-function parseRunListArgs(args: string[]): ParsedRunListArgs | ParseError {
-  let workspaceFlag: string | undefined;
-  let stateFilter: RunExecutionState | undefined;
-  let jsonOutput = false;
-
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i]!;
-    if (a === '--workspace') {
-      const v = args[++i];
-      if (!v || v.startsWith('--')) return { ok: false, message: '--workspace requires a value' };
-      workspaceFlag = v;
-    } else if (a.startsWith('--workspace=')) {
-      workspaceFlag = a.slice('--workspace='.length);
-    } else if (a === '--state') {
-      const v = args[++i];
-      if (!v || v.startsWith('--')) return { ok: false, message: '--state requires a value' };
-      stateFilter = v as RunExecutionState;
-    } else if (a.startsWith('--state=')) {
-      stateFilter = a.slice('--state='.length) as RunExecutionState;
-    } else if (a === '--json') {
-      jsonOutput = true;
-    } else if (a.startsWith('--')) {
-      return { ok: false, message: `unknown option: ${a}` };
-    } else {
-      return { ok: false, message: `unexpected positional argument: ${a}` };
-    }
-  }
-
-  return { ok: true, workspaceFlag, stateFilter, jsonOutput };
-}
-
-async function runRunListCmd(args: string[]): Promise<number> {
-  const parsed = parseRunListArgs(args);
-  if (!parsed.ok) {
-    process.stderr.write(`yolo: run list: ${parsed.message}\n`);
-    process.stderr.write('Usage: yolo run list [--workspace <wsId>] [--state <pending|running|paused|succeeded|failed|cancelled|superseded>] [--json]\n');
-    return 64;
-  }
-  const result = await runRunList({
-    workspaceFlag: parsed.workspaceFlag,
-    stateFilter: parsed.stateFilter,
-    outputFormat: parsed.jsonOutput ? 'json' : 'summary',
-  });
-  if (result.ok) {
-    process.stdout.write(`${result.output}\n`);
-    return 0;
-  }
-  process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
-  return runListExitCode(result.kind);
-}
-
 interface ParsedArtifactGetArgs {
   ok: true;
   key: string;
@@ -651,34 +551,6 @@ async function main(argv: string[]): Promise<number> {
     }
   }
 
-  if (cmd === 'plan') {
-    const sub = args[1];
-    if (sub === 'validate') {
-      return runPlanValidate(args.slice(2));
-    }
-    if (!sub) {
-      process.stderr.write('yolo: plan requires a subcommand (validate)\n');
-      return 64;
-    }
-    process.stderr.write(`yolo: unknown plan subcommand '${sub}'\n`);
-    process.stderr.write('Subcommands: validate\n');
-    return 64;
-  }
-
-  if (cmd === 'run') {
-    const sub = args[1];
-    if (sub === 'list') {
-      return runRunListCmd(args.slice(2));
-    }
-    if (!sub) {
-      process.stderr.write('yolo: run requires a subcommand (list)\n');
-      return 64;
-    }
-    process.stderr.write(`yolo: unknown run subcommand '${sub}'\n`);
-    process.stderr.write('Subcommands: list\n');
-    return 64;
-  }
-
   if (cmd === 'artifact') {
     const sub = args[1];
     if (sub === 'get') {
@@ -734,7 +606,7 @@ async function main(argv: string[]): Promise<number> {
 
   if (cmd === 'deploy') {
     // Lazy-load (serve precedent) so the deploy stack — incl. esbuild via
-    // deploy-bundle — never taxes `yolo plan` startup.
+    // deploy-bundle is loaded only for hosting commands.
     const { runDeployCmd } = await import('./deploy-cli.js');
     return runDeployCmd(args.slice(1));
   }

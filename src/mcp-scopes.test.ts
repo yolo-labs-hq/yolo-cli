@@ -49,17 +49,17 @@ describe('runMcpScopes', () => {
     const fetchImpl = makeFetchStub(() => ({
       ok: true,
       status: 200,
-      body: { agentId: 'substrate-cli', allowed: ['work.get_plan', 'work.list_plans'], denied: ['studio.create_tile'] },
+      body: { agentId: 'substrate-cli', allowed: ['work.get_artifact', 'work.list_artifacts'], denied: ['studio.create_tile'] },
     }), captured);
 
     const result = await runMcpScopes({ env: STUB_ENV, fetchImpl });
     assert.equal(result.ok, true);
     if (!result.ok) return;
-    assert.deepEqual(result.allowed, ['work.get_plan', 'work.list_plans']);
+    assert.deepEqual(result.allowed, ['work.get_artifact', 'work.list_artifacts']);
     assert.deepEqual(result.denied, ['studio.create_tile']);
     assert.match(result.output, /Mintable MCP scopes for agent 'substrate-cli' \(session sess-abc\)/);
     assert.match(result.output, /Allowed \(2\):/);
-    assert.match(result.output, /- work\.get_plan/);
+    assert.match(result.output, /- work\.get_artifact/);
     assert.match(result.output, /Not mintable \(1\):/);
     assert.match(result.output, /- studio\.create_tile/);
 
@@ -73,12 +73,12 @@ describe('runMcpScopes', () => {
     const fetchImpl = makeFetchStub(() => ({
       ok: true,
       status: 200,
-      body: { agentId: 'substrate-cli', allowed: ['work.get_plan'], denied: [] },
+      body: { agentId: 'substrate-cli', allowed: ['work.get_artifact'], denied: [] },
     }));
     const result = await runMcpScopes({ env: STUB_ENV, fetchImpl, outputFormat: 'json' });
     assert.equal(result.ok, true);
     if (!result.ok) return;
-    assert.deepEqual(JSON.parse(result.output), { agentId: 'substrate-cli', allowed: ['work.get_plan'], denied: [] });
+    assert.deepEqual(JSON.parse(result.output), { agentId: 'substrate-cli', allowed: ['work.get_artifact'], denied: [] });
   });
 
   it('passes an --agent override through as the agentId query param', async () => {

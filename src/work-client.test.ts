@@ -14,7 +14,6 @@ import {
   authenticatedRequest,
   WorkClientError,
   SUBSTRATE_CLI_AGENT_ID,
-  SUBSTRATE_CLI_RUN_SCOPES,
   SUBSTRATE_CLI_ARTIFACT_SCOPES,
   type FetchLike,
 } from './work-client.js';
@@ -58,7 +57,7 @@ const VALID_MINT_RESPONSE = {
     workspaceId: '507f1f77bcf86cd799439011',
     userId: '507f1f77bcf86cd799439001',
     agentId: 'substrate-cli',
-    scopes: ['work.get_plan'],
+    scopes: ['work.get_artifact'],
   },
 };
 
@@ -70,7 +69,7 @@ describe('work-client — mintSubstrateToken request shape', () => {
       commonApiUrl: 'https://api.example.com',
       userToken: 'user-jwt-abc',
       sessionId: 'sess-abc',
-      scopes: ['work.create_plan'],
+      scopes: ['work.get_artifact'],
       fetchImpl: fetch,
     });
     assert.equal(calls.length, 1);
@@ -82,7 +81,7 @@ describe('work-client — mintSubstrateToken request shape', () => {
     const body = JSON.parse(calls[0]!.body!) as Record<string, unknown>;
     assert.equal(body.sessionId, 'sess-abc');
     assert.equal(body.agentId, SUBSTRATE_CLI_AGENT_ID);
-    assert.deepEqual(body.scopes, ['work.create_plan']);
+    assert.deepEqual(body.scopes, ['work.get_artifact']);
   });
 
   it('strips a trailing slash from commonApiUrl', async () => {
@@ -91,7 +90,7 @@ describe('work-client — mintSubstrateToken request shape', () => {
       commonApiUrl: 'https://api.example.com/',
       userToken: 'jwt',
       sessionId: 's',
-      scopes: SUBSTRATE_CLI_RUN_SCOPES,
+      scopes: SUBSTRATE_CLI_ARTIFACT_SCOPES,
       fetchImpl: fetch,
     });
     assert.equal(calls[0]!.url, 'https://api.example.com/internal/mcp/tokens');
@@ -103,7 +102,7 @@ describe('work-client — mintSubstrateToken request shape', () => {
       commonApiUrl: 'https://api.example.com',
       userToken: 'user-jwt-abc',
       sessionId: 's',
-      scopes: SUBSTRATE_CLI_RUN_SCOPES,
+      scopes: SUBSTRATE_CLI_ARTIFACT_SCOPES,
       fetchImpl: fetch,
     });
     assert.equal(calls[0]!.headers['Authorization'], 'Bearer user-jwt-abc');
@@ -117,7 +116,7 @@ describe('work-client — mintSubstrateToken request shape', () => {
         commonApiUrl: 'https://api.example.com',
         userToken: '',
         sessionId: 's',
-        scopes: SUBSTRATE_CLI_RUN_SCOPES,
+        scopes: SUBSTRATE_CLI_ARTIFACT_SCOPES,
         fetchImpl: fetch,
       }),
       (err: unknown) => err instanceof WorkClientError && /no user token/.test(err.message),
@@ -131,7 +130,7 @@ describe('work-client — authenticatedRequest', () => {
     const { fetch, calls } = makeFetchStub({ jsonBody: {} });
     await authenticatedRequest(
       { commonApiUrl: 'https://api.example.com', delegatedToken: 'deleg-jwt', fetchImpl: fetch },
-      '/workspaces/ws-1/plans/plan-1',
+      '/workspaces/ws-1/artifacts/artifact-1',
     );
     assert.equal(calls[0]!.headers['Authorization'], 'Bearer deleg-jwt');
     assert.equal(calls[0]!.headers['X-Internal-Auth'], undefined);
@@ -146,7 +145,7 @@ describe('work-client — mintSubstrateToken happy path', () => {
       commonApiUrl: 'https://api.example.com',
       userToken: 'jwt',
       sessionId: 's',
-      scopes: ['work.get_plan'],
+      scopes: ['work.get_artifact'],
       fetchImpl: fetch,
     });
     assert.equal(result.token, VALID_MINT_RESPONSE.token);
@@ -170,7 +169,7 @@ describe('work-client — mintSubstrateToken happy path', () => {
         commonApiUrl: 'https://api.example.com',
         userToken: 'jwt',
         sessionId: 's',
-        scopes: ['work.get_plan'],
+        scopes: ['work.get_artifact'],
         fetchImpl: fetch,
       }),
       (err: unknown) =>
@@ -192,7 +191,7 @@ describe('work-client — mintSubstrateToken error handling', () => {
         commonApiUrl: 'https://api.example.com',
         userToken: 'jwt',
         sessionId: '',
-        scopes: ['work.get_plan'],
+        scopes: ['work.get_artifact'],
         fetchImpl: fetch,
       }),
       (err: unknown) =>
@@ -214,7 +213,7 @@ describe('work-client — mintSubstrateToken error handling', () => {
         commonApiUrl: 'https://api.example.com',
         userToken: 'jwt',
         sessionId: 's',
-        scopes: ['work.get_plan'],
+        scopes: ['work.get_artifact'],
         fetchImpl: fetch,
       }),
       (err: unknown) =>
@@ -240,7 +239,7 @@ describe('work-client — mintSubstrateToken error handling', () => {
         commonApiUrl: 'https://api.example.com',
         userToken: 'jwt',
         sessionId: 's',
-        scopes: ['work.get_plan'],
+        scopes: ['work.get_artifact'],
         fetchImpl: fetch,
       }),
       (err: unknown) =>
@@ -262,7 +261,7 @@ describe('work-client — mintSubstrateToken error handling', () => {
         commonApiUrl: 'https://api.example.com',
         userToken: 'jwt',
         sessionId: 's',
-        scopes: ['work.get_plan'],
+        scopes: ['work.get_artifact'],
         fetchImpl: fetch,
       }),
       (err: unknown) =>
@@ -274,20 +273,20 @@ describe('work-client — mintSubstrateToken error handling', () => {
 // ─── authenticatedRequest ────────────────────────────────────────────────
 describe('work-client — authenticatedRequest', () => {
   it('sends Authorization Bearer (delegated) + work-path prefix, no X-Internal-Auth', async () => {
-    const { fetch, calls } = makeFetchStub({ jsonBody: { plan: { planId: 'foo', version: 1 } } });
+    const { fetch, calls } = makeFetchStub({ jsonBody: { artifact: { key: 'foo', version: 1 } } });
     await authenticatedRequest(
       {
         commonApiUrl: 'https://api.example.com',
         delegatedToken: 'jwt-xyz',
         fetchImpl: fetch,
       },
-      '/workspaces/wsA/plans/foo',
+      '/workspaces/wsA/artifacts/foo',
       { method: 'GET' },
     );
     assert.equal(calls.length, 1);
     assert.equal(
       calls[0]!.url,
-      'https://api.example.com/internal/work/workspaces/wsA/plans/foo',
+      'https://api.example.com/internal/work/workspaces/wsA/artifacts/foo',
     );
     assert.equal(calls[0]!.method, 'GET');
     assert.equal(calls[0]!.headers['X-Internal-Auth'], undefined);
@@ -302,13 +301,13 @@ describe('work-client — authenticatedRequest', () => {
         delegatedToken: 't',
         fetchImpl: fetch,
       },
-      '/workspaces/wsA/plans',
-      { method: 'POST', jsonBody: { planId: 'foo', name: 'Foo' } },
+      '/workspaces/wsA/artifacts',
+      { method: 'POST', jsonBody: { key: 'foo', name: 'Foo' } },
     );
     assert.equal(calls[0]!.method, 'POST');
     assert.equal(calls[0]!.headers['Content-Type'], 'application/json');
     const body = JSON.parse(calls[0]!.body!) as Record<string, unknown>;
-    assert.equal(body.planId, 'foo');
+    assert.equal(body.key, 'foo');
     assert.equal(body.name, 'Foo');
   });
 
@@ -320,7 +319,7 @@ describe('work-client — authenticatedRequest', () => {
         delegatedToken: 't',
         fetchImpl: fetch,
       },
-      '/workspaces/wsA/plans',
+      '/workspaces/wsA/artifacts',
     );
     assert.equal(calls[0]!.body, undefined);
     assert.equal(calls[0]!.headers['Content-Type'], undefined);
@@ -334,7 +333,7 @@ describe('work-client — authenticatedRequest', () => {
         delegatedToken: 't',
         fetchImpl: fetch,
       },
-      '/workspaces/wsA/plans/foo',
+      '/workspaces/wsA/artifacts/foo',
       { method: 'PATCH', jsonBody: { baseVersion: 1, mutations: [] } },
     );
     assert.equal(response.ok, false);
@@ -351,26 +350,14 @@ describe('work-client — authenticatedRequest', () => {
         delegatedToken: 't',
         fetchImpl: fetch,
       },
-      '/workspaces/wsA/plans',
+      '/workspaces/wsA/artifacts',
     );
-    assert.equal(calls[0]!.url, 'https://api.example.com/internal/work/workspaces/wsA/plans');
+    assert.equal(calls[0]!.url, 'https://api.example.com/internal/work/workspaces/wsA/artifacts');
   });
 });
 
 // ─── Constants stay in sync with agents.json (substrate-cli scopes) ─────
 describe('work-client — substrate scope constants', () => {
-  it('exposes the expected v1 run-lifecycle scopes', () => {
-    assert.deepEqual(SUBSTRATE_CLI_RUN_SCOPES, [
-      'work.start_run',
-      'work.get_run',
-      'work.list_runs',
-      'work.pause_run',
-      'work.resume_run',
-      'work.cancel_run',
-      'work.transfer_run_operator',
-    ]);
-  });
-
   it('exposes the expected v1 artifact-read scopes', () => {
     assert.deepEqual(SUBSTRATE_CLI_ARTIFACT_SCOPES, [
       'work.get_artifact',

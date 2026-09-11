@@ -1,57 +1,32 @@
-# @yololabs/yolo-cli — YOLO Studio substrate CLI
+# @yolo-labs/yolo-cli
 
-The `yolo` binary owns substrate-tooling subcommands (Plan import/export,
-future workspace and artifact primitives). Distinct from:
-
-- **`yolo-code`** — YOLO Studio's built-in coding agent CLI (separate package).
-- **`yolo-router`** — the LLM gateway client (separate package).
-
-## Status
-
-Phase 8a Group 9 scaffold. v1 ships only `yolo --version` and
-`yolo context` (resolves and prints the container ambient session
-context). Plan import/export lands in Phase 8c.
-
-## Usage (in-container)
+The `yolo` CLI provides workspace context, artifact reads, personal app development
+and publishing, and hosting commands. Run `yolo --help` for all commands.
 
 ```sh
-yolo --version
 yolo context
+yolo artifact list
+yolo tileapp init my-app
+yolo deploy --dry-run
 ```
 
-Outside a Studio container the CLI exits with `session-required`. A future
-external-login flow is planned but out of scope for Phase 8.
+Authenticated commands require `SESSION_ID`, `YOLO_COMMON_API_URL` (or
+`YOLO_API_URL`), and a user access JWT. The CLI reads the rotated token at
+`~/.config/yolo/token`, falling back to `YOLO_API_TOKEN`. The session record
+supplies the workspace identity.
 
-## Auth contract
+Artifact commands mint a scoped delegated token through
+`POST /internal/mcp/tokens`; hosting commands authenticate with the user JWT.
+Offline commands such as app scaffolding, validation, and local serving do not
+require authentication.
 
-Requires:
-
-- `SESSION_ID` (load-bearing — workspace derives from the session record)
-- `YOLO_COMMON_API_URL` (or `YOLO_API_URL`)
-- A credential — resolved by precedence (AUTH_AND_ONBOARDING Slice 0):
-  1. `~/.config/yolo/token` — the rotated **user access JWT**, rewritten
-     every ~10 min by container-api's token-refresh service. Preferred;
-     reading the file (not the env var) avoids the stale-shell problem.
-  2. `YOLO_API_TOKEN` env — the pod-injected user JWT (≤24h).
-  3. `INTERNAL_API_KEY` env — service master-key fallback, kept for
-     lane-runner / service callers. **No longer required in user shells**
-     and intentionally excluded from the sandbox env.
-
-The CLI mints a short-lived delegated MCP token via the session-bound
-endpoint (`POST /internal/mcp/tokens`) with `agentId: 'substrate-cli'`
-and a capped scope set, authenticating with the user JWT
-(`Authorization: Bearer`) when available, falling back to
-`X-Internal-Auth` otherwise. It then calls `/internal/work/*` REST
-routes with the delegated bearer (which is the capability — the
-service header is no longer required by `requireMcpAuth`).
-
-## Local build
+Build and test locally:
 
 ```sh
-npm install
-npm run build
-node dist/cli.js --version
+npm ci
+npm test
+node dist/cli.js --help
 ```
 
-Standalone package — not a workspace member. Container install is an
-explicit `COPY` + `npm install -g` block in `containers/sandboxes/yolo-main/Dockerfile`.
+This standalone package is installed in Studio containers through
+`containers/sandboxes/yolo-main/Dockerfile`.

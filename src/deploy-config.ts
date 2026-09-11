@@ -9,7 +9,7 @@
  * is the session JWT; `projectId` is non-secret and ownership-checked
  * server-side on every call.
  *
- * Canonical write shape (mirrors `lockfile.ts` write discipline):
+ * Canonical write shape:
  *   - JSON, 2-space indent, single trailing `\n`.
  *   - Fixed key order per the spec example: $version, projectId, slug,
  *     type, build{command,outputDir}, worker{entry,assetsDir},
@@ -412,8 +412,7 @@ function collectUnknownKeyWarnings(obj: Record<string, unknown>): DeployConfigVa
 /**
  * Reorder to the spec's fixed key order, omitting absent optionals.
  * Binding entries keep `kind`, `binding` first; extra hint keys follow
- * lex-sorted (same rule the plan-file canonicalizer applies to
- * free-form maps). Pure — does not mutate input.
+ * in lexicographic order. Pure — does not mutate input.
  */
 function canonicalize(config: DeployConfig): Record<string, unknown> {
   const out: Record<string, unknown> = { $version: 1 };
