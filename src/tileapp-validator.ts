@@ -22,7 +22,7 @@ export interface ManifestValidation {
 
 interface ParsedPermission {
   raw: string;
-  namespace: 'fs' | 'net' | 'mcp' | 'llm' | 'media' | 'secret' | 'device';
+  namespace: 'fs' | 'net' | 'mcp' | 'llm' | 'media' | 'secret' | 'device' | 'notifications';
   action?: string;
   arg?: string;
 }
@@ -148,6 +148,9 @@ export function parsePermissionShape(raw: string): ParsedPermission | null {
     case 'secret':
       if (action || !arg) return null; // arg = KEY_NAME (preset membership checked server-side)
       return { raw, namespace: 'secret', action: arg };
+    case 'notifications':
+      if (head !== 'notifications.send' || (arg !== 'global' && arg !== 'workspace')) return null;
+      return { raw, namespace: 'notifications', action, arg };
     case 'device':
       if (!action) return null;
       return { raw, namespace: 'device', action, arg };

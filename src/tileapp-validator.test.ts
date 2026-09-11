@@ -131,3 +131,14 @@ describe('OCI digests', () => {
     assert.equal(isValidOciDigest('a'.repeat(64)), false, 'no algorithm prefix');
   });
 });
+
+describe('notification permissions', () => {
+  it('accepts explicit surfaces and rejects wildcard/both grant shortcuts', () => {
+    for (const scope of ['global', 'workspace']) {
+      assert.equal(parsePermissionShape(`notifications.send:${scope}`)?.namespace, 'notifications');
+    }
+    for (const permission of ['notifications.send', 'notifications.send:both', 'notifications.send:*', 'notifications.send.extra:global']) {
+      assert.equal(parsePermissionShape(permission), null);
+    }
+  });
+});
