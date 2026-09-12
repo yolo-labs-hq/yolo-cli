@@ -3,7 +3,7 @@
  *
  * Returns the latest version by default; `--version <n>` pins to a
  * specific version. Default summary renders metadata only (key,
- * version, type, producer, fingerprint, contentLength, createdAt).
+ * version, type, producer, contentLength, createdAt).
  * `--content` flag emits ONLY the artifact content body to stdout
  * (suitable for piping). `--json` emits the full record including
  * content.
@@ -65,9 +65,6 @@ interface GetArtifactResponse {
   content: string;
   producedByAgentId: string;
   producedByTileId: string | null;
-  producerType: string | null;
-  producerId: string | null;
-  fingerprint: string | null;
   refPath: string | null;
   meta: Record<string, unknown> | null;
   createdAt: string;
@@ -150,8 +147,7 @@ export async function runArtifactGet(options: ArtifactGetOptions): Promise<Artif
 
 /**
  * Header with metadata — no content body. The producer block tells
- * the operator who emitted the artifact (agent + tile) and provenance
- * fingerprint for cross-run identity.
+ * the operator who emitted the artifact (agent + tile).
  */
 export function formatSummary(artifact: GetArtifactResponse, workspaceId: string): string {
   const lines: string[] = [];
@@ -159,9 +155,6 @@ export function formatSummary(artifact: GetArtifactResponse, workspaceId: string
   lines.push(`  type:           ${artifact.artifactType}`);
   lines.push(`  contentLength:  ${artifact.contentLength}`);
   lines.push(`  producedBy:     ${artifact.producedByAgentId}${artifact.producedByTileId ? ` (tile ${artifact.producedByTileId})` : ''}`);
-  if (artifact.producerType) lines.push(`  producerType:   ${artifact.producerType}`);
-  if (artifact.producerId) lines.push(`  producerId:     ${artifact.producerId}`);
-  if (artifact.fingerprint) lines.push(`  fingerprint:    ${artifact.fingerprint}`);
   if (artifact.refPath) lines.push(`  refPath:        ${artifact.refPath}`);
   lines.push(`  createdAt:      ${artifact.createdAt}`);
   return lines.join('\n');

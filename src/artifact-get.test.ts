@@ -26,7 +26,7 @@ const STUB_ENV = {
   YOLO_COMMON_API_URL: 'https://api.example.com',
 };
 const STUB_WS = '507f1f77bcf86cd799439011';
-const KEY = 'plans/final-launch/output.json';
+const KEY = 'answers/task/output.json';
 
 const STUB_TOKEN_RESPONSE = {
   token: 'jwt-fake',
@@ -38,14 +38,11 @@ const STUB_TOKEN_RESPONSE = {
 const STUB_ARTIFACT = {
   key: KEY,
   version: 3,
-  artifactType: 'plan-step-output',
+  artifactType: 'answer',
   contentLength: 42,
   content: '{"hello":"world"}',
   producedByAgentId: 'claude',
   producedByTileId: 'tile_abc',
-  producerType: 'step-run',
-  producerId: 'sr_xyz',
-  fingerprint: 'sha256:deadbeef',
   refPath: null,
   meta: null,
   createdAt: '2026-05-01T10:00:00.000Z',
@@ -108,10 +105,9 @@ describe('artifact-get — happy paths', () => {
     assert.equal(result.ok, true);
     if (!result.ok) return;
     assert.match(result.output, new RegExp(`Artifact ${KEY} v3`));
-    assert.match(result.output, /type:\s+plan-step-output/);
+    assert.match(result.output, /type:\s+answer/);
     assert.match(result.output, /contentLength:\s+42/);
     assert.match(result.output, /producedBy:\s+claude \(tile tile_abc\)/);
-    assert.match(result.output, /fingerprint:\s+sha256:deadbeef/);
   });
 
   it('emits raw JSON (including content) when format is "json"', async () => {
@@ -160,10 +156,10 @@ describe('artifact-get — happy paths', () => {
   it('URL-encodes the artifact key (slashes preserved as-is for path segments)', async () => {
     const captured: { url?: string } = {};
     const fetch = makeFetchStub([mintRoute, getRoute(captured)]);
-    await runArtifactGet({ key: 'plans/foo/bar.json', fetchImpl: fetch, env: STUB_ENV });
+    await runArtifactGet({ key: 'answers/foo/bar.json', fetchImpl: fetch, env: STUB_ENV });
     // encodeURIComponent escapes `/` to `%2F` — confirm that's what we emit.
     // (The route uses the same regex as the server's ARTIFACT_KEY_REGEX.)
-    assert.match(captured.url ?? '', /plans%2Ffoo%2Fbar\.json/);
+    assert.match(captured.url ?? '', /answers%2Ffoo%2Fbar\.json/);
   });
 });
 
@@ -179,17 +175,11 @@ describe('artifact-get — formatSummary pure renderer', () => {
     const out = formatSummary(
       {
         ...STUB_ARTIFACT,
-        producerType: null,
-        producerId: null,
-        fingerprint: null,
         refPath: null,
         meta: null,
       },
       STUB_WS,
     );
-    assert.equal(out.includes('producerType:'), false);
-    assert.equal(out.includes('producerId:'), false);
-    assert.equal(out.includes('fingerprint:'), false);
     assert.equal(out.includes('refPath:'), false);
   });
 });
