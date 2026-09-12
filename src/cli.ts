@@ -101,7 +101,7 @@ function printHelp(): void {
       '  mcp scopes [opts]                         Show mintable vs not-mintable MCP scopes for this session (pure read).',
       '    [--agent <agentId>]                     Agent identity to inspect (default: substrate-cli).',
       '    [--json]                                Emit {agentId, allowed, denied} as JSON.',
-      '  serve <dir> [opts]                        Static file server (decision-preview / Gap 2a).',
+      '  serve <dir> [opts]                        Static file server.',
       '    [--port <n>]                            Port (default: $PORT, else 3000).',
       '    [--host <h>]                            Bind host (default: 0.0.0.0).',
       '    [--spa]                                 Serve index.html for unmatched routes (SPA mode).',
