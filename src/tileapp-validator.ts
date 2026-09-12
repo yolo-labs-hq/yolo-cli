@@ -22,7 +22,7 @@ export interface ManifestValidation {
 
 interface ParsedPermission {
   raw: string;
-  namespace: 'fs' | 'net' | 'mcp' | 'llm' | 'media' | 'secret' | 'device';
+  namespace: 'fs' | 'net' | 'mcp' | 'llm' | 'media' | 'secret' | 'device' | 'notifications';
   action?: string;
   arg?: string;
 }
@@ -148,6 +148,9 @@ export function parsePermissionShape(raw: string): ParsedPermission | null {
     case 'secret':
       if (action || !arg) return null; // arg = KEY_NAME (preset membership checked server-side)
       return { raw, namespace: 'secret', action: arg };
+    case 'notifications':
+      if (head !== 'notifications.send' || (arg !== 'global' && arg !== 'workspace')) return null;
+      return { raw, namespace: 'notifications', action, arg };
     case 'device':
       if (!action) return null;
       return { raw, namespace: 'device', action, arg };
@@ -238,6 +241,7 @@ export function validateManifest(raw: unknown, opts: ScreenshotRefOptions = {}):
   errors.push(...validateScreenshots(raw.screenshots, opts));
   if (raw.changelog !== undefined && !isStr(raw.changelog)) errors.push('changelog must be a string when present');
   if (raw.featured !== undefined && typeof raw.featured !== 'boolean') errors.push('featured must be a boolean when present');
+  if (raw.marketplaceListed !== undefined && typeof raw.marketplaceListed !== 'boolean') errors.push('marketplaceListed must be a boolean when present');
 
   if (raw.pricing !== undefined) {
     const p = raw.pricing as Record<string, unknown>;

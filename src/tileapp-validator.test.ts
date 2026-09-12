@@ -30,6 +30,15 @@ const base = {
 
 const errorsFor = (m: Record<string, unknown>, opts = {}) => validateManifest(m, opts).errors;
 
+describe('marketplace visibility', () => {
+  it('accepts legacy manifests and boolean visibility, rejects string booleans', () => {
+    for (const manifest of [base, { ...base, marketplaceListed: true }, { ...base, marketplaceListed: false }]) {
+      assert.deepEqual(errorsFor(manifest), []);
+    }
+    assert.deepEqual(errorsFor({ ...base, marketplaceListed: 'false' }), ['marketplaceListed must be a boolean when present']);
+  });
+});
+
 describe('screenshot refs — the partner-safe default', () => {
   it('REJECTS the media/<file> form unless the caller opts in', () => {
     // The default is false on purpose: partner ingest uploads no media, so this
@@ -120,5 +129,16 @@ describe('OCI digests', () => {
     assert.equal(isValidOciDigest(`sha512:${'a'.repeat(64)}`), false, 'wrong algorithm');
     assert.equal(isValidOciDigest(`sha256:${'A'.repeat(64)}`), false, 'uppercase hex');
     assert.equal(isValidOciDigest('a'.repeat(64)), false, 'no algorithm prefix');
+  });
+});
+
+describe('notification permissions', () => {
+  it('accepts explicit surfaces and rejects wildcard/both grant shortcuts', () => {
+    for (const scope of ['global', 'workspace']) {
+      assert.equal(parsePermissionShape(`notifications.send:${scope}`)?.namespace, 'notifications');
+    }
+    for (const permission of ['notifications.send', 'notifications.send:both', 'notifications.send:*', 'notifications.send.extra:global']) {
+      assert.equal(parsePermissionShape(permission), null);
+    }
   });
 });
