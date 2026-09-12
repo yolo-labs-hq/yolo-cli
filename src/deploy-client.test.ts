@@ -380,39 +380,32 @@ describe('deploy-client — finalizeShip', () => {
   });
 });
 
-// ─── run-context provenance headers ───────────────────────────────────────
+// ─── session provenance headers ───────────────────────────────────────
 
-describe('deploy-client — finalize run-context headers', () => {
-  const RUN_ENV = {
+describe('deploy-client — finalize session provenance headers', () => {
+  const SESSION_ENV = {
     HOME: '/home/test',
     YOLO_API_TOKEN: 'tok-env',
-    YOLO_RUN_PLAN_ID: 'run-abc',
-    YOLO_RUN_STEP_RUN_ID: 'sr-abc',
     SESSION_ID: 'sess-abc',
   };
 
-  it('forwards YOLO_RUN_* / SESSION_ID as X-Yolo-* headers on a static finalize', async () => {
+  it('forwards SESSION_ID as a session provenance header on a static finalize', async () => {
     const { fetch, calls } = makeFetchStub({ jsonBody: { releaseId: 'rel_1', url: 'https://s.yolo.host' } });
-    await finalizeShip(makeContext(fetch, { env: RUN_ENV }), 'hp_1', 'shp_77', []);
-    assert.equal(calls[0]!.headers['X-Yolo-Run-Plan-Id'], 'run-abc');
-    assert.equal(calls[0]!.headers['X-Yolo-Run-Step-Run-Id'], 'sr-abc');
+    await finalizeShip(makeContext(fetch, { env: SESSION_ENV }), 'hp_1', 'shp_77', []);
     assert.equal(calls[0]!.headers['X-Yolo-Session-Id'], 'sess-abc');
   });
 
   it('forwards the same headers on a worker (multipart) finalize', async () => {
     const { fetch, calls } = makeFetchStub({ jsonBody: { releaseId: 'rel_1', url: 'https://s.yolo.host' } });
-    await finalizeShip(makeContext(fetch, { env: RUN_ENV }), 'hp_1', 'shp_77', [
+    await finalizeShip(makeContext(fetch, { env: SESSION_ENV }), 'hp_1', 'shp_77', [
       { name: 'worker.js', contents: new TextEncoder().encode('x') },
     ]);
-    assert.equal(calls[0]!.headers['X-Yolo-Run-Plan-Id'], 'run-abc');
     assert.equal(calls[0]!.headers['X-Yolo-Session-Id'], 'sess-abc');
   });
 
-  it('omits the headers entirely outside a run (no YOLO_RUN_* env)', async () => {
+  it('omits session provenance when SESSION_ID is absent', async () => {
     const { fetch, calls } = makeFetchStub({ jsonBody: { releaseId: 'rel_1', url: 'https://s.yolo.host' } });
     await finalizeShip(makeContext(fetch), 'hp_1', 'shp_77', []);
-    assert.equal(calls[0]!.headers['X-Yolo-Run-Plan-Id'], undefined);
-    assert.equal(calls[0]!.headers['X-Yolo-Run-Step-Run-Id'], undefined);
     assert.equal(calls[0]!.headers['X-Yolo-Session-Id'], undefined);
   });
 });
@@ -443,11 +436,10 @@ describe('deploy-client — thin wrappers', () => {
     assert.deepEqual(JSON.parse(calls[0]!.body as string), { releaseId: 'rel_3' });
   });
 
-  it('rollbackProject forwards run-context headers for rollback.provenance', async () => {
+  it('rollbackProject forwards session provenance headers for rollback.provenance', async () => {
     const { fetch, calls } = makeFetchStub({ jsonBody: { releaseId: 'rel_3' } });
-    const env = { HOME: '/h', YOLO_API_TOKEN: 'tok', YOLO_RUN_PLAN_ID: 'run-r', SESSION_ID: 'sess-r' };
+    const env = { HOME: '/h', YOLO_API_TOKEN: 'tok', SESSION_ID: 'sess-r' };
     await rollbackProject(makeContext(fetch, { env }), 'hp_9', { releaseId: 'rel_3' });
-    assert.equal(calls[0]!.headers['X-Yolo-Run-Plan-Id'], 'run-r');
     assert.equal(calls[0]!.headers['X-Yolo-Session-Id'], 'sess-r');
   });
 

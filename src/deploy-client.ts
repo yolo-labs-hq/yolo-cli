@@ -276,19 +276,11 @@ export type FinalizeShipResult =
  *           | 410 upload-expired (ship session lapsed → rerun)
  */
 /**
- * Best-effort substrate run-context headers for the finalize leg. When `yolo
- * deploy` runs inside a Plan-Run lane the pod env carries the run ids, so we
- * forward them and the server stamps release PROVENANCE — letting an auditor
- * walk a live URL back to the run that shipped it. These are CLIENT-ASSERTED
- * over the user JWT (NOT cryptographically bound like the MCP token path), so
- * the server records them as `source: 'cli-env'`: unverified audit metadata,
- * never authorizing. Omitted entirely for an interactive `yolo deploy` run
- * outside a lane (none of the vars set).
+ * Caller-reported session provenance for hosting audit metadata.
+ * This header never authorizes a deployment or rollback.
  */
-export function runContextHeaders(env: Record<string, string | undefined>): Record<string, string> {
+export function sessionContextHeaders(env: Record<string, string | undefined>): Record<string, string> {
   const headers: Record<string, string> = {};
-  if (env.YOLO_RUN_PLAN_ID) headers['X-Yolo-Run-Plan-Id'] = env.YOLO_RUN_PLAN_ID;
-  if (env.YOLO_RUN_STEP_RUN_ID) headers['X-Yolo-Run-Step-Run-Id'] = env.YOLO_RUN_STEP_RUN_ID;
   if (env.SESSION_ID) headers['X-Yolo-Session-Id'] = env.SESSION_ID;
   return headers;
 }
@@ -313,13 +305,13 @@ export async function finalizeShip(
   const fetchImpl = resolveFetch(ctx);
   if (!fetchImpl) return noFetchFailure();
   const url = `${stripTrailingSlash(ctx.commonApiUrl)}/v1/deploy/projects/${enc(projectId)}/ship/${enc(shipId)}/finalize`;
-  // Substrate run-context provenance headers (best-effort; empty outside a lane).
-  const runHeaders = runContextHeaders(ctx.env);
+  // Optional session provenance for the hosting audit record.
+  const requestHeaders = sessionContextHeaders(ctx.env);
   // Resume-after-grant: the pending-store rerun redeems the operator's grant
   // explicitly (x-approval-id → approvalNonce server-side), which yields crisp
   // approval-pending/-denied/-expired outcomes instead of the nonce-less
   // retry-redeem's blended ones.
-  if (opts.approvalId) runHeaders['x-approval-id'] = opts.approvalId;
+  if (opts.approvalId) requestHeaders['x-approval-id'] = opts.approvalId;
 
   let response;
   try {
@@ -344,13 +336,13 @@ export async function finalizeShip(
       // No explicit Content-Type — fetch sets the multipart boundary itself.
       response = await fetchImpl(url, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, ...runHeaders },
+        headers: { Authorization: `Bearer ${token}`, ...requestHeaders },
         body: form,
       });
     } else {
       response = await fetchImpl(url, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...runHeaders },
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...requestHeaders },
         body: JSON.stringify({}),
       });
     }
@@ -469,12 +461,12 @@ export async function rollbackProject(
   projectId: string,
   request: { releaseId?: string } = {},
 ): Promise<ClientResult<unknown>> {
-  // Rollback is a prod re-activation — forward run-context so the server can
+  // Rollback is a prod re-activation — forward session context so the server can
   // stamp `rollback.provenance` (same audit basis as a ship's finalize leg).
   return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/rollback`, {
     method: 'POST',
     jsonBody: request,
-    headers: runContextHeaders(ctx.env),
+    headers: sessionContextHeaders(ctx.env),
   });
 }
 
