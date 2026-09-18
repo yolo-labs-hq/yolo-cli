@@ -101,6 +101,7 @@ function printHelp(): void {
       '  mcp scopes [opts]                         Show mintable vs not-mintable MCP scopes for this session (pure read).',
       '    [--agent <agentId>]                     Agent identity to inspect (default: substrate-cli).',
       '    [--json]                                Emit {agentId, allowed, denied} as JSON.',
+      '  preview <create|status|logs|stop> [opts]   Manage branch-following previews.',
       '  serve <dir> [opts]                        Static file server.',
       '    [--port <n>]                            Port (default: $PORT, else 3000).',
       '    [--host <h>]                            Bind host (default: 0.0.0.0).',
@@ -597,6 +598,11 @@ async function main(argv: string[]): Promise<number> {
     process.stderr.write(`yolo: unknown mcp subcommand '${sub}'\n`);
     process.stderr.write('Subcommands: scopes\n');
     return 64;
+  }
+
+  if (cmd === 'preview') {
+    const { runPreviewCmd } = await import('./preview.js');
+    return runPreviewCmd(args.slice(1));
   }
 
   if (cmd === 'serve') {

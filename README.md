@@ -30,3 +30,37 @@ node dist/cli.js --help
 
 This standalone package is installed in Studio containers through
 `containers/sandboxes/yolo-main/Dockerfile`.
+
+## Managed branch previews
+
+Inside a Studio workspace, create a persistent preview of a repository branch:
+
+```sh
+yolo preview create --name 'Latest main' --branch main --cwd web \
+  --setup 'npm ci' --build 'npm run build' \
+  --command 'npm start -- --hostname "$HOST" --port "$PORT"'
+yolo preview status
+yolo preview status <tile-id> --json
+yolo preview logs <tile-id> --tail 100
+yolo preview stop <tile-id>
+```
+
+Choose commands appropriate to your app; the example assumes its start script
+accepts `--hostname` and `--port`. Single-quote commands to preserve `$PORT` and
+`$HOST` for the service. It uses isolated checkouts, checks candidate health, and
+switches the tile's stable port only after a successful build and start. Failed
+updates keep the last working version. The required runtime must already be
+installed; this service targets stateless HTTP apps, not database migrations.
+
+The session resolves the authoritative workspace. Preview operations use delegated
+capabilities; no manual credentials or workspace ID are needed. `create` returns
+the tile ID and starts asynchronously. Use `status` for progress, and reuse
+`--request-id <stable-id>` if retrying creation after an uncertain response.
+`status` without an ID lists managed branch previews only. `stop` retains the tile
+and configuration in Studio, removes its running service, and prevents startup on
+page reload. Click **Start** in the tile to resume. Logs are bounded and in-memory;
+stopping the service discards them. All commands accept `--json`.
+
+`yolo preview --help` lists polling, timeout, port and health-check options. New CLI,
+API, agent-registry scopes and container-api versions must be deployed together;
+older deployments return an error rather than run a different preview mode.
