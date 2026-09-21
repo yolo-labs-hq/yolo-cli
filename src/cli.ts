@@ -71,6 +71,11 @@ function printHelp(): void {
       '    [--limit <n>]                           Cap result count (1-500, default 100).',
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '    [--json]                                Pretty-print raw JSON instead of the table.',
+      '  kanban export <tileId> [opts]             Read a board out as a seed document (operator-only REST route).',
+      '    [-o <file>]                             Write to <file>; refuses to overwrite. Default: stdout, for piping.',
+      '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
+      '  kanban import <boardId> <file>            Rebuild a board from a seed document (additive; never overwrites).',
+      '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '  tileapp init <name>                       Scaffold a personal app (./<name>/tileapp.json + index.html).',
       '  tileapp validate <manifest> [opts]        Offline lint: manifest schema + bundle layout (no auth).',
       '  tileapp media push <manifest> [--dir d]   Upload store screenshots (additive — leaves the rest of the bundle alone).',
@@ -586,6 +591,11 @@ async function main(argv: string[]): Promise<number> {
     process.stderr.write(`yolo: unknown tileapp subcommand '${sub}'\n`);
     process.stderr.write('Subcommands: init, validate, dev, sign, publish, media, install, add-tile\n');
     return 64;
+  }
+
+  if (cmd === 'kanban') {
+    const { runKanbanCmd } = await import('./kanban-cli.js');
+    return runKanbanCmd(args.slice(1));
   }
 
   if (cmd === 'mcp') {

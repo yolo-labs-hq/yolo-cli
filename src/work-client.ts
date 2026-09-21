@@ -155,6 +155,18 @@ export interface AuthenticatedRequestInit {
   method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   /** Sent as JSON; Content-Type is auto-set. */
   jsonBody?: unknown;
+  /**
+   * Sent as the request body VERBATIM, and Content-Type is auto-set to JSON
+   * just as `jsonBody` does. Takes precedence over `jsonBody`.
+   *
+   * This exists for callers that already hold the exact bytes they mean to
+   * send and must not re-serialize them — `yolo kanban import` reads a seed
+   * document off disk and hands it to the server unchanged, so that what the
+   * server validates is the file the operator is looking at, byte for byte.
+   * A `JSON.parse` → `JSON.stringify` round trip on the way through would
+   * silently reorder keys and drop formatting.
+   */
+  rawBody?: string;
   /** Extra headers; overrides anything except auth headers. */
   headers?: Record<string, string>;
 }
@@ -184,7 +196,10 @@ export async function authenticatedRequest(
     method: init.method ?? 'GET',
     headers,
   };
-  if (init.jsonBody !== undefined) {
+  if (init.rawBody !== undefined) {
+    headers['Content-Type'] = 'application/json';
+    fetchInit.body = init.rawBody;
+  } else if (init.jsonBody !== undefined) {
     headers['Content-Type'] = 'application/json';
     fetchInit.body = JSON.stringify(init.jsonBody);
   }
@@ -228,7 +243,10 @@ export async function userRouteRequest(
     method: init.method ?? 'GET',
     headers,
   };
-  if (init.jsonBody !== undefined) {
+  if (init.rawBody !== undefined) {
+    headers['Content-Type'] = 'application/json';
+    fetchInit.body = init.rawBody;
+  } else if (init.jsonBody !== undefined) {
     headers['Content-Type'] = 'application/json';
     fetchInit.body = JSON.stringify(init.jsonBody);
   }
