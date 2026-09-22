@@ -24,6 +24,14 @@ test('create uses minted workspace and preserves literal runtime variables', asy
   assert.equal(body.port, 'auto'); assert.match(body.command, /\$PORT/); assert.equal(body.followBranch.setup, 'pip install -r requirements.txt');
   assert.equal(JSON.parse(f.output().out).tile.id, 'pv-1');
 });
+test('--wait-for forwards followBranch.waitFor', async () => {
+  const f = fixture({ tile: { id: 'pv-1' }, preview: { port: 3150 } });
+  assert.equal(await runPreviewCmd(['create', '--name', 'Viz', '--branch', 'main', '--command', 'npm start', '--cwd', 'vizviz', '--wait-for', 'vizviz/package.json', '--json'], f.deps), 0);
+  assert.equal(JSON.parse(f.calls[1]!.init.body).followBranch.waitFor, 'vizviz/package.json');
+  const g = fixture({ tile: { id: 'pv-2' }, preview: { port: 3150 } });
+  assert.equal(await runPreviewCmd(['create', '--name', 'App', '--branch', 'main', '--command', 'node x', '--json'], g.deps), 0);
+  assert.equal('waitFor' in JSON.parse(g.calls[1]!.init.body).followBranch, false);
+});
 test('status, logs and stop use scoped routes and least-privilege capabilities', async () => {
   for (const [action, suffix, scope] of [['status', '/pv-1', 'studio.read_preview'], ['logs', '/pv-1/logs?tail=50', 'studio.read_preview'], ['stop', '/pv-1/stop', 'studio.stop_preview']]) {
     const f = fixture({ preview: { tileId: 'pv-1', branch: 'main', port: 3150, status: 'ready' }, lines: [{ text: 'hello\n' }] });
@@ -34,7 +42,7 @@ test('status, logs and stop use scoped routes and least-privilege capabilities',
   }
 });
 test('invalid arguments make no authenticated requests', async () => {
-  for (const args of [[], ['create'], ['stop'], ['logs', 'pv', '--tail', '0'], ['status', '--branch', 'main'], ['create', '--name', 'app', '--branch', 'main', '--command', 'node x', '--cwd', '../escape']]) {
+  for (const args of [[], ['create'], ['stop'], ['logs', 'pv', '--tail', '0'], ['status', '--branch', 'main'], ['create', '--name', 'app', '--branch', 'main', '--command', 'node x', '--cwd', '../escape'], ['create', '--name', 'app', '--branch', 'main', '--command', 'node x', '--wait-for', '/abs'], ['create', '--name', 'app', '--branch', 'main', '--command', 'node x', '--wait-for', '../x']]) {
     const f = fixture(); assert.equal(await runPreviewCmd(args, f.deps), 64); assert.equal(f.calls.length, 0);
   }
 });

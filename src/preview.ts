@@ -17,6 +17,8 @@ Create options:
   --poll-seconds <n>      Branch polling interval, 5..3600 (default: 30)
   --timeout-seconds <n>   Setup/build timeout, 1..1800 (default: 300)
   --ready-seconds <n>     Server readiness timeout, 1..300 (default: 60)
+  --wait-for <path>       Repository-relative file to wait for on the branch
+                          before checkout/build (e.g. app/package.json)
   --request-id <id>       Reuse for retrying the same create request
   --desktop <id>         Destination desktop
   --json                 Print structured output
@@ -31,7 +33,7 @@ function parse(args: string[]): Parsed {
   if (!['create', 'status', 'logs', 'stop'].includes(action || '')) throw new Error('Choose create, status, logs, or stop');
   const values: Record<string, string> = {};
   let id: string | undefined, json = false;
-  const allowed = action === 'create' ? ['name','branch','command','cwd','setup','build','health-path','port','poll-seconds','timeout-seconds','ready-seconds','request-id','desktop'] : action === 'logs' ? ['tail'] : [];
+  const allowed = action === 'create' ? ['name','branch','command','cwd','setup','build','health-path','port','poll-seconds','timeout-seconds','ready-seconds','wait-for','request-id','desktop'] : action === 'logs' ? ['tail'] : [];
   for (let i = 1; i < args.length; i++) {
     const arg = args[i]!;
     if (arg === '--json') { json = true; continue; }
@@ -61,12 +63,15 @@ function parse(args: string[]): Parsed {
     for (const key of ['name', 'branch', 'command']) if (!values[key]?.trim()) throw new Error(`--${key} is required`);
     const cwd = values.cwd || '.';
     if (cwd.startsWith('/') || cwd.split(/[\\/]/).includes('..')) throw new Error('--cwd must stay inside the repository');
+    const waitFor = values['wait-for'];
+    if (waitFor !== undefined && (waitFor.length > 1024 || waitFor.startsWith('/') || waitFor.split(/[\\/]/).includes('..') || /[\r\n]/.test(waitFor))) throw new Error('--wait-for must be a repository-relative path');
     result.body = { name: values.name, command: values.command, cwd,
       port: !values.port || values.port === 'auto' ? 'auto' : number('port', 1024, 65535, 3100),
       ...(values['request-id'] && { requestId: values['request-id'] }), ...(values.desktop && { desktopId: values.desktop }),
       followBranch: { branch: values.branch, ...(values.setup && { setup: values.setup }), ...(values.build && { build: values.build }),
         healthPath: values['health-path'] || '/', pollSeconds: number('poll-seconds', 5, 3600, 30),
-        timeoutSeconds: number('timeout-seconds', 1, 1800, 300), readySeconds: number('ready-seconds', 1, 300, 60) } };
+        timeoutSeconds: number('timeout-seconds', 1, 1800, 300), readySeconds: number('ready-seconds', 1, 300, 60),
+        ...(waitFor && { waitFor }) } };
   }
   return result;
 }
