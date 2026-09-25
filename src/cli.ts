@@ -40,6 +40,7 @@ import {
 // `../package.json` relative path resolves correctly both during
 // tests (src/) and in production (dist/).
 import { createRequire } from 'module';
+import { exitAfterFlush } from './exit.js';
 const PKG_VERSION: string = (createRequire(import.meta.url)('../package.json') as { version: string }).version;
 
 /**
@@ -632,10 +633,12 @@ async function main(argv: string[]): Promise<number> {
   return 64; // EX_USAGE
 }
 
+// Never `process.exit()` straight after writing: output to a pipe is async and
+// would be cut at the 64 KiB pipe buffer (see ./exit.ts).
 main(process.argv).then(
-  (code) => process.exit(code),
+  (code) => exitAfterFlush(code),
   (err) => {
     process.stderr.write(`yolo: unexpected error: ${err?.message ?? err}\n`);
-    process.exit(1);
+    exitAfterFlush(1);
   },
 );
