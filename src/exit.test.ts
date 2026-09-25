@@ -3,6 +3,8 @@
  * large `stdout.write` cut a piped `yolo kanban export` at the 64 KiB pipe
  * buffer, so `yolo kanban export <tile> | jq` failed on any board over 64 KiB.
  * spawnSync reads the child's stdout through a pipe, which is the failing case.
+ * (Whether a bare process.exit() truncates depends on pipe timing and buffer
+ * size, so the old behaviour is deliberately not pinned here: it was flaky on CI.)
  */
 
 import { describe, it } from 'node:test';
@@ -45,10 +47,5 @@ describe('exitAfterFlush', () => {
       assert.equal(exited, 5);
       process.exitCode = 0;
     });
-  });
-
-  it('shows the failure it fixes: process.exit() alone truncates a piped write', () => {
-    const r = run(`process.stdout.write('z'.repeat(${BYTES})); process.exit(0);`);
-    assert.ok(r.stdout.length < BYTES, `expected truncation, got ${r.stdout.length} bytes`);
   });
 });
