@@ -77,6 +77,9 @@ function printHelp(): void {
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '  kanban import <boardId> <file>            Rebuild a board from a seed document (additive; never overwrites).',
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
+      '  git doctor [opts]                         Diagnose why git (not gh) can\'t authenticate to github.com.',
+      '    [--fix]                                 Repair what is safe to (store file, helpers, remote URL), then re-check.',
+      '    [--offline] [--remote <name>] [--json]  Skip network checks; remote to probe (default: origin); JSON output.',
       '  tileapp init <name>                       Scaffold a personal app (./<name>/tileapp.json + index.html).',
       '  tileapp validate <manifest> [opts]        Offline lint: manifest schema + bundle layout (no auth).',
       '  tileapp media push <manifest> [--dir d]   Upload store screenshots (additive — leaves the rest of the bundle alone).',
@@ -592,6 +595,11 @@ async function main(argv: string[]): Promise<number> {
     process.stderr.write(`yolo: unknown tileapp subcommand '${sub}'\n`);
     process.stderr.write('Subcommands: init, validate, dev, sign, publish, media, install, add-tile\n');
     return 64;
+  }
+
+  if (cmd === 'git') {
+    const { runGitCmd } = await import('./git-doctor.js');
+    return runGitCmd(args.slice(1));
   }
 
   if (cmd === 'kanban') {
