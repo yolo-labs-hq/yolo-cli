@@ -140,11 +140,13 @@ export async function runPreviewCmd(args: string[], deps: {
     if (input.json) out(JSON.stringify(body, null, 2) + '\n');
     else if (input.action === 'create') out(`Preview ${body.tile?.id || body.previewId} follows ${input.body!.followBranch && (input.body!.followBranch as any).branch} on port ${body.preview?.port}.\nUse yolo preview status to check build progress.\n`);
     else if (input.action === 'stop') out(`Stopped preview ${input.id}. The tile is retained.\n`);
-    else if (input.action === 'update') out(`Updated preview ${input.id} on port ${body.port}; rebuilding the branch head with the new configuration.\nUse yolo preview status ${input.id} to follow it.\n`);
+    else if (input.action === 'update') out(`Updated preview ${input.id} on port ${body.port}${body.version ? ` (config v${body.version})` : ''}; ${body.confirmed === false
+      ? 'saved; the workspace has not confirmed it yet and will be sent it again on the next status check.'
+      : 'rebuilding the branch head with the new configuration.'}\nUse yolo preview status ${input.id} to follow it.\n`);
     else if (input.action === 'logs') out((body.lines?.map((line: any) => line.text).join('') || '(no logs)') + '\n');
     else {
       const previews = body.previews || [body.preview];
-      out(previews.length ? previews.map((p: any) => `${p.tileId}\t${p.name}\t${p.status}\t${p.branchStatus?.phase || '-'}\t${p.branch}\t:${p.port}\t${p.branchStatus?.servedCommit?.slice(0,12) || '-'}${p.branchStatus?.error ? `\n  ${p.branchStatus.error}\n  See: yolo preview logs ${p.tileId}` : ''}`).join('\n') + '\n' : 'No managed branch previews.\n');
+      out(previews.length ? previews.map((p: any) => `${p.tileId}\t${p.name}\t${p.status}\t${p.branchStatus?.phase || '-'}\t${p.branch}\t:${p.port}\t${p.branchStatus?.servedCommit?.slice(0,12) || '-'}${p.update && p.update.state !== 'applied' ? `\n  Config v${p.update.version} update ${p.update.state}${p.update.error ? `: ${p.update.error}` : ''}` : ''}${p.branchStatus?.error ? `\n  ${p.branchStatus.error}\n  See: yolo preview logs ${p.tileId}` : ''}`).join('\n') + '\n' : 'No managed branch previews.\n');
     }
     return 0;
   } catch (error) { err(`yolo preview: ${(error as Error).message}\n`); return 1; }
