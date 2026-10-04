@@ -43,13 +43,17 @@ yolo preview status
 yolo preview status <tile-id> --json
 yolo preview logs <tile-id> --tail 100
 yolo preview stop <tile-id>
+yolo preview update <tile-id> --env API_MOCKS=1 --health-path /health
 ```
 
 Choose commands appropriate to your app; the example assumes its start script
 accepts `--hostname` and `--port`. Single-quote commands to preserve `$PORT` and
 `$HOST` for the service. It uses isolated checkouts, checks candidate health, and
 switches the tile's stable port only after a successful build and start. Failed
-updates keep the last working version. The required runtime must already be
+updates keep the last working version, and `status` reports why a commit was
+refused (health probe outcomes and the last output line). `update` changes the
+command, env or health settings in place, keeping the tile and port, and rebuilds
+the branch head once. The required runtime must already be
 installed; this service targets stateless HTTP apps, not database migrations.
 
 The session resolves the authoritative workspace. Preview operations use delegated

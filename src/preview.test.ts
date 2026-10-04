@@ -41,8 +41,24 @@ test('status, logs and stop use scoped routes and least-privilege capabilities',
     assert.equal(f.calls[1]!.init.method, action === 'stop' ? 'POST' : 'GET');
   }
 });
+test('update rewrites env and health settings of an existing preview with create capability', async () => {
+  const f = fixture({ updated: true, tileId: 'pv-1', port: 3101 });
+  assert.equal(await runPreviewCmd(['update', 'pv-1', '--env', 'OCTOCOVE_MOCKS=1', '--env=EMPTY=', '--unset-env', 'OLD', '--health-path', '/health', '--ready-seconds', '120'], f.deps), 0);
+  assert.deepEqual(JSON.parse(f.calls[0]!.init.body).scopes, ['studio.create_preview']);
+  assert.equal(f.calls[1]!.url, 'https://api.test/internal/mcp/workspaces/authoritative-workspace/previews/pv-1/update');
+  assert.equal(f.calls[1]!.init.method, 'POST');
+  assert.deepEqual(JSON.parse(f.calls[1]!.init.body), { env: { OCTOCOVE_MOCKS: '1', EMPTY: '' }, unsetEnv: ['OLD'], healthPath: '/health', readySeconds: 120 });
+  assert.match(f.output().out, /Updated preview pv-1 on port 3101/);
+});
+test('status shows the failure reason and where to read logs', async () => {
+  const f = fixture({ previews: [{ tileId: 'pv-1', name: 'App', status: 'ready', branch: 'main', port: 3101,
+    branchStatus: { phase: 'error', error: 'Candidate never became healthy: GET / returned 500 ×410 in 120s' } }] });
+  assert.equal(await runPreviewCmd(['status'], f.deps), 0);
+  assert.match(f.output().out, /returned 500 ×410 in 120s\n {2}See: yolo preview logs pv-1/);
+});
 test('invalid arguments make no authenticated requests', async () => {
-  for (const args of [[], ['create'], ['stop'], ['logs', 'pv', '--tail', '0'], ['status', '--branch', 'main'], ['create', '--name', 'app', '--branch', 'main', '--command', 'node x', '--cwd', '../escape'], ['create', '--name', 'app', '--branch', 'main', '--command', 'node x', '--wait-for', '/abs'], ['create', '--name', 'app', '--branch', 'main', '--command', 'node x', '--wait-for', '../x']]) {
+  for (const args of [[], ['create'], ['stop'], ['update', 'pv'], ['update', '--env', 'A=1'], ['update', 'pv', '--env', 'NOEQUALS'], ['update', 'pv', '--env', '1BAD=x'],
+    ['update', 'pv', '--unset-env', 'A=B'], ['update', 'pv', '--health-path', 'health'], ['update', 'pv', '--branch', 'other'], ['update', 'pv', '--ready-seconds', '0'], ['logs', 'pv', '--tail', '0'], ['status', '--branch', 'main'], ['create', '--name', 'app', '--branch', 'main', '--command', 'node x', '--cwd', '../escape'], ['create', '--name', 'app', '--branch', 'main', '--command', 'node x', '--wait-for', '/abs'], ['create', '--name', 'app', '--branch', 'main', '--command', 'node x', '--wait-for', '../x']]) {
     const f = fixture(); assert.equal(await runPreviewCmd(args, f.deps), 64); assert.equal(f.calls.length, 0);
   }
 });
