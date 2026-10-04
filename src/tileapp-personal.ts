@@ -156,7 +156,7 @@ export function runTileAppInit(opts: InitOptions): CmdResult {
 // RPN eval) rather than reaching for eval. Keep everything self-contained.
 //
 // To call HOST capabilities (LLM, MCP tools, files), vendor @yolo-labs/app-sdk's
-// browser build (`npm i @yolo-labs/app-sdk`, then copy its dist/) into
+// browser build (npm i @yolo-labs/app-sdk, then copy its dist/) into
 // ./vendor/app-sdk/ and request matching permissions in
 // tileapp.json (permissions.required / optional):
 //   import { createTileApp } from './vendor/app-sdk/index.js';
