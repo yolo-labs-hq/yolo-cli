@@ -10,6 +10,8 @@
  *     token, and under --offline
  *   - a stale token in the store warns; --fix rewrites it keeping other hosts
  *   - missing store helper / gh fallback fail/warn; --fix sets both
+ *   - a gh fallback that bypasses the wrapper (/usr/bin/gh, a '' reset, a bare
+ *     gh) is flagged; --fix leaves exactly one wrapper value
  *   - credentials embedded in the remote URL warn; --fix strips them
  *   - no raw token ever appears in the output
  *   - resolveToken follows the gh wrapper's precedence; maskToken/redact; arg parsing
@@ -42,6 +44,9 @@ let root: string;
 let home: string;
 let repo: string;
 let env: Record<string, string | undefined>;
+/** Stand-ins for the token-refreshing wrapper and the real gh binary. */
+let wrapper: string;
+let realGh: string;
 
 function gitIn(cwd: string, args: string[]) {
   const r = spawnSync('git', args, { cwd, env: { ...env, GIT_TERMINAL_PROMPT: '0' } as NodeJS.ProcessEnv, encoding: 'utf8' });
@@ -63,13 +68,15 @@ function github(status = 200): GithubFetch {
   });
 }
 
-async function run(opts: Partial<GitDoctorOptions>, extra: { fetchImpl?: GithubFetch; git?: GitRunner; hasGh?: boolean } = {}) {
+async function run(opts: Partial<GitDoctorOptions>, extra: { fetchImpl?: GithubFetch; git?: GitRunner; hasGh?: boolean; ghOnPath?: string; noWrapper?: boolean } = {}) {
+  const hasGh = extra.hasGh ?? true;
   let output = '';
   const code = await runGitDoctor({ fix: false, json: false, offline: false, remote: 'origin', ...opts }, {
     env, home, cwd: repo,
     git: extra.git ?? gitWith(),
     fetchImpl: extra.fetchImpl ?? github(),
-    hasCommand: () => extra.hasGh ?? true,
+    which: (name) => (name === 'gh' && hasGh ? extra.ghOnPath ?? realGh : undefined),
+    ghWrapper: hasGh && !extra.noWrapper ? wrapper : path.join(root, 'missing', 'gh'),
     stdout: (t) => { output += t; },
   });
   return { code, output };
@@ -83,11 +90,14 @@ async function runJson(opts: Partial<GitDoctorOptions>, extra: Parameters<typeof
 }
 
 const credFile = () => path.join(home, '.git-credentials');
+const FALLBACK_KEY = 'credential.https://github.com.helper';
+const wrapperValue = () => `!${wrapper} auth git-credential`;
+const fallbackValues = () => gitIn(repo, ['config', '--global', '--get-all', FALLBACK_KEY]).stdout;
 
 function healthySetup() {
   fs.writeFileSync(credFile(), `https://oauth2:${TOKEN}@github.com\n`, { mode: 0o600 });
   gitIn(repo, ['config', '--global', 'credential.helper', 'store']);
-  gitIn(repo, ['config', '--global', 'credential.https://github.com.helper', '!gh auth git-credential']);
+  gitIn(repo, ['config', '--global', FALLBACK_KEY, wrapperValue()]);
 }
 
 beforeEach(() => {
@@ -95,6 +105,10 @@ beforeEach(() => {
   home = path.join(root, 'home');
   repo = path.join(root, 'repo');
   fs.mkdirSync(home);
+  for (const dir of ['wrapper', 'usr-bin']) fs.mkdirSync(path.join(root, dir));
+  wrapper = path.join(root, 'wrapper', 'gh');
+  realGh = path.join(root, 'usr-bin', 'gh');
+  for (const f of [wrapper, realGh]) fs.writeFileSync(f, '#!/bin/sh\n', { mode: 0o755 });
   env = { PATH: process.env.PATH, HOME: home, GIT_CONFIG_NOSYSTEM: '1', GH_TOKEN: TOKEN };
   gitIn(root, ['init', '-q', repo]);
   gitIn(repo, ['remote', 'add', 'origin', 'https://github.com/acme/app.git']);
@@ -189,7 +203,59 @@ describe('yolo git doctor', () => {
     const after = await runJson({ fix: true });
     assert.equal(after.status.helper, 'ok');
     assert.equal(gitIn(repo, ['config', '--global', 'credential.helper']).stdout.trim(), 'store');
-    assert.equal(gitIn(repo, ['config', '--global', 'credential.https://github.com.helper']).stdout.trim(), '!gh auth git-credential');
+    assert.equal(fallbackValues(), `${wrapperValue()}\n`);
+  });
+
+  it("flags what `gh auth setup-git` writes (a '' reset + the real gh); --fix points it at the wrapper", async () => {
+    healthySetup();
+    gitIn(repo, ['config', '--global', '--unset-all', FALLBACK_KEY]);
+    gitIn(repo, ['config', '--global', '--add', FALLBACK_KEY, '']);
+    gitIn(repo, ['config', '--global', '--add', FALLBACK_KEY, `!${realGh} auth git-credential`]);
+    gitIn(repo, ['config', '--global', '--add', FALLBACK_KEY, 'cache']);
+
+    const before = await runJson({});
+    assert.equal(before.code, 1);
+    assert.equal(before.status.helper, 'fail');
+    const detail = before.checks.find((c) => c.id === 'helper')!.detail;
+    assert.match(detail, /'' reset/);
+    assert.match(detail, /bypasses the token-refreshing wrapper/);
+
+    const after = await runJson({ fix: true });
+    assert.equal(after.code, 0, after.output);
+    assert.equal(after.status.helper, 'ok');
+    assert.equal(fallbackValues(), `cache\n${wrapperValue()}\n`);
+
+    const again = await runJson({ fix: true });
+    assert.deepEqual(again.fixed, []);
+    assert.equal(fallbackValues(), `cache\n${wrapperValue()}\n`);
+  });
+
+  it('flags a bare gh that resolves to the real binary; --fix rewrites it', async () => {
+    healthySetup();
+    gitIn(repo, ['config', '--global', FALLBACK_KEY, '!gh auth git-credential']);
+    const before = await runJson({});
+    assert.equal(before.status.helper, 'fail');
+    assert.match(before.checks.find((c) => c.id === 'helper')!.detail, new RegExp(`resolves to ${realGh}`));
+
+    const after = await runJson({ fix: true });
+    assert.equal(after.status.helper, 'ok');
+    assert.equal(fallbackValues(), `${wrapperValue()}\n`);
+  });
+
+  it('warns on a bare gh that resolves to the wrapper only through PATH', async () => {
+    healthySetup();
+    gitIn(repo, ['config', '--global', FALLBACK_KEY, '!gh auth git-credential']);
+    const { code, status, checks } = await runJson({}, { ghOnPath: wrapper });
+    assert.equal(code, 0);
+    assert.equal(status.helper, 'warn');
+    assert.match(checks.find((c) => c.id === 'helper')!.detail, /depends on PATH/);
+  });
+
+  it('accepts a bare gh where no wrapper is installed', async () => {
+    healthySetup();
+    gitIn(repo, ['config', '--global', FALLBACK_KEY, '!gh auth git-credential']);
+    const { status } = await runJson({}, { noWrapper: true });
+    assert.equal(status.helper, 'ok');
   });
 
   it('does not add the gh fallback when gh is not on PATH', async () => {
@@ -198,7 +264,7 @@ describe('yolo git doctor', () => {
     const { status, checks } = await runJson({ fix: true }, { hasGh: false });
     assert.equal(status.helper, 'warn');
     assert.match(checks.find((c) => c.id === 'helper')!.detail, /gh is not on PATH/);
-    assert.equal(gitIn(repo, ['config', '--global', 'credential.https://github.com.helper']).status, 1);
+    assert.equal(gitIn(repo, ['config', '--global', FALLBACK_KEY]).status, 1);
   });
 
   it("flags a repository-level '' helper reset (anonymous mode)", async () => {

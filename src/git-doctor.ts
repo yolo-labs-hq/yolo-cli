@@ -6,7 +6,10 @@
  * wrapper) re-reads ~/.yolo-env on every call, so it always holds the current
  * token. git asks its credential helpers: `store` (~/.git-credentials), then
  * the github.com-scoped `gh auth git-credential` fallback from setup-git.sh.
- * When the two disagree, `gh` works and `git push` fails with "could not read
+ * That fallback must name the wrapper by absolute path: the real /usr/bin/gh
+ * answers from its own GH_TOKEN, which is stale in a long-lived shell, and
+ * `gh auth setup-git` writes exactly that path, plus a '' reset that hides
+ * `store` for github.com. When the two disagree, `gh` works and `git push` fails with "could not read
  * Username" — which is what a root exec leaving ~/.git-credentials root-owned
  * 0600 looked like (the lane-gc probe, until #1181). This command looks at
  * every link in git's chain and says which one is broken.
@@ -20,7 +23,8 @@
  *   - rewrites ~/.git-credentials from the current token by temp file + rename
  *     (a rename replaces a file we cannot write through; we own the directory),
  *     keeping readable non-github lines, or the forge line from the pod env
- *   - sets `credential.helper store` / the github.com gh fallback if missing
+ *   - sets `credential.helper store` if missing, and points the github.com gh
+ *     fallback at the wrapper (dropping a '' reset and real-binary values)
  *   - strips credentials embedded in a github.com remote URL
  * It only writes a token GitHub accepted in this run, and never while the
  * Auth V2 purge fence is up: that fence means GitHub access was withdrawn, and
@@ -61,7 +65,10 @@ export interface GitDoctorDeps {
   git?: GitRunner;
   fetchImpl?: GithubFetch;
   getuid?: () => number;
-  hasCommand?: (name: string) => boolean;
+  /** Absolute path of a command on PATH, or undefined. */
+  which?: (name: string) => string | undefined;
+  /** The token-refreshing gh wrapper. Defaults to /usr/local/bin/gh. */
+  ghWrapper?: string;
   stdout?: (text: string) => void;
   stderr?: (text: string) => void;
 }
@@ -84,8 +91,10 @@ Diagnose why git (not gh) can't authenticate to github.com over HTTPS.
   --json            Print {checks, fixed} as JSON.
 `;
 
+export const GH_WRAPPER = '/usr/local/bin/gh';
 const GH_FALLBACK_KEY = 'credential.https://github.com.helper';
-const GH_FALLBACK_VALUE = '!gh auth git-credential';
+const BARE_GH_VALUE = '!gh auth git-credential';
+const GH_HELPER = /^!(\S+) auth git-credential$/;
 const GITHUB_LINE = /^https:\/\/[^:@/\s]+:([^@\s]+)@github\.com\/?$/;
 
 /** prefix…last4, so two tokens can be told apart without either being shown. */
@@ -137,10 +146,17 @@ function defaultGit(cwd: string, env: Record<string, string | undefined>): GitRu
   };
 }
 
-function defaultHasCommand(env: Record<string, string | undefined>) {
-  return (name: string) => (env.PATH ?? '').split(':').some((dir) => {
-    try { fs.accessSync(path.join(dir, name), fs.constants.X_OK); return true; } catch { return false; }
-  });
+function isExecutable(file: string): boolean {
+  try { fs.accessSync(file, fs.constants.X_OK); return fs.statSync(file).isFile(); } catch { return false; }
+}
+
+function defaultWhich(env: Record<string, string | undefined>) {
+  return (name: string) => (env.PATH ?? '').split(':').filter(Boolean)
+    .map((dir) => path.join(dir, name)).find(isExecutable);
+}
+
+function sameFile(a: string, b: string): boolean {
+  try { return fs.realpathSync(a) === fs.realpathSync(b); } catch { return a === b; }
 }
 
 function getAll(git: GitRunner, args: string[]): string[] {
@@ -155,7 +171,8 @@ interface Context {
   git: GitRunner;
   fetchImpl: GithubFetch;
   getuid: () => number;
-  hasCommand: (name: string) => boolean;
+  which: (name: string) => string | undefined;
+  ghWrapper: string;
   opts: GitDoctorOptions;
 }
 
@@ -166,7 +183,8 @@ interface Diagnosis {
   inRepo: boolean;
   credsNeedRewrite: boolean;
   needStoreHelper: boolean;
-  needFallback: boolean;
+  /** The value --fix writes as the github.com gh fallback, replacing every gh-shaped one. */
+  needFallback?: string;
   embeddedUrl?: { key: 'url' | 'pushurl'; clean: string };
 }
 
@@ -265,14 +283,47 @@ function checkHelpers(ctx: Context, d: Diagnosis): void {
     problems.push(`credential.helper has ${helpers.length} values; the setup scripts' \`git config --global credential.helper store\` exits 5 on that`);
     if (status === 'ok') status = 'warn';
   }
-  if (!fallback.includes(GH_FALLBACK_VALUE)) {
-    if (ctx.hasCommand('gh')) {
-      problems.push(`no github.com gh fallback (${GH_FALLBACK_KEY})`);
-      d.needFallback = true;
-    } else {
-      problems.push('no github.com gh fallback, and gh is not on PATH');
+  // The wrapper by absolute path; a bare `gh` only where no wrapper is installed.
+  const wrapperInstalled = isExecutable(ctx.ghWrapper);
+  const want = wrapperInstalled ? `!${ctx.ghWrapper} auth git-credential` : ctx.which('gh') ? BARE_GH_VALUE : undefined;
+  const ghValues = fallback.filter((v) => v === '' || GH_HELPER.test(v));
+  const fallbackProblems: string[] = [];
+  let fallbackStatus: CheckStatus = 'ok';
+  if (!want) {
+    if (!ghValues.some((v) => v !== '')) fallbackProblems.push('no github.com gh fallback, and gh is not on PATH');
+  } else if (ghValues.length === 0) {
+    fallbackProblems.push(`no github.com gh fallback (${GH_FALLBACK_KEY})`);
+  }
+  for (const v of new Set(ghValues)) {
+    if (v === '') {
+      fallbackProblems.push(`${GH_FALLBACK_KEY} has a '' reset (left by \`gh auth setup-git\`): git skips the store helper for github.com`);
+      fallbackStatus = 'fail';
+      continue;
     }
-    if (status === 'ok') status = 'warn';
+    if (!want || v === want) continue;
+    const bin = GH_HELPER.exec(v)![1]!;
+    if (bin.includes('/')) {
+      fallbackProblems.push(`'${v}' bypasses the token-refreshing wrapper ${ctx.ghWrapper}: it answers from a stale GH_TOKEN`);
+      fallbackStatus = 'fail';
+    } else {
+      const resolved = ctx.which(bin);
+      if (resolved && sameFile(resolved, ctx.ghWrapper)) {
+        fallbackProblems.push(`'${v}' depends on PATH (the wrapper here, the real gh where git's PATH differs)`);
+        if (fallbackStatus === 'ok') fallbackStatus = 'warn';
+      } else {
+        fallbackProblems.push(`'${v}' resolves to ${resolved ?? 'nothing'}, not the token-refreshing wrapper ${ctx.ghWrapper}`);
+        fallbackStatus = 'fail';
+      }
+    }
+  }
+  if (want && ghValues.filter((v) => v === want).length > 1) {
+    fallbackProblems.push(`${GH_FALLBACK_KEY} lists '${want}' more than once`);
+  }
+  if (fallbackProblems.length) {
+    problems.push(...fallbackProblems);
+    if (fallbackStatus === 'ok') fallbackStatus = 'warn';
+    if (status !== 'fail') status = fallbackStatus;
+    if (want) d.needFallback = want;
   }
   if (d.inRepo) {
     const local = getAll(ctx.git, ['--local', '--get-all', 'credential.helper']);
@@ -282,7 +333,7 @@ function checkHelpers(ctx: Context, d: Diagnosis): void {
     }
   }
   d.checks.push({ id: 'helper', status, detail: problems.length ? problems.join('; ')
-    : `store, then ${GH_FALLBACK_VALUE} for github.com` });
+    : `store, then ${want ?? 'no gh fallback'} for github.com` });
 }
 
 function checkRemote(ctx: Context, d: Diagnosis): void {
@@ -329,7 +380,7 @@ function checkLsRemote(ctx: Context, d: Diagnosis): void {
 
 async function diagnose(ctx: Context): Promise<Diagnosis> {
   const inRepo = ctx.git(['rev-parse', '--is-inside-work-tree']).stdout.trim() === 'true';
-  const d: Diagnosis = { checks: [], inRepo, credsNeedRewrite: false, needStoreHelper: false, needFallback: false };
+  const d: Diagnosis = { checks: [], inRepo, credsNeedRewrite: false, needStoreHelper: false };
   const token = await checkToken(ctx, d);
   checkCredentialsFile(ctx, d, token);
   checkHelpers(ctx, d);
@@ -393,8 +444,13 @@ function applyFixes(ctx: Context, d: Diagnosis): { fixed: string[]; refused: str
       : `credential.helper: git config failed (${r.stderr.trim()})`);
   }
   if (d.needFallback) {
-    const r = ctx.git(['config', '--global', GH_FALLBACK_KEY, GH_FALLBACK_VALUE]);
-    (r.status === 0 ? fixed : refused).push(r.status === 0 ? `set ${GH_FALLBACK_KEY} '${GH_FALLBACK_VALUE}'`
+    // Drop every gh-shaped value and '' reset, then add exactly one; a helper the
+    // user put on this key for something else stays. Exit 5 = nothing to unset.
+    const unset = ctx.git(['config', '--global', '--unset-all', GH_FALLBACK_KEY, '^$|auth git-credential$']);
+    const r = unset.status === 0 || unset.status === 5
+      ? ctx.git(['config', '--global', '--add', GH_FALLBACK_KEY, d.needFallback])
+      : unset;
+    (r.status === 0 ? fixed : refused).push(r.status === 0 ? `set ${GH_FALLBACK_KEY} '${d.needFallback}'`
       : `${GH_FALLBACK_KEY}: git config failed (${r.stderr.trim()})`);
   }
   if (d.embeddedUrl) {
@@ -436,7 +492,8 @@ export async function runGitDoctor(opts: GitDoctorOptions, deps: GitDoctorDeps =
     git: deps.git ?? defaultGit(cwd, { ...env, HOME: home }),
     fetchImpl: deps.fetchImpl ?? (globalThis.fetch as unknown as GithubFetch),
     getuid: deps.getuid ?? (() => process.getuid?.() ?? -1),
-    hasCommand: deps.hasCommand ?? defaultHasCommand(env),
+    which: deps.which ?? defaultWhich(env),
+    ghWrapper: deps.ghWrapper ?? GH_WRAPPER,
     opts,
   };
 
