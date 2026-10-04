@@ -45,7 +45,10 @@ export interface KanbanExportOptions {
   /** TILE id — the export route keys off the tile, like the board read. */
   tileId: string;
   workspaceFlag?: string;
-  /** Destination path. Omitted → the document goes to stdout for piping. */
+  /**
+   * Destination path. Omitted, `-`, `/dev/stdout` or `/dev/fd/1` → the
+   * document goes to stdout for piping.
+   */
   outFile?: string;
   fetchImpl?: FetchLike;
   env?: Record<string, string | undefined>;
@@ -73,6 +76,12 @@ export interface KanbanSuccess {
    * see exactly what the server sent.
    */
   raw: boolean;
+  /**
+   * True when `output` is a human status line ("Wrote N bytes to …", the
+   * import summary) rather than the command's result. It goes to stderr so
+   * stdout only ever carries machine output — `-o /dev/stdout | jq` included.
+   */
+  status?: boolean;
   workspaceId: string;
 }
 
@@ -100,12 +109,18 @@ export async function runKanbanExport(options: KanbanExportOptions): Promise<Kan
   if (!resolved.ok) return resolved.failure;
   const { commonApiUrl, userToken, workspaceId } = resolved;
 
+  // `-o -` and `-o /dev/stdout` mean stdout. Resolve them here rather than
+  // writing to the path: the overwrite guard below would see /dev/stdout as an
+  // existing file and refuse, and even if it didn't, the status line would
+  // land in the same stream as the document.
+  const outFile = options.outFile && !isStdoutTarget(options.outFile) ? options.outFile : undefined;
+
   // Refuse an occupied destination BEFORE the request, not after. An export
   // is reached for when a workspace is already in trouble; spending the round
   // trip only to discard the one readable copy of the board would be the
   // wrong half of the operation to get right.
-  if (options.outFile && fs.existsSync(options.outFile)) {
-    return fail('usage', `refusing to overwrite existing file '${options.outFile}'; pick another path or remove it first`);
+  if (outFile && fs.existsSync(outFile)) {
+    return fail('usage', `refusing to overwrite existing file '${outFile}'; pick another path or remove it first`);
   }
 
   const path = `/workspaces/${encodeURIComponent(workspaceId)}/kanban/boards/${encodeURIComponent(options.tileId)}/seed`;
@@ -125,24 +140,25 @@ export async function runKanbanExport(options: KanbanExportOptions): Promise<Kan
     });
   }
 
-  if (!options.outFile) {
+  if (!outFile) {
     return { ok: true, output: body, raw: true, workspaceId };
   }
 
   const write = options.writeFileImpl ?? defaultWriteFileExclusive;
   try {
-    write(options.outFile, body);
+    write(outFile, body);
   } catch (err) {
     if (isEexist(err)) {
-      return fail('usage', `refusing to overwrite existing file '${options.outFile}'; pick another path or remove it first`);
+      return fail('usage', `refusing to overwrite existing file '${outFile}'; pick another path or remove it first`);
     }
-    return fail('usage', `could not write '${options.outFile}': ${describeError(err)}`);
+    return fail('usage', `could not write '${outFile}': ${describeError(err)}`);
   }
 
   return {
     ok: true,
-    output: `Wrote ${Buffer.byteLength(body, 'utf-8')} bytes to ${options.outFile}`,
+    output: `Wrote ${Buffer.byteLength(body, 'utf-8')} bytes to ${outFile}`,
     raw: false,
+    status: true,
     workspaceId,
   };
 }
@@ -204,6 +220,7 @@ export async function runKanbanImport(options: KanbanImportOptions): Promise<Kan
     ok: true,
     output: formatImportSummary(body, options.boardId),
     raw: false,
+    status: true,
     workspaceId,
   };
 }
@@ -323,14 +340,20 @@ function resolveContext(
 
 // ─── CLI surface ──────────────────────────────────────────────────────────
 
-const EXPORT_USAGE = 'Usage: yolo kanban export <tileId> [-o <file>] [--workspace <wsId>]\n';
+const EXPORT_USAGE = [
+  'Usage: yolo kanban export <tileId> [-o <file>|-] [--workspace <wsId>]',
+  '',
+  '  -o <file>   Write the document to <file> (refuses to overwrite); the status line goes to stderr.',
+  '  -o -        Write the document to stdout (the default). /dev/stdout works the same.',
+  '',
+].join('\n');
 const IMPORT_USAGE = 'Usage: yolo kanban import <boardId> <file> [--workspace <wsId>]\n';
 const MODELS_USAGE = 'Usage: yolo kanban models [--json] [--workspace <wsId>]\n';
 const KANBAN_USAGE = [
   'Usage: yolo kanban <subcommand>',
   '',
   'Subcommands:',
-  '  export <tileId> [-o <file>]   Write a board\'s seed document to a file or stdout',
+  '  export <tileId> [-o <file>|-] Write a board\'s seed document to a file or stdout',
   '  import <boardId> <file>       Create cards on a board from a seed document',
   '  models [--json]               List the model ids a card can be pinned to',
   '',
@@ -428,8 +451,14 @@ export function parseKanbanImportArgs(args: string[]): ParsedImportArgs | ParseE
   return { ok: true, boardId: positional[0]!, file: positional[1]!, workspaceFlag };
 }
 
+/** Injectable for tests; production uses the real env and fetch. */
+export interface KanbanCmdDeps {
+  fetchImpl?: FetchLike;
+  env?: Record<string, string | undefined>;
+}
+
 /** `args` is everything after `kanban`. */
-export async function runKanbanCmd(args: string[]): Promise<number> {
+export async function runKanbanCmd(args: string[], deps: KanbanCmdDeps = {}): Promise<number> {
   const sub = args[0];
 
   if (isHelp(sub)) {
@@ -450,7 +479,7 @@ export async function runKanbanCmd(args: string[]): Promise<number> {
       process.stderr.write(MODELS_USAGE);
       return 64;
     }
-    return report(await runKanbanModels({ json: parsed.json, workspaceFlag: parsed.workspaceFlag }));
+    return report(await runKanbanModels({ json: parsed.json, workspaceFlag: parsed.workspaceFlag, ...deps }));
   }
 
   if (sub === 'export') {
@@ -464,6 +493,7 @@ export async function runKanbanCmd(args: string[]): Promise<number> {
       tileId: parsed.tileId,
       outFile: parsed.outFile,
       workspaceFlag: parsed.workspaceFlag,
+      ...deps,
     }));
   }
 
@@ -478,6 +508,7 @@ export async function runKanbanCmd(args: string[]): Promise<number> {
       boardId: parsed.boardId,
       file: parsed.file,
       workspaceFlag: parsed.workspaceFlag,
+      ...deps,
     }));
   }
 
@@ -489,8 +520,10 @@ export async function runKanbanCmd(args: string[]): Promise<number> {
 function report(result: KanbanResult): number {
   if (result.ok) {
     // `raw` output is the document: no trailing newline, so a redirect or a
-    // pipe gets the same bytes `-o` would have written.
-    process.stdout.write(result.raw ? result.output : `${result.output}\n`);
+    // pipe gets the same bytes `-o` would have written. A status line is for
+    // the human, so it stays out of stdout.
+    if (result.status) process.stderr.write(`${result.output}\n`);
+    else process.stdout.write(result.raw ? result.output : `${result.output}\n`);
     return 0;
   }
   process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
@@ -509,6 +542,11 @@ function describeError(err: unknown): string {
 
 async function safeReadText(response: { text(): Promise<string> }): Promise<string> {
   try { return await response.text(); } catch { return '<no body>'; }
+}
+
+/** Destinations that mean "the document goes to stdout", not a file. */
+function isStdoutTarget(filePath: string): boolean {
+  return filePath === '-' || filePath === '/dev/stdout' || filePath === '/dev/fd/1';
 }
 
 function isEexist(err: unknown): boolean {

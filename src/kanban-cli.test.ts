@@ -9,6 +9,7 @@
  * Coverage:
  *   - export writes the body unmodified to -o (and reports byte count)
  *   - export with no -o returns the document raw, for piping
+ *   - stdout carries only the document (no -o, -o -, -o /dev/stdout); status lines go to stderr
  *   - export to an existing path exits 64 and leaves the file untouched
  *   - export sends the USER token to the /v1 tile-scoped seed route
  *   - export HTTP 404 → http/1
@@ -587,5 +588,52 @@ describe('kanban help', () => {
     assert.equal(code, 64);
     assert.match(stderr, /unknown kanban subcommand 'frobnicate'/);
     assert.match(stderr, /Usage: yolo kanban <subcommand>/);
+  });
+});
+
+// ─── stdout stays pure ────────────────────────────────────────────────────
+
+describe('kanban export — stdout carries only the document', () => {
+  const deps = () => ({ env: STUB_ENV, fetchImpl: makeFetchStub(okWith(SEED_DOCUMENT)) });
+
+  for (const extra of [[], ['-o', '-'], ['--out=-'], ['-o', '/dev/stdout'], ['-o', '/dev/fd/1']]) {
+    it(`export ${extra.join(' ') || '(no -o)'} puts exactly the document bytes on stdout`, async () => {
+      const { code, stdout, stderr } = await captureStreams(() => runKanbanCmd(['export', STUB_TILE, ...extra], deps()));
+      assert.equal(code, 0);
+      assert.equal(stdout, SEED_DOCUMENT);
+      assert.equal(stderr, '');
+    });
+  }
+
+  it('export -o <file> writes the file, puts the status line on stderr, and leaves stdout empty', async () => {
+    const dest = path.join(scratch, 'export-status-stderr.json');
+    const { code, stdout, stderr } = await captureStreams(() => runKanbanCmd(['export', STUB_TILE, '-o', dest], deps()));
+    assert.equal(code, 0);
+    assert.equal(fs.readFileSync(dest, 'utf-8'), SEED_DOCUMENT);
+    assert.equal(stdout, '');
+    assert.equal(stderr, `Wrote ${Buffer.byteLength(SEED_DOCUMENT, 'utf-8')} bytes to ${dest}\n`);
+  });
+
+  it('runKanbanExport treats -o /dev/stdout as stdout instead of refusing an existing path', async () => {
+    const result = await runKanbanExport({
+      tileId: STUB_TILE,
+      outFile: '/dev/stdout',
+      env: STUB_ENV,
+      fetchImpl: makeFetchStub(okWith(SEED_DOCUMENT)),
+      writeFileImpl: () => { throw new Error('must not write to a path'); },
+    });
+    assert.equal(result.ok && result.raw && result.output, SEED_DOCUMENT);
+  });
+
+  it('import puts its summary on stderr, not stdout', async () => {
+    const seedPath = path.join(scratch, 'import-status-stderr.json');
+    fs.writeFileSync(seedPath, SEED_DOCUMENT);
+    const { code, stdout, stderr } = await captureStreams(() => runKanbanCmd(['import', STUB_BOARD, seedPath], {
+      env: STUB_ENV,
+      fetchImpl: makeFetchStub(okWith(JSON.stringify({ cards: [{}], keyToCardId: { 'seed-format': 'card-1' } }), 201)),
+    }));
+    assert.equal(code, 0);
+    assert.equal(stdout, '');
+    assert.match(stderr, /seed-format/);
   });
 });
