@@ -64,3 +64,11 @@ stopping the service discards them. All commands accept `--json`.
 `yolo preview --help` lists polling, timeout, port and health-check options. New CLI,
 API, agent-registry scopes and container-api versions must be deployed together;
 older deployments return an error rather than run a different preview mode.
+
+## Source & contributing
+
+[github.com/yolo-labs-hq/yolo-cli](https://github.com/yolo-labs-hq/yolo-cli) is a public mirror of `packages/yolo-cli` in YOLO Labs' private monorepo, which stays the source of truth. The mirror is synced automatically on every change. Issues are welcome. Pull requests are welcome too: we apply them in the monorepo, keeping you as the author, and the change then syncs back here.
+
+## License
+
+MIT. See [LICENSE](./LICENSE).

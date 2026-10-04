@@ -3,6 +3,14 @@
   "version": "0.44.0",
   "description": "YOLO Studio CLI for workspace context, artifacts, personal apps and hosting.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yolo-labs-hq/yolo-cli.git"
+  },
+  "homepage": "https://github.com/yolo-labs-hq/yolo-cli#readme",
+  "bugs": {
+    "url": "https://github.com/yolo-labs-hq/yolo-cli/issues"
+  },
   "type": "module",
   "bin": {
     "yolo": "dist/cli.js"
@@ -32,6 +40,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "@yolo-labs/flexdb": "^0.1.2",
     "typescript": "^5.4.0"
   }
 }
