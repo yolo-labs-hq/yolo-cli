@@ -79,6 +79,8 @@ function printHelp(): void {
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '  kanban models                             List the model ids a card can be pinned to, and whether each can run now.',
       '    [--json] [--workspace <wsId>]           Raw JSON instead of the table; sanity-check the workspace.',
+      '  workspace set-repository <url> [opts]     Point this workspace at a different repository: preview, then --confirm <snapshot>.',
+      '    [--default-branch B] [--auth https|ssh] [--keep-old-remote-as N | --drop-old-remote] [--json]',
       '  git doctor [opts]                         Diagnose why git (not gh) can\'t authenticate to github.com.',
       '    [--fix]                                 Repair what is safe to (store file, helpers, remote URL), then re-check.',
       '    [--offline] [--remote <name>] [--json]  Skip network checks; remote to probe (default: origin); JSON output.',
@@ -607,6 +609,11 @@ async function main(argv: string[]): Promise<number> {
   if (cmd === 'kanban') {
     const { runKanbanCmd } = await import('./kanban-cli.js');
     return runKanbanCmd(args.slice(1));
+  }
+
+  if (cmd === 'workspace') {
+    const { runWorkspaceCmd } = await import('./workspace-cli.js');
+    return runWorkspaceCmd(args.slice(1));
   }
 
   if (cmd === 'mcp') {

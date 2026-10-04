@@ -1,6 +1,6 @@
 {
   "name": "@yolo-labs/yolo-cli",
-  "version": "0.45.2",
+  "version": "0.46.0",
   "description": "YOLO Studio CLI for workspace context, artifacts, personal apps and hosting.",
   "license": "MIT",
   "repository": {
