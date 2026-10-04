@@ -77,6 +77,8 @@ function printHelp(): void {
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '  kanban import <boardId> <file>            Rebuild a board from a seed document (additive; never overwrites).',
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
+      '  kanban models                             List the model ids a card can be pinned to, and whether each can run now.',
+      '    [--json] [--workspace <wsId>]           Raw JSON instead of the table; sanity-check the workspace.',
       '  git doctor [opts]                         Diagnose why git (not gh) can\'t authenticate to github.com.',
       '    [--fix]                                 Repair what is safe to (store file, helpers, remote URL), then re-check.',
       '    [--offline] [--remote <name>] [--json]  Skip network checks; remote to probe (default: origin); JSON output.',

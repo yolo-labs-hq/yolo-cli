@@ -35,6 +35,10 @@ import {
   parseKanbanImportArgs,
   formatImportSummary,
   exitCodeForFailure,
+  runKanbanModels,
+  parseKanbanModelsArgs,
+  formatModels,
+  runKanbanCmd,
 } from './kanban-cli.js';
 import { resolveSubstrateContext } from './auth-context.js';
 import type { FetchLike } from './work-client.js';
@@ -502,5 +506,86 @@ describe('kanban-cli — exitCodeForFailure', () => {
     assert.equal(exitCodeForFailure('auth'), 64);
     assert.equal(exitCodeForFailure('workspace_mismatch'), 64);
     assert.equal(exitCodeForFailure('http'), 1);
+  });
+});
+
+// ─── models ───────────────────────────────────────────────────────────────
+
+const MODELS_BODY = JSON.stringify({ models: [
+  { id: 'claude:sonnet:high', label: 'sonnet (high)', agent: 'claude', isDefault: false, available: true, readiness: 'unknown', unavailableReason: null },
+  { id: 'codex:gpt-6.1-sol:high', label: 'gpt-6.1-sol (high)', agent: 'codex', isDefault: true, available: false, readiness: 'setup-required', unavailableReason: 'No compatible credential' },
+] });
+
+describe('kanban models', () => {
+  it('GETs the workspace models route on /v1 with the user JWT', async () => {
+    const captured: Captured = {};
+    const result = await runKanbanModels({ env: STUB_ENV, fetchImpl: makeFetchStub(okWith(MODELS_BODY), captured) });
+    assert.equal(result.ok, true);
+    assert.equal(captured.method, 'GET');
+    assert.equal(captured.url, `https://api.example.com/v1/workspaces/${STUB_WS}/kanban/models`);
+    assert.equal(captured.headers?.Authorization, 'Bearer user-jwt');
+  });
+
+  it('prints one id per line with its default marker and why it cannot run', () => {
+    const lines = formatModels(MODELS_BODY).split('\n');
+    assert.equal(lines.length, 2);
+    assert.match(lines[0]!, /^claude:sonnet:high\s+available$/);
+    assert.match(lines[1]!, /^codex:gpt-6\.1-sol:high\s+default\s+unavailable — No compatible credential$/);
+  });
+
+  it('--json returns the body raw', async () => {
+    const result = await runKanbanModels({ json: true, env: STUB_ENV, fetchImpl: makeFetchStub(okWith(MODELS_BODY)) });
+    assert.equal(result.ok && result.raw && result.output, MODELS_BODY);
+  });
+
+  it('surfaces an HTTP failure as kind http', async () => {
+    const result = await runKanbanModels({ env: STUB_ENV, fetchImpl: makeFetchStub(errorWith(403, '{"code":"FORBIDDEN"}')) });
+    assert.equal(!result.ok && result.kind, 'http');
+  });
+
+  it('parses --json and --workspace, and refuses positionals', () => {
+    assert.deepEqual(parseKanbanModelsArgs(['--json', '--workspace', 'w1']), { ok: true, json: true, workspaceFlag: 'w1' });
+    assert.equal(parseKanbanModelsArgs(['extra']).ok, false);
+  });
+});
+
+// ─── help ─────────────────────────────────────────────────────────────────
+
+async function captureStreams(fn: () => Promise<number>): Promise<{ code: number; stdout: string; stderr: string }> {
+  const out: string[] = [];
+  const err: string[] = [];
+  const origOut = process.stdout.write.bind(process.stdout);
+  const origErr = process.stderr.write.bind(process.stderr);
+  process.stdout.write = ((chunk: string) => { out.push(String(chunk)); return true; }) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: string) => { err.push(String(chunk)); return true; }) as typeof process.stderr.write;
+  try {
+    return { code: await fn(), stdout: out.join(''), stderr: err.join('') };
+  } finally {
+    process.stdout.write = origOut;
+    process.stderr.write = origErr;
+  }
+}
+
+describe('kanban help', () => {
+  for (const flag of ['--help', '-h', 'help']) {
+    it(`yolo kanban ${flag} prints usage to stdout and exits 0`, async () => {
+      const { code, stdout } = await captureStreams(() => runKanbanCmd([flag]));
+      assert.equal(code, 0);
+      assert.match(stdout, /Usage: yolo kanban <subcommand>/);
+      assert.match(stdout, /models/);
+    });
+  }
+
+  it('yolo kanban export --help prints that subcommand\'s usage and exits 0', async () => {
+    const { code, stdout } = await captureStreams(() => runKanbanCmd(['export', '--help']));
+    assert.equal(code, 0);
+    assert.match(stdout, /Usage: yolo kanban export/);
+  });
+
+  it('an unknown subcommand still fails with usage on stderr', async () => {
+    const { code, stderr } = await captureStreams(() => runKanbanCmd(['frobnicate']));
+    assert.equal(code, 64);
+    assert.match(stderr, /unknown kanban subcommand 'frobnicate'/);
+    assert.match(stderr, /Usage: yolo kanban <subcommand>/);
   });
 });

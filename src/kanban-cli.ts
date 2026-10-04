@@ -1,6 +1,8 @@
 /**
  * `yolo kanban export` / `yolo kanban import` — move a board seed document
- * between a workspace and a file, with no model in the loop.
+ * between a workspace and a file, with no model in the loop. Plus
+ * `yolo kanban models`, the pinnable model ids (`studio.kanban_list_models`
+ * from a shell, on the same user-token surface).
  *
  * A board lives in Mongo, scoped to a workspace that can wedge. The seed
  * document (`common-api/src/services/kanban-board-seed.ts`) is the only copy
@@ -206,6 +208,57 @@ export async function runKanbanImport(options: KanbanImportOptions): Promise<Kan
   };
 }
 
+// ─── models ───────────────────────────────────────────────────────────────
+
+export interface KanbanModelsOptions {
+  workspaceFlag?: string;
+  /** Print the response body as-is instead of the table. */
+  json?: boolean;
+  fetchImpl?: FetchLike;
+  env?: Record<string, string | undefined>;
+}
+
+interface PinnableModel {
+  id: string; agent: string; isDefault: boolean; available: boolean; unavailableReason?: string | null;
+}
+
+export async function runKanbanModels(options: KanbanModelsOptions = {}): Promise<KanbanResult> {
+  const env = options.env ?? process.env;
+  const resolved = resolveContext(env, options.workspaceFlag);
+  if (!resolved.ok) return resolved.failure;
+  const { commonApiUrl, userToken, workspaceId } = resolved;
+
+  let response;
+  try {
+    response = await userRouteRequest({ commonApiUrl, userToken, fetchImpl: options.fetchImpl },
+      `/workspaces/${encodeURIComponent(workspaceId)}/kanban/models`, { method: 'GET' });
+  } catch (err) {
+    return fail('http', `kanban.models.list failed: ${describeError(err)}`);
+  }
+  const body = await safeReadText(response);
+  if (!response.ok) {
+    return fail('http', `kanban.models.list failed: HTTP ${response.status} — ${body}`, { status: response.status });
+  }
+  if (options.json) return { ok: true, output: body, raw: true, workspaceId };
+  return { ok: true, output: formatModels(body), raw: false, workspaceId };
+}
+
+/** One id per line — the value `model` takes — then whether it can run now and why not. */
+export function formatModels(body: string): string {
+  let models: PinnableModel[];
+  try {
+    models = (JSON.parse(body) as { models?: PinnableModel[] }).models ?? [];
+  } catch {
+    return body;
+  }
+  if (models.length === 0) return 'No models are discovered for this workspace right now.';
+  const idCol = Math.max(...models.map((m) => m.id.length));
+  return models.map((m) => {
+    const state = m.available ? 'available' : `unavailable${m.unavailableReason ? ` — ${m.unavailableReason}` : ''}`;
+    return `${m.id.padEnd(idCol)}  ${m.isDefault ? 'default  ' : '         '}${state}`;
+  }).join('\n');
+}
+
 /**
  * `key → cardId`, one per line, under a count. That map is what a caller
  * needs to say anything at all about the board it just rebuilt, and it is
@@ -272,10 +325,49 @@ function resolveContext(
 
 const EXPORT_USAGE = 'Usage: yolo kanban export <tileId> [-o <file>] [--workspace <wsId>]\n';
 const IMPORT_USAGE = 'Usage: yolo kanban import <boardId> <file> [--workspace <wsId>]\n';
+const MODELS_USAGE = 'Usage: yolo kanban models [--json] [--workspace <wsId>]\n';
+const KANBAN_USAGE = [
+  'Usage: yolo kanban <subcommand>',
+  '',
+  'Subcommands:',
+  '  export <tileId> [-o <file>]   Write a board\'s seed document to a file or stdout',
+  '  import <boardId> <file>       Create cards on a board from a seed document',
+  '  models [--json]               List the model ids a card can be pinned to',
+  '',
+  'Every subcommand takes --workspace <wsId> (defaults to this session\'s workspace).',
+  '',
+].join('\n');
+
+const isHelp = (a: string | undefined) => a === '--help' || a === '-h' || a === 'help';
 
 export interface ParsedExportArgs { ok: true; tileId: string; outFile?: string; workspaceFlag?: string }
 export interface ParsedImportArgs { ok: true; boardId: string; file: string; workspaceFlag?: string }
+export interface ParsedModelsArgs { ok: true; json: boolean; workspaceFlag?: string }
 export interface ParseError { ok: false; message: string }
+
+export function parseKanbanModelsArgs(args: string[]): ParsedModelsArgs | ParseError {
+  let json = false;
+  let workspaceFlag: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--json') {
+      json = true;
+    } else if (a === '--workspace') {
+      const v = args[++i];
+      if (!v || v.startsWith('--')) return { ok: false, message: '--workspace requires a value' };
+      workspaceFlag = v;
+    } else if (a.startsWith('--workspace=')) {
+      const v = a.slice('--workspace='.length);
+      if (!v) return { ok: false, message: '--workspace requires a value' };
+      workspaceFlag = v;
+    } else if (a.startsWith('-')) {
+      return { ok: false, message: `unknown option: ${a}` };
+    } else {
+      return { ok: false, message: `unexpected positional argument: ${a}` };
+    }
+  }
+  return { ok: true, json, workspaceFlag };
+}
 
 export function parseKanbanExportArgs(args: string[]): ParsedExportArgs | ParseError {
   let tileId: string | undefined;
@@ -340,6 +432,27 @@ export function parseKanbanImportArgs(args: string[]): ParsedImportArgs | ParseE
 export async function runKanbanCmd(args: string[]): Promise<number> {
   const sub = args[0];
 
+  if (isHelp(sub)) {
+    process.stdout.write(KANBAN_USAGE);
+    return 0;
+  }
+  // `yolo kanban <sub> --help` prints that subcommand's usage rather than failing its parse.
+  const subUsage = sub === 'export' ? EXPORT_USAGE : sub === 'import' ? IMPORT_USAGE : sub === 'models' ? MODELS_USAGE : null;
+  if (subUsage && args.slice(1).some((a) => a === '--help' || a === '-h')) {
+    process.stdout.write(subUsage);
+    return 0;
+  }
+
+  if (sub === 'models') {
+    const parsed = parseKanbanModelsArgs(args.slice(1));
+    if (!parsed.ok) {
+      process.stderr.write(`yolo: kanban models: ${parsed.message}\n`);
+      process.stderr.write(MODELS_USAGE);
+      return 64;
+    }
+    return report(await runKanbanModels({ json: parsed.json, workspaceFlag: parsed.workspaceFlag }));
+  }
+
   if (sub === 'export') {
     const parsed = parseKanbanExportArgs(args.slice(1));
     if (!parsed.ok) {
@@ -368,12 +481,8 @@ export async function runKanbanCmd(args: string[]): Promise<number> {
     }));
   }
 
-  if (!sub) {
-    process.stderr.write('yolo: kanban requires a subcommand (export, import)\n');
-    return 64;
-  }
-  process.stderr.write(`yolo: unknown kanban subcommand '${sub}'\n`);
-  process.stderr.write('Subcommands: export, import\n');
+  process.stderr.write(sub ? `yolo: unknown kanban subcommand '${sub}'\n` : 'yolo: kanban requires a subcommand\n');
+  process.stderr.write(KANBAN_USAGE);
   return 64;
 }
 
