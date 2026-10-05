@@ -79,6 +79,13 @@ function printHelp(): void {
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '  kanban models                             List the model ids a card can be pinned to, and whether each can run now.',
       '    [--json] [--workspace <wsId>]           Raw JSON instead of the table; sanity-check the workspace.',
+      '  routing status                            Background Runner routing: on/off, Jev\'s state and why, policies.',
+      '  routing on | off                          Turn routing on or off for cards admitted from now on.',
+      '  routing decisions [--card <id>]           Recorded routing decisions for a card, or the latest.',
+      '    [--limit <n>]                           How many (1-200).',
+      '  routing preview <cardId>                  Where routing would send a card now (read-only).',
+      '  routing policy get|set|delete [opts]      Runner/board policies; `yolo routing --help` for options.',
+      '    [--json] [--workspace <wsId>]           The API response as-is; sanity-check the workspace.',
       '  workspace set-repository <url> [opts]     Point this workspace at a different repository: preview, then --confirm <snapshot>.',
       '    [--default-branch B] [--auth https|ssh] [--keep-old-remote-as N | --drop-old-remote] [--json]',
       '  git doctor [opts]                         Diagnose why git (not gh) can\'t authenticate to github.com.',
@@ -609,6 +616,11 @@ async function main(argv: string[]): Promise<number> {
   if (cmd === 'kanban') {
     const { runKanbanCmd } = await import('./kanban-cli.js');
     return runKanbanCmd(args.slice(1));
+  }
+
+  if (cmd === 'routing') {
+    const { runRoutingCmd } = await import('./routing-cli.js');
+    return runRoutingCmd(args.slice(1));
   }
 
   if (cmd === 'workspace') {

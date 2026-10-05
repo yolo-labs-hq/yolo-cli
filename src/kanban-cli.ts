@@ -105,7 +105,7 @@ export async function runKanbanExport(options: KanbanExportOptions): Promise<Kan
 
   if (!options.tileId) return fail('usage', 'a tileId is required');
 
-  const resolved = resolveContext(env, options.workspaceFlag);
+  const resolved = resolveKanbanContext(env, options.workspaceFlag);
   if (!resolved.ok) return resolved.failure;
   const { commonApiUrl, userToken, workspaceId } = resolved;
 
@@ -171,7 +171,7 @@ export async function runKanbanImport(options: KanbanImportOptions): Promise<Kan
   if (!options.boardId) return fail('usage', 'a boardId is required');
   if (!options.file) return fail('usage', 'a seed document path is required');
 
-  const resolved = resolveContext(env, options.workspaceFlag);
+  const resolved = resolveKanbanContext(env, options.workspaceFlag);
   if (!resolved.ok) return resolved.failure;
   const { commonApiUrl, userToken, workspaceId } = resolved;
 
@@ -241,7 +241,7 @@ interface PinnableModel {
 
 export async function runKanbanModels(options: KanbanModelsOptions = {}): Promise<KanbanResult> {
   const env = options.env ?? process.env;
-  const resolved = resolveContext(env, options.workspaceFlag);
+  const resolved = resolveKanbanContext(env, options.workspaceFlag);
   if (!resolved.ok) return resolved.failure;
   const { commonApiUrl, userToken, workspaceId } = resolved;
 
@@ -310,7 +310,7 @@ type ResolvedContext =
  * already writes (which names both places a token can live) rather than a
  * workspace complaint that would send an operator looking in the wrong place.
  */
-function resolveContext(
+export function resolveKanbanContext(
   env: Record<string, string | undefined>,
   workspaceFlag?: string,
 ): ResolvedContext {
