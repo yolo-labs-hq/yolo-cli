@@ -50,6 +50,29 @@ test('update rewrites env and health settings of an existing preview with create
   assert.deepEqual(JSON.parse(f.calls[1]!.init.body), { env: { OCTOCOVE_MOCKS: '1', EMPTY: '' }, unsetEnv: ['OLD'], healthPath: '/health', readySeconds: 120 });
   assert.match(f.output().out, /Updated preview pv-1 on port 3101/);
 });
+test('--mode production forwards the mode and requires --build; update can switch it', async () => {
+  const f = fixture({ tile: { id: 'pv-1' }, preview: { port: 3150 } });
+  assert.equal(await runPreviewCmd(['create', '--name', 'App', '--branch', 'main', '--mode', 'production', '--setup', 'npm ci', '--build', 'npx vinext build',
+    '--command', 'npx vinext start --port "$PORT" --hostname "$HOST"', '--json'], f.deps), 0);
+  assert.equal(JSON.parse(f.calls[1]!.init.body).followBranch.mode, 'production');
+  const g = fixture({ tile: { id: 'pv-1' }, preview: { port: 3150 } });
+  assert.equal(await runPreviewCmd(['create', '--name', 'App', '--branch', 'main', '--command', 'node x', '--json'], g.deps), 0);
+  assert.equal('mode' in JSON.parse(g.calls[1]!.init.body).followBranch, false);
+  for (const args of [['create', '--name', 'App', '--branch', 'main', '--command', 'x', '--mode', 'production'], ['create', '--name', 'App', '--branch', 'main', '--command', 'x', '--build', 'b', '--mode', 'fast']]) {
+    const h = fixture();
+    assert.equal(await runPreviewCmd(args, h.deps), 64);
+    assert.equal(h.calls.length, 0);
+  }
+  const u = fixture({ updated: true, tileId: 'pv-1', port: 3104 });
+  assert.equal(await runPreviewCmd(['update', 'pv-1', '--mode', 'production', '--build', 'npx vinext build', '--command', 'npx vinext start --port "$PORT" --hostname "$HOST"'], u.deps), 0);
+  assert.deepEqual(JSON.parse(u.calls[1]!.init.body), { mode: 'production', build: 'npx vinext build', command: 'npx vinext start --port "$PORT" --hostname "$HOST"' });
+});
+test('status shows the serving mode and last build duration', async () => {
+  const f = fixture({ previews: [{ tileId: 'pv-1', name: 'App', status: 'ready', branch: 'main', port: 3104,
+    branchStatus: { phase: 'current', servedCommit: 'a'.repeat(40), mode: 'production', lastBuild: { commit: 'a'.repeat(40), durationMs: 41200, finishedAt: 'now' } } }] });
+  assert.equal(await runPreviewCmd(['status'], f.deps), 0);
+  assert.match(f.output().out, /\n {2}production mode, last build 41\.2s \(aaaaaaaaaaaa\)/);
+});
 test('status shows the failure reason and where to read logs', async () => {
   const f = fixture({ previews: [{ tileId: 'pv-1', name: 'App', status: 'ready', branch: 'main', port: 3101,
     branchStatus: { phase: 'error', error: 'Candidate never became healthy: GET / returned 500 ×410 in 120s' } }] });

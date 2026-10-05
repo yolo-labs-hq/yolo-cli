@@ -13,6 +13,11 @@ Create options:
   --cwd <dir>             Repository-relative app directory (default: .)
   --setup <command>       Install dependencies in each candidate checkout
   --build <command>       Build each candidate
+  --mode <production|dev> production: build each landed commit once (--build
+                          required), then serve it with a production --command;
+                          the start command gets NODE_ENV=production. Default:
+                          run --command as given (dev servers compile on request
+                          and can time out under load)
   --health-path <path>    Readiness endpoint (default: /)
   --port <auto|number>    Public preview port (default: auto)
   --poll-seconds <n>      Branch polling interval, 5..3600 (default: 30)
@@ -31,9 +36,18 @@ forgets the failed commit):
   --command <command>     Server start command
   --setup <command>       Setup command
   --build <command>       Build command
+  --mode <production|dev> Switch serving mode (production needs a build command)
   --health-path <path>    Readiness endpoint
   --ready-seconds <n>     Server readiness timeout, 1..300
   --timeout-seconds <n>   Setup/build timeout, 1..1800
+
+Production starts (with --mode production; run setup such as npm ci first):
+  Next.js:   --build 'npx next build'    --command 'npx next start -p "$PORT" -H "$HOST"'
+  OpenNext:  --build 'npx next build'    --command 'npx next start -p "$PORT" -H "$HOST"'
+             (opennextjs-cloudflare targets Workers; preview the Next server)
+  vinext:    --build 'npx vinext build'  --command 'npx vinext start --port "$PORT" --hostname "$HOST"'
+  Vite SPA:  --build 'npx vite build'    --command 'npx vite preview --port "$PORT" --host "$HOST" --strictPort'
+  Static:    --build 'npm run build'     --command 'python3 -m http.server "$PORT" --bind "$HOST" -d dist'
 
 Run inside a Studio workspace. Quote commands so $PORT and $HOST reach the
 managed server unchanged. Stop keeps the tile and prevents automatic restart.
@@ -46,8 +60,8 @@ function parse(args: string[]): Parsed {
   const values: Record<string, string> = {};
   const env: Record<string, string> = {}; const unsetEnv: string[] = [];
   let id: string | undefined, json = false;
-  const allowed = action === 'create' ? ['name','branch','command','cwd','setup','build','health-path','port','poll-seconds','timeout-seconds','ready-seconds','wait-for','request-id','desktop'] : action === 'logs' ? ['tail']
-    : action === 'update' ? ['env','unset-env','command','setup','build','health-path','ready-seconds','timeout-seconds'] : [];
+  const allowed = action === 'create' ? ['name','branch','command','cwd','setup','build','health-path','port','poll-seconds','timeout-seconds','ready-seconds','wait-for','request-id','desktop','mode'] : action === 'logs' ? ['tail']
+    : action === 'update' ? ['env','unset-env','command','setup','build','mode','health-path','ready-seconds','timeout-seconds'] : [];
   for (let i = 1; i < args.length; i++) {
     const arg = args[i]!;
     if (arg === '--json') { json = true; continue; }
@@ -82,11 +96,14 @@ function parse(args: string[]): Parsed {
     if (!/^\d+$/.test(raw) || !Number.isInteger(n) || n < min || n > max) throw new Error(`--${key} must be an integer in ${min}..${max}`);
     return n;
   };
+  const mode = values.mode;
+  if (mode !== undefined && mode !== 'production' && mode !== 'dev') throw new Error('--mode must be production or dev');
   const result: Parsed = { action: action as Parsed['action'], id, json, tail: number('tail', 1, 200, 50) };
   if (action === 'create') {
     for (const key of ['name', 'branch', 'command']) if (!values[key]?.trim()) throw new Error(`--${key} is required`);
     const cwd = values.cwd || '.';
     if (cwd.startsWith('/') || cwd.split(/[\\/]/).includes('..')) throw new Error('--cwd must stay inside the repository');
+    if (mode === 'production' && !values.build?.trim()) throw new Error('--mode production requires --build');
     const waitFor = values['wait-for'];
     if (waitFor !== undefined && (waitFor.length > 1024 || waitFor.startsWith('/') || waitFor.split(/[\\/]/).includes('..') || /[\r\n]/.test(waitFor))) throw new Error('--wait-for must be a repository-relative path');
     result.body = { name: values.name, command: values.command, cwd,
@@ -95,7 +112,7 @@ function parse(args: string[]): Parsed {
       followBranch: { branch: values.branch, ...(values.setup && { setup: values.setup }), ...(values.build && { build: values.build }),
         healthPath: values['health-path'] || '/', pollSeconds: number('poll-seconds', 5, 3600, 30),
         timeoutSeconds: number('timeout-seconds', 1, 1800, 300), readySeconds: number('ready-seconds', 1, 300, 60),
-        ...(waitFor && { waitFor }) } };
+        ...(waitFor && { waitFor }), ...(mode && { mode }) } };
   }
   if (action === 'update') {
     const healthPath = values['health-path'];
@@ -103,7 +120,7 @@ function parse(args: string[]): Parsed {
     const body: Record<string, unknown> = {
       ...(Object.keys(env).length && { env }), ...(unsetEnv.length && { unsetEnv }),
       ...(values.command !== undefined && { command: values.command }), ...(values.setup !== undefined && { setup: values.setup }),
-      ...(values.build !== undefined && { build: values.build }), ...(healthPath !== undefined && { healthPath }),
+      ...(values.build !== undefined && { build: values.build }), ...(mode !== undefined && { mode }), ...(healthPath !== undefined && { healthPath }),
       ...(values['ready-seconds'] !== undefined && { readySeconds: number('ready-seconds', 1, 300, 60) }),
       ...(values['timeout-seconds'] !== undefined && { timeoutSeconds: number('timeout-seconds', 1, 1800, 300) }),
     };
@@ -146,7 +163,7 @@ export async function runPreviewCmd(args: string[], deps: {
     else if (input.action === 'logs') out((body.lines?.map((line: any) => line.text).join('') || '(no logs)') + '\n');
     else {
       const previews = body.previews || [body.preview];
-      out(previews.length ? previews.map((p: any) => `${p.tileId}\t${p.name}\t${p.status}\t${p.branchStatus?.phase || '-'}\t${p.branch}\t:${p.port}\t${p.branchStatus?.servedCommit?.slice(0,12) || '-'}${p.update && p.update.state !== 'applied' ? `\n  Config v${p.update.version} update ${p.update.state}${p.update.error ? `: ${p.update.error}` : ''}` : ''}${p.branchStatus?.error ? `\n  ${p.branchStatus.error}\n  See: yolo preview logs ${p.tileId}` : ''}`).join('\n') + '\n' : 'No managed branch previews.\n');
+      out(previews.length ? previews.map((p: any) => `${p.tileId}\t${p.name}\t${p.status}\t${p.branchStatus?.phase || '-'}\t${p.branch}\t:${p.port}\t${p.branchStatus?.servedCommit?.slice(0,12) || '-'}${p.branchStatus?.mode || p.branchStatus?.lastBuild ? `\n  ${p.branchStatus.mode || 'unset'} mode${p.branchStatus.lastBuild ? `, last build ${(p.branchStatus.lastBuild.durationMs / 1000).toFixed(1)}s (${p.branchStatus.lastBuild.commit.slice(0, 12)})` : ''}` : ''}${p.update && p.update.state !== 'applied' ? `\n  Config v${p.update.version} update ${p.update.state}${p.update.error ? `: ${p.update.error}` : ''}` : ''}${p.branchStatus?.error ? `\n  ${p.branchStatus.error}\n  See: yolo preview logs ${p.tileId}` : ''}`).join('\n') + '\n' : 'No managed branch previews.\n');
     }
     return 0;
   } catch (error) { err(`yolo preview: ${(error as Error).message}\n`); return 1; }
