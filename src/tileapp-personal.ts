@@ -13,6 +13,10 @@
  *     → POST /v1/tileapps/personal (register the manifest, returns the namespaced
  *       appId) then PUT /v1/tileapps/personal/<appId>/bundle (upload the static
  *       files). Prints the appId. Auth: user JWT (no SESSION_ID needed).
+ *       A `runtime.kind: 'worker'` app takes this same bundle path: its backend
+ *       ships in the bundle under `_worker/` (entry `_worker/index.js`) — no
+ *       image build. `--live` uploads it as still being edited, so the backend
+ *       runs owner-only on Dynamic Workers when the deployment has them on.
  */
 
 import fs from 'node:fs';
@@ -20,7 +24,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { resolveUserToken } from './auth-context.js';
-import { validateManifest, isRuntimeManifest } from './tileapp-validator.js';
+import { validateManifest, isRuntimeManifest, isWorkerRuntimeManifest, workerBundleErrors } from './tileapp-validator.js';
 import { readImageDimensions } from './image-dimensions.js';
 import { resolveBundleDir } from './tileapp-developer.js';
 import { parseDockerfile, assembleOciArchive } from './tileapp-oci-assembler.js';
@@ -413,6 +417,9 @@ export interface PublishPersonalOptions {
   /** Runtime build engine: 'auto' (default) uses the skopeo assembler for
    *  RUN-less Dockerfiles + podman otherwise; 'skopeo'/'podman' force one. */
   builder?: Builder;
+  /** Worker apps only: send `live: true` — run the backend on Dynamic Workers
+   *  (owner only, still being edited) instead of a published version. */
+  live?: boolean;
   fetchImpl?: FetchLike;
   execImpl?: ExecLike;
   env?: Record<string, string | undefined>;
@@ -486,7 +493,14 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
     return { ok: false, kind: 'validation', message: `manifest "id" must be a lowercase kebab-case slug, 2-32 chars (got '${localId}')` };
   }
 
+  const isWorker = isWorkerRuntimeManifest(read.manifest);
+  if (opts.live && !isWorker) {
+    return { ok: false, kind: 'usage', message: "--live applies only to a runtime.kind 'worker' app (its backend is what runs live); publish without --live" };
+  }
+
   // Runtime app (has `runtime`/`image`): build the image in-pod + mediated push.
+  // A worker app is NOT one (isRuntimeManifest excludes it): it falls through to
+  // the bundle path below, backend included.
   // Branch BEFORE the strict pure-UI lint, since a runtime manifest legitimately
   // omits `image` (the server fills it from the actual pushed digest).
   if (isRuntimeManifest(read.manifest)) {
@@ -511,6 +525,14 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
   if (!resolved.ok) return { ok: false, kind: 'io', message: `bundle: ${resolved.message}` };
   const collected = collectBundleFiles(resolved.dir, opts.manifestPath);
   if (!collected.ok) return { ok: false, kind: 'io', message: collected.message };
+  // The server refuses a worker bundle without its backend (INVALID_WORKER_BUNDLE)
+  // — but only at upload, after the manifest is registered. Check it first.
+  if (isWorker) {
+    const bundleErrors = workerBundleErrors(collected.files.map((f) => f.path));
+    if (bundleErrors.length > 0) {
+      return { ok: false, kind: 'validation', message: `worker bundle invalid (${resolved.dir}):\n  - ${bundleErrors.join('\n  - ')}` };
+    }
+  }
 
   // Screenshots ride along in the bundle, and the server rejects a bad one
   // during the UPLOAD — which happens after the manifest is already registered.
@@ -545,21 +567,59 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
   }
 
   // 2) Upload the bundle.
+  let uploadJson: BundleUploadResponse = {};
   try {
     const res = await fetchImpl(`${base}/tileapps/personal/${encodeURIComponent(appId)}/bundle`, {
       method: 'PUT',
       headers,
-      body: JSON.stringify({ files: collected.files }),
+      body: JSON.stringify({ files: collected.files, ...(opts.live ? { live: true } : {}) }),
     });
-    if (!res.ok) return { ok: false, kind: 'http', message: `bundle upload failed: HTTP ${res.status} — ${await safeText(res)}` };
+    if (!res.ok) {
+      const body = await safeText(res);
+      if (res.status === 409 && body.includes(DYNAMIC_WORKERS_DISABLED)) {
+        return { ok: false, kind: 'http', message: DYNAMIC_WORKERS_DISABLED_MESSAGE };
+      }
+      return { ok: false, kind: 'http', message: `bundle upload failed: HTTP ${res.status} — ${body}` };
+    }
+    try { uploadJson = ((await res.json()) ?? {}) as BundleUploadResponse; } catch { /* older servers: no report */ }
   } catch (e) {
     return { ok: false, kind: 'http', message: `bundle upload request failed: ${(e as Error).message}` };
   }
 
-  return {
-    ok: true,
-    output: `Published ${appId} (${collected.files.length} file${collected.files.length === 1 ? '' : 's'}, ${collected.totalBytes} bytes)\n  next: install it + add a tile from the workspace (or via the studio.install_app / studio.create_app_tile MCP tools).`,
-  };
+  const summary = `Published ${appId} (${collected.files.length} file${collected.files.length === 1 ? '' : 's'}, ${collected.totalBytes} bytes)`;
+  const next = '  next: install it + add a tile from the workspace (or via the studio.install_app / studio.create_app_tile MCP tools).';
+  if (!isWorker) return { ok: true, output: `${summary}\n${next}` };
+
+  // A worker app's bundle is stored either way; `publish` says whether its
+  // backend made it, and `live` whether that backend runs on Dynamic Workers.
+  // A version with no backend serves a UI whose /api/* is dead, so it is a failure.
+  const publish = uploadJson.publish;
+  if (publish?.status === 'failed') {
+    return { ok: false, kind: 'http', message: `${appId}: the bundle was stored but the worker backend was not published: ${publish.error ?? 'unknown error'}` };
+  }
+  const lines = [summary, `  live: ${uploadJson.live === true}`];
+  if (publish) lines.push(`  publish: ${publish.status}${publish.backend !== undefined ? ` (backend: ${publish.backend})` : ''}`);
+  if (uploadJson.live === true) {
+    lines.push('  backend: running live on Dynamic Workers — owner only, as an in-progress edit. Publish without --live to ship a version.');
+  } else if (publish?.status === 'published') {
+    lines.push(opts.live
+      ? '  backend: published as a version (Workers for Platforms) — Dynamic Workers is off on this deployment, so --live had no effect.'
+      : '  backend: published as a version (Workers for Platforms).');
+  } else {
+    lines.push('  backend: no worker placement report — the worker placement may be off on this deployment, so the backend was not published.');
+  }
+  lines.push(next);
+  return { ok: true, output: lines.join('\n') };
+}
+
+/** The refusal code (HTTP 409) for a live worker tile when Dynamic Workers is off on the deployment. */
+const DYNAMIC_WORKERS_DISABLED = 'dynamic-workers-disabled';
+export const DYNAMIC_WORKERS_DISABLED_MESSAGE = 'live worker tiles are not enabled on this deployment; publish without --live';
+
+/** `PUT /tileapps/personal/:appId/bundle` response fields the CLI reports. */
+interface BundleUploadResponse {
+  live?: boolean;
+  publish?: { status: 'published' | 'failed'; backend?: boolean; error?: string };
 }
 
 // ── publish (runtime / mediated push) ────────────────────────────────────────

@@ -3,6 +3,7 @@
  *   - init scaffolds a renderable pure-UI app (tileapp.json + index.html)
  *   - publish --personal registers the manifest then uploads the bundle, in order
  *   - runtime apps build + mediated-push; surfaces HTTP / build failures
+ *   - worker apps (runtime.kind 'worker') upload a bundle incl. _worker/, never build; --live
  * Uses an injected fetch + temp dirs; never touches the network.
  */
 
@@ -12,7 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { runTileAppInit, runTileAppPublishPersonal, exitCodeForFailure } from './tileapp-personal.js';
+import { runTileAppInit, runTileAppPublishPersonal, exitCodeForFailure, DYNAMIC_WORKERS_DISABLED_MESSAGE } from './tileapp-personal.js';
 import type { FetchLike } from './tileapp-personal.js';
 
 const ENV = { YOLO_API_TOKEN: 'user-jwt', YOLO_COMMON_API_URL: 'https://api.example.com', HOME: '/nonexistent-home' };
@@ -262,5 +263,129 @@ describe('yolo tileapp publish --personal (runtime / mediated push)', () => {
     assert.equal(r.ok, false);
     assert.equal((r as any).kind, 'validation');
     assert.equal(seen.length, 0, 'no build engine should run for an unassemblable Dockerfile under --builder skopeo');
+  });
+});
+
+describe("yolo tileapp publish --personal (runtime.kind 'worker')", () => {
+  function scaffoldWorker(opts: { backend?: boolean; manifest?: Record<string, unknown> } = {}): { manifestPath: string } {
+    const dir = path.join(tmpDir(), 'wk');
+    fs.mkdirSync(dir);
+    const manifest = {
+      id: 'notes', version: '1.0.0', displayName: 'Notes', publisher: 'personal',
+      description: 'd', ui: { icon: 'x', color: '#fff', label: 'N' },
+      surface: { kind: 'iframe', entry: 'index.html' },
+      runtime: { kind: 'worker', port: 8080 }, permissions: { required: [] },
+      ...opts.manifest,
+    };
+    fs.writeFileSync(path.join(dir, 'tileapp.json'), JSON.stringify(manifest));
+    fs.writeFileSync(path.join(dir, 'index.html'), '<!doctype html><script src="app.js" type="module"></script>');
+    fs.writeFileSync(path.join(dir, 'app.js'), 'fetch("/api/hello")');
+    // A Dockerfile alongside must not tempt the CLI into a container build.
+    fs.writeFileSync(path.join(dir, 'Dockerfile'), 'FROM scratch\n');
+    if (opts.backend !== false) {
+      fs.mkdirSync(path.join(dir, '_worker'));
+      fs.writeFileSync(path.join(dir, '_worker', 'index.js'), 'export default { fetch() { return new Response("hi"); } };');
+    }
+    return { manifestPath: path.join(dir, 'tileapp.json') };
+  }
+  function recordingFetch(bundleResponse: { status: number; body: unknown }) {
+    const calls: Array<{ url: string; method: string; body: any }> = [];
+    const fetchImpl = stubFetch((url, init) => {
+      calls.push({ url, method: String(init?.method), body: JSON.parse(String(init?.body)) });
+      if (url.endsWith('/tileapps/personal')) return { status: 201, body: { appId: 'pa-abc-notes' } };
+      return bundleResponse;
+    });
+    return { calls, fetchImpl };
+  }
+  const noExec = (seen: string[]) => async (file: string) => { seen.push(file); return { code: 0, stderr: '' }; };
+
+  it('uploads a bundle that includes _worker/index.js, with no podman build and no live flag', async () => {
+    const { manifestPath } = scaffoldWorker();
+    const seen: string[] = [];
+    const { calls, fetchImpl } = recordingFetch({ status: 200, body: { uploaded: 4, live: false, publish: { status: 'published', backend: true } } });
+    const r = await runTileAppPublishPersonal({ manifestPath, env: ENV, fetchImpl, execImpl: noExec(seen) });
+    assert.equal(r.ok, true, r.ok ? '' : (r as any).message);
+    assert.equal(seen.length, 0, 'no build engine may run for a worker app');
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0]!.body.manifest.runtime.kind, 'worker');
+    assert.match(calls[1]!.url, /\/tileapps\/personal\/pa-abc-notes\/bundle$/);
+    assert.equal(calls[1]!.method, 'PUT');
+    const paths = calls[1]!.body.files.map((f: any) => f.path);
+    assert.ok(paths.includes('_worker/index.js'), `bundle paths: ${paths.join(', ')}`);
+    assert.ok(paths.includes('index.html'));
+    assert.equal(calls[1]!.body.live, undefined);
+    assert.match((r as any).output, /live: false/);
+    assert.match((r as any).output, /publish: published \(backend: true\)/);
+  });
+
+  it('--live sends live: true and reports the Dynamic Workers backend', async () => {
+    const { manifestPath } = scaffoldWorker();
+    const { calls, fetchImpl } = recordingFetch({ status: 200, body: { uploaded: 4, live: true, publish: { status: 'published', backend: true } } });
+    const r = await runTileAppPublishPersonal({ manifestPath, env: ENV, fetchImpl, execImpl: noExec([]), live: true });
+    assert.equal(r.ok, true, r.ok ? '' : (r as any).message);
+    assert.equal(calls[1]!.body.live, true);
+    assert.match((r as any).output, /live: true/);
+    assert.match((r as any).output, /Dynamic Workers/);
+  });
+
+  it('--live with Dynamic Workers off on the server says the backend went to a published version', async () => {
+    const { manifestPath } = scaffoldWorker();
+    const { fetchImpl } = recordingFetch({ status: 200, body: { live: false, publish: { status: 'published', backend: true } } });
+    const r = await runTileAppPublishPersonal({ manifestPath, env: ENV, fetchImpl, live: true });
+    assert.equal(r.ok, true);
+    assert.match((r as any).output, /--live had no effect/);
+  });
+
+  it('maps HTTP 409 dynamic-workers-disabled to a clear message', async () => {
+    const { manifestPath } = scaffoldWorker();
+    const { fetchImpl } = recordingFetch({ status: 409, body: { ok: false, code: 'dynamic-workers-disabled', message: 'x' } });
+    const r = await runTileAppPublishPersonal({ manifestPath, env: ENV, fetchImpl, live: true });
+    assert.equal(r.ok, false);
+    assert.equal((r as any).kind, 'http');
+    assert.equal((r as any).message, DYNAMIC_WORKERS_DISABLED_MESSAGE);
+    assert.match(DYNAMIC_WORKERS_DISABLED_MESSAGE, /publish without --live/);
+  });
+
+  it('fails when the server reports the worker backend was not published', async () => {
+    const { manifestPath } = scaffoldWorker();
+    const { fetchImpl } = recordingFetch({ status: 200, body: { live: false, publish: { status: 'failed', backend: false, error: 'the backend was not published: bad module' } } });
+    const r = await runTileAppPublishPersonal({ manifestPath, env: ENV, fetchImpl });
+    assert.equal(r.ok, false);
+    assert.match((r as any).message, /bad module/);
+  });
+
+  it('refuses a worker bundle with no _worker/index.js before any server call', async () => {
+    const { manifestPath } = scaffoldWorker({ backend: false });
+    const { calls, fetchImpl } = recordingFetch({ status: 200, body: {} });
+    const r = await runTileAppPublishPersonal({ manifestPath, env: ENV, fetchImpl });
+    assert.equal(r.ok, false);
+    assert.equal((r as any).kind, 'validation');
+    assert.match((r as any).message, /_worker\/index\.js/);
+    assert.equal(calls.length, 0);
+  });
+
+  it('refuses an image or runtime.exec on a worker manifest (the server would ignore them)', async () => {
+    const { manifestPath } = scaffoldWorker({ manifest: { runtime: { kind: 'worker', port: 8080, exec: 'node x.js' } } });
+    const { calls, fetchImpl } = recordingFetch({ status: 200, body: {} });
+    const r = await runTileAppPublishPersonal({ manifestPath, env: ENV, fetchImpl });
+    assert.equal(r.ok, false);
+    assert.match((r as any).message, /remove `runtime\.exec`/);
+    assert.equal(calls.length, 0);
+  });
+
+  it('--live on a container runtime app is a usage error, and no build runs', async () => {
+    const dir = path.join(tmpDir(), 'rt');
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, 'tileapp.json'), JSON.stringify({
+      id: 'svc', version: '1.0.0', displayName: 'Svc', publisher: 'personal', description: 'd',
+      ui: { icon: 'x', color: '#fff', label: 'S' }, surface: { kind: 'iframe', entry: 'index.html' },
+      runtime: { port: 8080 }, permissions: { required: [] },
+    }));
+    fs.writeFileSync(path.join(dir, 'Dockerfile'), 'FROM scratch\n');
+    const seen: string[] = [];
+    const r = await runTileAppPublishPersonal({ manifestPath: path.join(dir, 'tileapp.json'), env: ENV, live: true, execImpl: noExec(seen), fetchImpl: stubFetch(() => ({ status: 200, body: {} })) });
+    assert.equal(r.ok, false);
+    assert.equal((r as any).kind, 'usage');
+    assert.equal(seen.length, 0);
   });
 });

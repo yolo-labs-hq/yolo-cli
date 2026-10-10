@@ -14,7 +14,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parsePermissionShape, validateManifest, isValidOciDigest } from './tileapp-validator.js';
+import { parsePermissionShape, validateManifest, isValidOciDigest, isRuntimeManifest, isWorkerRuntimeManifest, workerBundleErrors } from './tileapp-validator.js';
 
 /** The minimum manifest `validateManifest` accepts, so each case below tests one rule. */
 const base = {
@@ -140,5 +140,30 @@ describe('notification permissions', () => {
     for (const permission of ['notifications.send', 'notifications.send:both', 'notifications.send:*', 'notifications.send.extra:global']) {
       assert.equal(parsePermissionShape(permission), null);
     }
+  });
+});
+
+describe("runtime.kind 'worker'", () => {
+  const worker = { ...base, runtime: { kind: 'worker', port: 8080 } };
+
+  it('validates with no image or exec, and is a bundle app rather than a container runtime', () => {
+    assert.deepEqual(errorsFor(worker), []);
+    assert.equal(isWorkerRuntimeManifest(worker), true);
+    assert.equal(isRuntimeManifest(worker), false);
+    assert.equal(isRuntimeManifest({ ...base, runtime: { port: 8080 } }), true);
+  });
+
+  it('mirrors the server: port still required, unknown kinds and an ignored image/exec refused', () => {
+    assert.ok(errorsFor({ ...base, runtime: { kind: 'worker' } }).some((e) => /runtime\.port/.test(e)));
+    assert.ok(errorsFor({ ...base, runtime: { kind: 'lambda', port: 1, exec: 'x' } }).includes("runtime.kind must be 'process' | 'worker' when present"));
+    assert.ok(errorsFor({ ...worker, image: { ref: 'r/x', tag: '1' } }).some((e) => /remove `image`/.test(e)));
+    assert.ok(errorsFor({ ...base, runtime: { kind: 'worker', port: 1, exec: 'node x.js' } }).some((e) => /remove `runtime\.exec`/.test(e)));
+  });
+
+  it('workerBundleErrors needs _worker/index.js, JS-only backend files and some UI', () => {
+    assert.deepEqual(workerBundleErrors(['index.html', '_worker/index.js', '_worker/lib.mjs']), []);
+    assert.match(workerBundleErrors(['index.html']).join(' '), /_worker\/index\.js/);
+    assert.match(workerBundleErrors(['index.html', '_worker/index.js', '_worker/data.json']).join(' '), /\.js or \.mjs/);
+    assert.match(workerBundleErrors(['_worker/index.js']).join(' '), /UI files/);
   });
 });
