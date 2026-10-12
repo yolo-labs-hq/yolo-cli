@@ -125,19 +125,17 @@ export function runTileAppInit(opts: InitOptions): CmdResult {
   <title>${title}</title>
   <!--
     ⚠️ CONTENT-SECURITY-POLICY — read this before you build.
-    Tile-app bundles are served with \`script-src 'self'\`. That means:
+    Tile-app bundles are served with \`script-src 'self'\` and \`style-src 'self'\`. That means:
       • NO inline <script> — put ALL your JavaScript in app.js (loaded below).
       • NO eval() / new Function() — they are blocked. If your app needs to
         evaluate expressions (a calculator, grapher, template engine, …), write
         a real tokenizer/parser in app.js; you cannot shortcut with eval.
       • NO network — no CDN scripts, remote fonts, or fetch() to other origins.
         Keep the app fully self-contained (only the files in this folder).
-    Inline <style> is fine; CSS may also live in a bundled .css file.
+      • NO inline <style> and no style="…" attributes — put ALL your CSS in
+        style.css (linked below). The Cloudflare tile host blocks inline CSS.
   -->
-  <style>
-    body { font: 15px/1.5 system-ui, sans-serif; margin: 0; display: grid; place-items: center;
-           height: 100vh; color: #e5e7eb; background: #111827; }
-  </style>
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <main>
@@ -151,6 +149,10 @@ export function runTileAppInit(opts: InitOptions): CmdResult {
   <script src="app.js" type="module"></script>
 </body>
 </html>
+`;
+  const styleCss = `/* ${title} — all CSS lives here: the tile host's CSP (style-src 'self') blocks inline <style>. */
+body { font: 15px/1.5 system-ui, sans-serif; margin: 0; display: grid; place-items: center;
+       height: 100vh; color: #e5e7eb; background: #111827; }
 `;
   const appJs = `// ${title} — personal tile-app logic.
 //
@@ -205,6 +207,7 @@ Check refs before publishing:  yolo tileapp validate tileapp.json --personal
     fs.writeFileSync(path.join(dir, 'tileapp.json'), `${JSON.stringify(manifest, null, 2)}\n`);
     fs.writeFileSync(path.join(dir, 'index.html'), indexHtml);
     fs.writeFileSync(path.join(dir, 'app.js'), appJs);
+    fs.writeFileSync(path.join(dir, 'style.css'), styleCss);
     fs.mkdirSync(path.join(dir, 'media'), { recursive: false });
     fs.writeFileSync(path.join(dir, 'media', 'README.md'), mediaReadme);
   } catch (e) {

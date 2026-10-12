@@ -48,6 +48,10 @@ describe('yolo tileapp init', () => {
     assert.match(indexHtml, /<script src="app\.js"/);
     // And surfaces the CSP constraint (no inline script / no eval) at scaffold time.
     assert.match(indexHtml, /script-src 'self'/);
+    // CSS is a linked file, never inline: the Cloudflare tile host serves style-src 'self'.
+    assert.ok(fs.existsSync(path.join(cwd, 'my-widget', 'style.css')), 'style.css should be scaffolded');
+    assert.match(indexHtml, /<link rel="stylesheet" href="style\.css"/);
+    assert.doesNotMatch(indexHtml.replace(/<!--[\s\S]*?-->/g, ''), /<style[\s>]|\sstyle="/);
   });
 
   it('rejects a bad name and an existing dir', () => {
