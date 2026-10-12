@@ -125,15 +125,15 @@ export function runTileAppInit(opts: InitOptions): CmdResult {
   <title>${title}</title>
   <!--
     ⚠️ CONTENT-SECURITY-POLICY — read this before you build.
-    Tile-app bundles are served with \`script-src 'self'\` and \`style-src 'self'\`. That means:
+    Tile-app bundles are served with \`script-src 'self'\`. That means:
       • NO inline <script> — put ALL your JavaScript in app.js (loaded below).
       • NO eval() / new Function() — they are blocked. If your app needs to
         evaluate expressions (a calculator, grapher, template engine, …), write
         a real tokenizer/parser in app.js; you cannot shortcut with eval.
       • NO network — no CDN scripts, remote fonts, or fetch() to other origins.
         Keep the app fully self-contained (only the files in this folder).
-      • NO inline <style> and no style="…" attributes — put ALL your CSS in
-        style.css (linked below). The Cloudflare tile host blocks inline CSS.
+    CSS: inline <style> and style="…" work, but keep it in style.css (linked
+    below) so the page is easy to review.
   -->
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -150,7 +150,7 @@ export function runTileAppInit(opts: InitOptions): CmdResult {
 </body>
 </html>
 `;
-  const styleCss = `/* ${title} — all CSS lives here: the tile host's CSP (style-src 'self') blocks inline <style>. */
+  const styleCss = `/* ${title} — the app's CSS. */
 body { font: 15px/1.5 system-ui, sans-serif; margin: 0; display: grid; place-items: center;
        height: 100vh; color: #e5e7eb; background: #111827; }
 `;
@@ -215,7 +215,7 @@ Check refs before publishing:  yolo tileapp validate tileapp.json --personal
   }
   return {
     ok: true,
-    output: `Created ${name}/ (tileapp.json + index.html + app.js + style.css + media/)\n  note: bundle CSP is \`script-src 'self'; style-src 'self'\` — keep JS in app.js and CSS in style.css (no inline <script> or <style>, no eval, no network)\n  note: drop a 1280x800 webp in media/ and add \`"screenshots": ["media/01-main.webp"]\` to get a store preview (see media/README.md)\n  next: cd ${name} && yolo tileapp publish tileapp.json --personal`,
+    output: `Created ${name}/ (tileapp.json + index.html + app.js + style.css + media/)\n  note: bundle CSP is \`script-src 'self'\` — keep JS in app.js (no inline <script>, no eval, no network); CSS goes in style.css\n  note: drop a 1280x800 webp in media/ and add \`"screenshots": ["media/01-main.webp"]\` to get a store preview (see media/README.md)\n  next: cd ${name} && yolo tileapp publish tileapp.json --personal`,
   };
 }
 
