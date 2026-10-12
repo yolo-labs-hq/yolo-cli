@@ -215,7 +215,7 @@ Check refs before publishing:  yolo tileapp validate tileapp.json --personal
   }
   return {
     ok: true,
-    output: `Created ${name}/ (tileapp.json + index.html + app.js + media/)\n  note: bundle CSP is \`script-src 'self'\` — keep JS in app.js (no inline <script>, no eval, no network)\n  note: drop a 1280x800 webp in media/ and add \`"screenshots": ["media/01-main.webp"]\` to get a store preview (see media/README.md)\n  next: cd ${name} && yolo tileapp publish tileapp.json --personal`,
+    output: `Created ${name}/ (tileapp.json + index.html + app.js + style.css + media/)\n  note: bundle CSP is \`script-src 'self'; style-src 'self'\` — keep JS in app.js and CSS in style.css (no inline <script> or <style>, no eval, no network)\n  note: drop a 1280x800 webp in media/ and add \`"screenshots": ["media/01-main.webp"]\` to get a store preview (see media/README.md)\n  next: cd ${name} && yolo tileapp publish tileapp.json --personal`,
   };
 }
 
