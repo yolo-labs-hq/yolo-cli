@@ -5,7 +5,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { resolveSubstrateContext, resolveUserToken } from './auth-context.js';
+import {
+  EXECUTION_MARKER_ENVS, EXECUTION_WORKER_UID, inRestrictedExecution, resolveSubstrateContext, resolveUserToken,
+} from './auth-context.js';
 
 const BASE_ENV = {
   SESSION_ID: 'sess-1',
@@ -103,6 +105,36 @@ describe('resolveSubstrateContext — restricted Runner execution', () => {
     assert.equal(result.ok, false);
     assert.ok(!result.ok && /restricted Runner execution/.test(result.message));
     assert.ok(!result.ok && !/env-token|file-token/.test(result.message));
+    assert.deepEqual(reads, []);
+  });
+
+  it('is one with any launcher marker, and with none at all when the process runs as the worker uid', () => {
+    const control = { uid: () => 1000 };
+    const worker = { uid: () => EXECUTION_WORKER_UID };
+    for (const marker of EXECUTION_MARKER_ENVS) {
+      assert.equal(inRestrictedExecution({ ...BASE_ENV, [marker]: 'x' }, control), true, marker);
+    }
+    // Markers scrubbed, HOME pointed somewhere with a token, a token in the environment: still an execution.
+    const scrubbed = { ...BASE_ENV, HOME: '/home/yolo', YOLO_API_TOKEN: 'env-token' };
+    assert.equal(inRestrictedExecution(scrubbed, worker), true);
+    const reads: string[] = [];
+    const read = (p: string) => { reads.push(p); return 'file-token'; };
+    const result = resolveSubstrateContext(scrubbed, read, worker);
+    assert.ok(!result.ok && /restricted Runner execution/.test(result.message));
+    assert.equal(resolveUserToken(scrubbed, read, worker), undefined);
+    assert.deepEqual(reads, []);
+    // The same environment in the control domain is an ordinary session.
+    assert.equal(inRestrictedExecution(scrubbed, control), false);
+    assert.equal(inRestrictedExecution(scrubbed, { uid: () => undefined }), false);
+    assert.equal(resolveUserToken(scrubbed, read, control), 'file-token');
+  });
+
+  it('resolveUserToken — the reader behind every other client — finds nothing inside an execution', () => {
+    const reads: string[] = [];
+    for (const marker of EXECUTION_MARKER_ENVS) {
+      const token = resolveUserToken({ HOME: '/home/yolo', YOLO_API_TOKEN: 'env-token', [marker]: 'x' }, (p) => { reads.push(p); return 'file-token'; }, { uid: () => 1000 });
+      assert.equal(token, undefined, marker);
+    }
     assert.deepEqual(reads, []);
   });
 
