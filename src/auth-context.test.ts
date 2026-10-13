@@ -90,3 +90,26 @@ describe('resolveSubstrateContext', () => {
     if (!res.ok) assert.match(res.message, /no user token|user-JWT-only/i);
   });
 });
+
+describe('resolveSubstrateContext — restricted Runner execution', () => {
+  const socket = '/run/yolo-exec/ctl/x/exe_0/broker.sock';
+
+  it('offers no credential, and reads neither the token file nor the token environment', () => {
+    const reads: string[] = [];
+    const result = resolveSubstrateContext(
+      { ...BASE_ENV, HOME: '/home/yolo', YOLO_API_TOKEN: 'env-token', YOLO_EXECUTION_BROKER_SOCKET: socket },
+      (p) => { reads.push(p); return 'file-token'; },
+    );
+    assert.equal(result.ok, false);
+    assert.ok(!result.ok && /restricted Runner execution/.test(result.message));
+    assert.ok(!result.ok && !/env-token|file-token/.test(result.message));
+    assert.deepEqual(reads, []);
+  });
+
+  it('is unchanged everywhere else: the variable absent or empty is an ordinary session', () => {
+    for (const env of [{ ...BASE_ENV, HOME: '/home/yolo' }, { ...BASE_ENV, HOME: '/home/yolo', YOLO_EXECUTION_BROKER_SOCKET: '' }]) {
+      const result = resolveSubstrateContext(env, fileStub({ '/home/yolo/.config/yolo/token': 'file-token' }));
+      assert.deepEqual(result, { ok: true, context: { sessionId: 'sess-1', commonApiUrl: 'https://api.example.com', userToken: 'file-token' } });
+    }
+  });
+});

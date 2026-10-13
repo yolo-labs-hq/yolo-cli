@@ -33,6 +33,12 @@ export type ResolveResult =
   | { ok: true; context: SubstrateContext }
   | { ok: false; message: string };
 
+/**
+ * Set by the worker-domain launcher (container-api `execution-domain-launcher.js`) to the execution's
+ * broker socket. Its presence can only take authority away from the CLI; its absence grants nothing.
+ */
+export const EXECUTION_BROKER_SOCKET_ENV = 'YOLO_EXECUTION_BROKER_SOCKET';
+
 /** Injectable file reader so unit tests don't touch the real FS. */
 export type ReadFileImpl = (filePath: string) => string | undefined;
 
@@ -47,6 +53,21 @@ export function resolveSubstrateContext(
   }
   if (!commonApiUrl) {
     return { ok: false, message: 'YOLO_COMMON_API_URL (or YOLO_API_URL) env var is required' };
+  }
+
+  // Inside a restricted Runner execution (docs/RUNNER_EXECUTION_BOOTSTRAP_PROTOCOL.md) the CLI has no
+  // credential to offer and must not go looking for one: the workspace owner's token is not the
+  // execution's identity, wherever a copy of it might be found. Checked BEFORE the token file and the
+  // environment are read. This is not what keeps the token away from an execution — the worker domain
+  // holds no copy of it, with or without this variable — it only makes the CLI say so plainly instead of
+  // presenting whatever it finds.
+  if (env[EXECUTION_BROKER_SOCKET_ENV]) {
+    return {
+      ok: false,
+      message:
+        'this is a restricted Runner execution: the substrate CLI has no credential here and does not use the workspace ' +
+        'owner\'s. Studio tools are reached through the execution\'s own broker.',
+    };
   }
 
   const userToken = resolveUserToken(env, readFileImpl);
