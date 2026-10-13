@@ -5,7 +5,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { resolveSubstrateContext, resolveUserToken } from './auth-context.js';
+import {
+  EXECUTION_MARKER_ENVS, EXECUTION_WORKER_UID, inRestrictedExecution, resolveSubstrateContext, resolveUserToken,
+} from './auth-context.js';
 
 const BASE_ENV = {
   SESSION_ID: 'sess-1',
@@ -88,5 +90,58 @@ describe('resolveSubstrateContext', () => {
     const res = resolveSubstrateContext({ ...BASE_ENV, HOME: '/home/yolo' }, fileStub({}));
     assert.equal(res.ok, false);
     if (!res.ok) assert.match(res.message, /no user token|user-JWT-only/i);
+  });
+});
+
+describe('resolveSubstrateContext — restricted Runner execution', () => {
+  const socket = '/run/yolo-exec/ctl/x/exe_0/broker.sock';
+
+  it('offers no credential, and reads neither the token file nor the token environment', () => {
+    const reads: string[] = [];
+    const result = resolveSubstrateContext(
+      { ...BASE_ENV, HOME: '/home/yolo', YOLO_API_TOKEN: 'env-token', YOLO_EXECUTION_BROKER_SOCKET: socket },
+      (p) => { reads.push(p); return 'file-token'; },
+    );
+    assert.equal(result.ok, false);
+    assert.ok(!result.ok && /restricted Runner execution/.test(result.message));
+    assert.ok(!result.ok && !/env-token|file-token/.test(result.message));
+    assert.deepEqual(reads, []);
+  });
+
+  it('is one with any launcher marker, and with none at all when the process runs as the worker uid', () => {
+    const control = { uid: () => 1000 };
+    const worker = { uid: () => EXECUTION_WORKER_UID };
+    for (const marker of EXECUTION_MARKER_ENVS) {
+      assert.equal(inRestrictedExecution({ ...BASE_ENV, [marker]: 'x' }, control), true, marker);
+    }
+    // Markers scrubbed, HOME pointed somewhere with a token, a token in the environment: still an execution.
+    const scrubbed = { ...BASE_ENV, HOME: '/home/yolo', YOLO_API_TOKEN: 'env-token' };
+    assert.equal(inRestrictedExecution(scrubbed, worker), true);
+    const reads: string[] = [];
+    const read = (p: string) => { reads.push(p); return 'file-token'; };
+    const result = resolveSubstrateContext(scrubbed, read, worker);
+    assert.ok(!result.ok && /restricted Runner execution/.test(result.message));
+    assert.equal(resolveUserToken(scrubbed, read, worker), undefined);
+    assert.deepEqual(reads, []);
+    // The same environment in the control domain is an ordinary session.
+    assert.equal(inRestrictedExecution(scrubbed, control), false);
+    assert.equal(inRestrictedExecution(scrubbed, { uid: () => undefined }), false);
+    assert.equal(resolveUserToken(scrubbed, read, control), 'file-token');
+  });
+
+  it('resolveUserToken — the reader behind every other client — finds nothing inside an execution', () => {
+    const reads: string[] = [];
+    for (const marker of EXECUTION_MARKER_ENVS) {
+      const token = resolveUserToken({ HOME: '/home/yolo', YOLO_API_TOKEN: 'env-token', [marker]: 'x' }, (p) => { reads.push(p); return 'file-token'; }, { uid: () => 1000 });
+      assert.equal(token, undefined, marker);
+    }
+    assert.deepEqual(reads, []);
+  });
+
+  it('is unchanged everywhere else: the variable absent or empty is an ordinary session', () => {
+    for (const env of [{ ...BASE_ENV, HOME: '/home/yolo' }, { ...BASE_ENV, HOME: '/home/yolo', YOLO_EXECUTION_BROKER_SOCKET: '' }]) {
+      const result = resolveSubstrateContext(env, fileStub({ '/home/yolo/.config/yolo/token': 'file-token' }));
+      assert.deepEqual(result, { ok: true, context: { sessionId: 'sess-1', commonApiUrl: 'https://api.example.com', userToken: 'file-token' } });
+    }
   });
 });

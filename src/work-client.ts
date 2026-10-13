@@ -1,5 +1,7 @@
 /** Session-bound delegated authentication and workspace artifact transport. */
 
+import { inRestrictedExecution, RESTRICTED_EXECUTION_MESSAGE } from './auth-context.js';
+
 export const SUBSTRATE_CLI_AGENT_ID = 'substrate-cli';
 
 export const SUBSTRATE_CLI_ARTIFACT_SCOPES = [
@@ -39,6 +41,11 @@ export interface MintTokenOptions {
   scopes: ReadonlyArray<string>;
   /** Test-injectable fetch. Defaults to `globalThis.fetch`. */
   fetchImpl?: FetchLike;
+  /**
+   * Is this process a restricted Runner execution? Defaults to the CLI's own check
+   * (`inRestrictedExecution`). Injectable for tests; it can only make the mint refuse.
+   */
+  restrictedExecution?: () => boolean;
 }
 
 export interface MintTokenResult {
@@ -77,6 +84,11 @@ export async function mintSubstrateToken(options: MintTokenOptions): Promise<Min
   const fetchImpl = options.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
   if (!fetchImpl) {
     throw new WorkClientError('fetch is not available; substrate CLI requires Node 20+', 0, 'INTERNAL');
+  }
+  // A restricted execution mints nothing here, whatever token the caller came by: this route answers with
+  // the workspace owner's authority, which is not the execution's. Checked before any request is made.
+  if ((options.restrictedExecution ?? (() => inRestrictedExecution(process.env)))()) {
+    throw new WorkClientError(RESTRICTED_EXECUTION_MESSAGE, 0, 'EXECUTION_RESTRICTED');
   }
   if (!options.userToken) {
     throw new WorkClientError('no user token available to mint a substrate token', 0, 'INTERNAL');
