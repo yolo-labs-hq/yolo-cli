@@ -9,6 +9,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  setProjectWorkspace,
   resolveDeployContext,
   startShip,
   uploadAssetBucket,
@@ -582,5 +583,17 @@ describe('deploy-client — transient retry', () => {
     assert.equal(result.ok, false);
     if (!result.ok) assert.equal(result.kind, 'network');
     assert.equal(calls.length, 1); // surfaced as transient, not retried
+  });
+});
+
+
+describe('deploy-client — workspace association', () => {
+  it('PUTs the destination and expected association to the project endpoint', async () => {
+    const { fetch, calls } = makeFetchStub({ jsonBody: { project: { workspaceId: 'ws' }, changed: true } });
+    const result = await setProjectWorkspace(makeContext(fetch), 'p1', { workspaceId: 'ws', expectedWorkspaceId: null });
+    assert.equal(result.ok, true);
+    assert.equal(calls[0]!.url, 'https://api.example.com/v1/deploy/projects/p1/workspace');
+    assert.equal(calls[0]!.method, 'PUT');
+    assert.deepEqual(JSON.parse(calls[0]!.body as string), { workspaceId: 'ws', expectedWorkspaceId: null });
   });
 });

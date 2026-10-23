@@ -840,3 +840,11 @@ function enc(value: string): string {
 function stripTrailingSlash(url: string): string {
   return url.endsWith('/') ? url.slice(0, -1) : url;
 }
+
+/** Explicit persisted association, separate from .yolo/deploy.json. */
+export async function setProjectWorkspace(
+  ctx: DeployContext, projectId: string,
+  request: { workspaceId: string | null; expectedWorkspaceId: string | null },
+): Promise<ClientResult<unknown>> {
+  return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/workspace`, { method: 'PUT', jsonBody: request });
+}

@@ -2283,3 +2283,78 @@ describe('deploy-cli — formatRowsTable', () => {
     assert.equal(formatRowsTable([]), '(0 rows)');
   });
 });
+
+describe('link server workspace association', () => {
+  const ws = '507f1f77bcf86cd799439033';
+  it('updates an already locally linked project and verifies server readback', async () => {
+    const io = makeIo();
+    let persisted: string | null = null;
+    let calls = 0;
+    const code = await runDeployCmd(['link', '--project-id', 'hp_8f3a', '--workspace-id', ws], baseDeps(io, {
+      getProjectStatusImpl: async () => ({ ok: true, value: { project: { id: 'hp_8f3a', workspaceId: persisted } } }),
+      setProjectWorkspaceImpl: async (_ctx, id, body) => {
+        assert.equal(id, 'hp_8f3a');
+        assert.deepEqual(body, { workspaceId: ws, expectedWorkspaceId: null });
+        persisted = body.workspaceId;
+        calls++;
+        return { ok: true, value: {} };
+      },
+    }));
+    assert.equal(code, 0);
+    assert.equal(calls, 1);
+    assert.match(io.stdout.join(''), /verified server workspace association/);
+  });
+  it('does not report success or write local config if server readback is unchanged', async () => {
+    const io = makeIo();
+    let writes = 0;
+    const code = await runDeployCmd(['link', '--project-id', 'hp_8f3a', '--workspace-id', ws], baseDeps(io, {
+      readDeployConfigImpl: () => linked(null),
+      getProjectStatusImpl: async () => ({ ok: true, value: { project: { id: 'hp_8f3a', workspaceId: null } } }),
+      setProjectWorkspaceImpl: async () => ({ ok: true, value: {} }),
+      writeDeployConfigImpl: () => { writes++; return CONFIG_PATH; },
+    }));
+    assert.equal(code, 2);
+    assert.equal(writes, 0);
+    assert.doesNotMatch(io.stdout.join(''), /verified/);
+    assert.match(io.stderr.join(''), /workspace-link-conflict/);
+  });
+  it('can unlink the server association while preserving local configuration', async () => {
+    const io = makeIo();
+    let persisted: string | null = ws;
+    const code = await runDeployCmd(['link', '--project-id', 'hp_8f3a', '--unlink-workspace'], baseDeps(io, {
+      getProjectStatusImpl: async () => ({ ok: true, value: { project: { id: 'hp_8f3a', workspaceId: persisted } } }),
+      setProjectWorkspaceImpl: async (_ctx, _id, body) => {
+        assert.deepEqual(body, { workspaceId: null, expectedWorkspaceId: ws });
+        persisted = null; return { ok: true, value: {} };
+      },
+    }));
+    assert.equal(code, 0);
+  });
+  it('supports WORKSPACE_ID and an explicit local-only override', async () => {
+    const io = makeIo();
+    let persisted: string | null = null;
+    let calls = 0;
+    const deps = baseDeps(io, {
+      env: { ...ENV, WORKSPACE_ID: ws },
+      getProjectStatusImpl: async () => ({ ok: true, value: { project: { id: 'hp_8f3a', workspaceId: persisted } } }),
+      setProjectWorkspaceImpl: async (_ctx, _id, body) => { calls++; persisted = body.workspaceId; return { ok: true, value: {} }; },
+    });
+    assert.equal(await runDeployCmd(['link', '--project-id', 'hp_8f3a'], deps), 0);
+    assert.equal(calls, 1);
+    assert.equal(await runDeployCmd(['link', '--project-id', 'hp_8f3a', '--local-only'], deps), 0);
+    assert.equal(calls, 1);
+    assert.match(io.stdout.join(''), /Local repository configuration only/);
+  });
+});
+
+it('refuses an omitted persisted association instead of assuming it is unlinked', async () => {
+  const io = makeIo();
+  let calls = 0;
+  const code = await runDeployCmd(['link', '--project-id', 'hp_8f3a', '--workspace-id', '507f1f77bcf86cd799439033'], baseDeps(io, {
+    getProjectStatusImpl: async () => ({ ok: true, value: { project: { id: 'hp_8f3a' } } }),
+    setProjectWorkspaceImpl: async () => { calls++; return { ok: true, value: {} }; },
+  }));
+  assert.equal(code, 2);
+  assert.equal(calls, 0);
+  assert.match(io.stderr.join(''), /invalid-response/);
+});

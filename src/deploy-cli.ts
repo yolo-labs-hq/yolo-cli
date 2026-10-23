@@ -58,6 +58,7 @@ import {
   republishProject,
   renameProject,
   setProjectParent,
+  setProjectWorkspace,
   addAlias,
   removeAlias,
   setRedirect,
@@ -110,6 +111,7 @@ export interface DeployCliDeps {
   republishProjectImpl?: typeof republishProject;
   renameProjectImpl?: typeof renameProject;
   setProjectParentImpl?: typeof setProjectParent;
+  setProjectWorkspaceImpl?: typeof setProjectWorkspace;
   addAliasImpl?: typeof addAlias;
   removeAliasImpl?: typeof removeAlias;
   setRedirectImpl?: typeof setRedirect;
@@ -128,7 +130,7 @@ export interface DeployCliDeps {
 const USAGE = [
   'Usage: yolo deploy [--env <staging|prod>] [--dry-run] [--json]',
   '       yolo deploy init [--slug <slug>] [--type <static|worker>] [--parent <id|slug> | --no-parent] [--json]',
-  '       yolo deploy link (--project-id <id> | --slug <slug>) [--type <static|worker>]',
+  '       yolo deploy link (--project-id <id> | --slug <slug>) [--type <static|worker>] [--workspace-id <id> | --unlink-workspace | --local-only]',
   '       yolo deploy validate [--json]',
   '       yolo deploy doctor [--json]',
   '       yolo deploy dev [--port <n>] [--host <h>] [--var KEY=VALUE ...]',
@@ -414,6 +416,7 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
         ? `${formatJsonResult({ status: 'already-linked', projectId: existing.projectId, ...(existing.slug ? { slug: existing.slug } : {}) })}\n`
         : `OK: already linked to project ${existing.projectId}${existing.slug ? ` (slug ${existing.slug})` : ''} — .yolo/deploy.json left unchanged\n`,
     );
+    if (!parsed.jsonOutput) io.out(`Local repository configuration only. To save the server workspace association, run 'yolo deploy link --project-id ${existing.projectId} --workspace-id <workspace-id>'.\n`);
     return 0;
   }
 
@@ -650,16 +653,32 @@ interface ParsedLinkArgs {
   projectId?: string;
   slug?: string;
   type?: 'static' | 'worker';
+  workspaceId?: string;
+  localOnly?: boolean;
+  unlinkWorkspace?: boolean;
 }
 
 export function parseLinkArgs(args: string[]): ParsedLinkArgs | ParseError {
+  let workspaceId: string | undefined;
+  let localOnly = false;
+  let unlinkWorkspace = false;
   let projectId: string | undefined;
   let slug: string | undefined;
   let type: 'static' | 'worker' | undefined;
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
-    if (a === '--project-id') {
+    if (a === '--workspace-id') {
+      workspaceId = args[++i];
+      if (!workspaceId || !/^[a-f0-9]{24}$/i.test(workspaceId)) return { ok: false, message: '--workspace-id requires a 24-hex workspace id' };
+    } else if (a.startsWith('--workspace-id=')) {
+      workspaceId = a.slice('--workspace-id='.length);
+      if (!/^[a-f0-9]{24}$/i.test(workspaceId)) return { ok: false, message: '--workspace-id requires a 24-hex workspace id' };
+    } else if (a === '--unlink-workspace') {
+      unlinkWorkspace = true;
+    } else if (a === '--local-only') {
+      localOnly = true;
+    } else if (a === '--project-id') {
       const v = args[++i];
       if (!v || v.startsWith('--')) return { ok: false, message: '--project-id requires a value' };
       projectId = v;
@@ -694,7 +713,9 @@ export function parseLinkArgs(args: string[]): ParsedLinkArgs | ParseError {
     // link metadata that disagrees with the project the id resolves to.
     return { ok: false, message: 'pass either --project-id or --slug, not both (the project\'s slug is resolved server-side)' };
   }
-  return { ok: true, projectId, slug, type };
+  if ((workspaceId && unlinkWorkspace) || (localOnly && unlinkWorkspace)) return { ok: false, message: 'choose only one workspace association option' };
+  if (workspaceId && localOnly) return { ok: false, message: '--workspace-id and --local-only cannot be combined' };
+  return { ok: true, projectId, slug, type, ...(workspaceId ? { workspaceId } : {}), ...(localOnly ? { localOnly } : {}), ...(unlinkWorkspace ? { unlinkWorkspace } : {}) };
 }
 
 async function runLinkCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Promise<number> {
@@ -770,6 +791,31 @@ async function runLinkCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
       })}\n`,
     );
     return exitCodeForFailure('already-linked');
+  }
+  const workspaceId = parsed.unlinkWorkspace ? null : parsed.localOnly ? undefined : parsed.workspaceId ?? (deps.env ?? process.env).WORKSPACE_ID;
+  if (workspaceId !== undefined) {
+    // Always read project.workspaceId, never the release-derived workspace.
+    const read = deps.getProjectStatusImpl ?? getProjectStatus;
+    const before = await read(auth.context, projectId!);
+    if (!before.ok) { io.err(`${formatFail(before)}\n`); return exitCodeForFailure(before.kind); }
+    const snapshot = before.value as { project?: { workspaceId?: string | null } } | null;
+    if (!snapshot?.project || (snapshot.project.workspaceId !== null && typeof snapshot.project.workspaceId !== 'string')) {
+      io.err('FAIL [invalid-response]: server did not return a persisted workspace association\n');
+      return 2;
+    }
+    const linked = await (deps.setProjectWorkspaceImpl ?? setProjectWorkspace)(auth.context, projectId!, {
+      workspaceId, expectedWorkspaceId: snapshot.project.workspaceId ?? null,
+    });
+    if (!linked.ok) { io.err(`${formatFail(linked)}\n`); return exitCodeForFailure(linked.kind); }
+    const after = await read(auth.context, projectId!);
+    if (!after.ok) { io.err(`${formatFail(after)}\n`); return exitCodeForFailure(after.kind); }
+    if ((after.value as { project?: { workspaceId?: string | null } } | null)?.project?.workspaceId !== (workspaceId?.toLowerCase() ?? null)) {
+      io.err('FAIL [workspace-link-conflict]: server association could not be verified; refresh and retry\n');
+      return 2;
+    }
+    io.out(`OK: verified server workspace association ${workspaceId ?? 'none'}. Old standing grants are revoked on change; review new grants separately.\n`);
+  } else {
+    io.out('Local repository configuration only; server workspace association unchanged. Use --workspace-id <id> to associate this project.\n');
   }
   if (existing?.projectId === projectId) {
     // Already linked to this project. Still honor a requested --type that isn't
