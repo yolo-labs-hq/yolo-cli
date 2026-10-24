@@ -78,6 +78,7 @@ function printHelp(): void {
       '  kanban import <boardId> <file>            Rebuild a board from a seed document (additive; never overwrites).',
       '    [--workspace <wsId>]                    Sanity-check the workspace bound to this session.',
       '  kanban models                             List the model ids a card can be pinned to, and whether each can run now.',
+      '  kanban focused-delegation <cardId> <file|->  Hand over the Octocove delegation you obtained for a focused card (human-only).',
       '    [--json] [--workspace <wsId>]           Raw JSON instead of the table; sanity-check the workspace.',
       '  routing status                            Background Runner routing: on/off, Jev\'s state and why, policies.',
       '  routing on | off                          Turn routing on or off for cards admitted from now on.',
