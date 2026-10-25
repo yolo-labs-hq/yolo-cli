@@ -61,6 +61,21 @@ const VALID_MINT_RESPONSE = {
   },
 };
 
+// ─── mintSubstrateToken — restricted Runner execution ────────────────────
+describe('work-client — mintSubstrateToken inside a restricted execution', () => {
+  it('refuses before any request, whatever token it was handed', async () => {
+    const { fetch, calls } = makeFetchStub({ jsonBody: {} });
+    await assert.rejects(
+      mintSubstrateToken({
+        commonApiUrl: 'https://api.example.com', userToken: 'a-token-from-somewhere', sessionId: 'sess-1',
+        scopes: ['work.get_artifact'], fetchImpl: fetch, restrictedExecution: () => true,
+      }),
+      (err: unknown) => err instanceof WorkClientError && err.code === 'EXECUTION_RESTRICTED' && !/a-token-from-somewhere/.test(err.message),
+    );
+    assert.equal(calls.length, 0);
+  });
+});
+
 // ─── mintSubstrateToken — request shape ──────────────────────────────────
 describe('work-client — mintSubstrateToken request shape', () => {
   it('POSTs to /internal/mcp/tokens with Authorization: Bearer + correct body', async () => {
