@@ -197,6 +197,9 @@ export function validateManifest(raw: unknown, opts: ScreenshotRefOptions = {}):
     } else {
       if (typeof raw.runtime.port !== 'number' || raw.runtime.port <= 0) errors.push('runtime.port must be a positive number');
       if (raw.runtime.exec !== undefined && !isStr(raw.runtime.exec)) errors.push('runtime.exec must be a non-empty string when present');
+      if (raw.runtime.kind !== undefined && raw.runtime.kind !== 'process' && raw.runtime.kind !== 'worker') {
+        errors.push("runtime.kind must be 'process' | 'worker' when present");
+      }
     }
   }
 
@@ -212,8 +215,19 @@ export function validateManifest(raw: unknown, opts: ScreenshotRefOptions = {}):
       }
     }
   }
-  if (isObj(raw.runtime) && raw.image === undefined && !isStr((raw.runtime as Record<string, unknown>).exec)) {
+  // A worker has neither: it is an edge backend uploaded from the bundle's `_worker/`.
+  if (isObj(raw.runtime) && raw.image === undefined && !isStr((raw.runtime as Record<string, unknown>).exec) && !isWorkerRuntimeManifest(raw)) {
     errors.push('runtime requires either `image` (OCI image, recommended) or `runtime.exec` (bare-process override)');
+  }
+  // Publish-time rule (`validateManifestForPublish`): an image or exec on a
+  // worker would be silently ignored, so refuse it.
+  if (isWorkerRuntimeManifest(raw)) {
+    if (raw.image !== undefined) errors.push("runtime.kind 'worker' runs from the bundle's _worker/ modules — remove `image`, it would be ignored");
+    if ((raw.runtime as Record<string, unknown>).exec !== undefined) errors.push("runtime.kind 'worker' runs from the bundle's _worker/ modules — remove `runtime.exec`, it would be ignored");
+  }
+
+  if (raw.isolation !== undefined && raw.isolation !== 'shared' && raw.isolation !== 'dedicated' && raw.isolation !== 'edge') {
+    errors.push("isolation must be 'shared' | 'dedicated' | 'edge' when present");
   }
 
   const allPerms: unknown[] = [];
@@ -289,7 +303,45 @@ export function publishGateErrors(manifest: unknown): string[] {
 }
 
 /**
- * True if the manifest declares a server-side runtime. Keyed on `runtime` ONLY
+ * True for a `runtime.kind: 'worker'` manifest: a Cloudflare edge tile whose
+ * backend ships IN the bundle under `_worker/` — no image, no podman build.
+ * The server additionally requires its worker placement (`TILEAPP_CF_PLACEMENTS`)
+ * to be on, which the CLI cannot see; with it off the server rejects the
+ * manifest at register and says why.
+ */
+export function isWorkerRuntimeManifest(manifest: unknown): boolean {
+  return isObj(manifest) && isObj(manifest.runtime) && manifest.runtime.kind === 'worker';
+}
+
+/** Directory (in the bundle) holding a worker tile's backend; never served as a static asset. */
+export const TILE_WORKER_BUNDLE_DIR = '_worker/';
+/** The worker backend's main module, relative to the bundle root. */
+export const TILE_WORKER_BUNDLE_ENTRY = `${TILE_WORKER_BUNDLE_DIR}index.js`;
+
+/**
+ * What a worker bundle needs, from its file paths alone. Mirrors the server's
+ * `workerBundleErrors` (`common-api/src/types/tileapp.ts`), which refuses the
+ * upload with `INVALID_WORKER_BUNDLE` — checked here first so a bad bundle
+ * fails before the manifest is registered.
+ */
+export function workerBundleErrors(paths: readonly string[]): string[] {
+  const errors: string[] = [];
+  const backend = paths.filter((p) => p.startsWith(TILE_WORKER_BUNDLE_DIR));
+  if (!backend.includes(TILE_WORKER_BUNDLE_ENTRY)) {
+    errors.push(`a worker tile needs a backend entry module at ${TILE_WORKER_BUNDLE_ENTRY}`);
+  }
+  for (const p of backend) {
+    if (!/\.m?js$/.test(p)) errors.push(`backend files must be .js or .mjs modules: ${JSON.stringify(p)}`);
+  }
+  if (paths.length === backend.length) errors.push(`a worker tile needs UI files outside ${TILE_WORKER_BUNDLE_DIR}`);
+  return errors;
+}
+
+/**
+ * True if the manifest declares a server-side runtime built as a container
+ * image. A worker runtime (`isWorkerRuntimeManifest`) is NOT one: it ships as a
+ * bundle with its backend under `_worker/`, so it needs `surface.entry` on disk
+ * like a pure-UI app. Otherwise keyed on `runtime` ONLY
  * — matching the launcher, which serves a static surface bundle for any manifest
  * WITHOUT `runtime` (`common-api/src/services/tileapp/launcher.ts`: `if
  * (!manifest.runtime) → staticSurfaceUrl`). An `image`-only manifest (no
@@ -298,5 +350,5 @@ export function publishGateErrors(manifest: unknown): string[] {
  * skip the bundle check on an app that fails to render in prod).
  */
 export function isRuntimeManifest(manifest: unknown): boolean {
-  return isObj(manifest) && isObj(manifest.runtime);
+  return isObj(manifest) && isObj(manifest.runtime) && !isWorkerRuntimeManifest(manifest);
 }

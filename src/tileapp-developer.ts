@@ -22,7 +22,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as http from 'node:http';
 import { createServeHandler } from './serve.js';
-import { validateManifest, isRuntimeManifest, publishGateErrors } from './tileapp-validator.js';
+import { validateManifest, isRuntimeManifest, isWorkerRuntimeManifest, publishGateErrors } from './tileapp-validator.js';
 
 /** The mock-broker + helper routes the dev server mounts (under a reserved
  *  prefix so they can't collide with a real bundle asset path). */
@@ -133,7 +133,10 @@ export function runTileAppValidate(opts: ValidateOptions): DevResult {
   const v = validateManifest(read.manifest, {
     allowPlatformHostedScreenshots: !!opts.personal && !isRuntimeManifest(read.manifest),
   });
-  const errors = [...v.errors, ...publishGateErrors(read.manifest)];
+  // The image-digest gate is the marketplace publish rule; a PERSONAL worker app
+  // ships its backend in the bundle and has no image to pin.
+  const skipGate = !!opts.personal && isWorkerRuntimeManifest(read.manifest);
+  const errors = [...v.errors, ...(skipGate ? [] : publishGateErrors(read.manifest))];
 
   // A non-object manifest is fully reported by validateManifest; bail before the
   // bundle/runtime checks (which deref manifest fields) so we never crash on it.
