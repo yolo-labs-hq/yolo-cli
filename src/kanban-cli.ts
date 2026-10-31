@@ -299,96 +299,6 @@ export function formatImportSummary(body: string, boardId: string): string {
   return lines.join('\n');
 }
 
-// ─── focused-delegation ───────────────────────────────────────────────────
-
-export interface KanbanFocusedDelegationOptions {
-  cardId: string;
-  /** Path to the JSON the Octocove claim flow produced, or `-` for stdin. Never a flag value: a token in argv leaks. */
-  file: string;
-  workspaceFlag?: string;
-  fetchImpl?: FetchLike;
-  env?: Record<string, string | undefined>;
-  readFileImpl?: ReadFileImpl;
-}
-
-/** Replace every occurrence of `secret` (when it is long enough to be one) before anything is printed. */
-function redactSecret(text: string, secret: string | undefined): string {
-  return secret && secret.length >= 8 ? text.split(secret).join('[redacted]') : text;
-}
-
-/**
- * `yolo kanban focused-delegation <cardId> <file|->` — the CLI twin of the HUMAN-ONLY route
- * `POST /workspaces/:ws/kanban/cards/:cardId/focused-delegation`. Sends the claim flow's
- * `{ authorization, delegation }` document unmodified through the USER-token helper (never a delegated token, no
- * MCP surface). The bearer it carries is never printed: the server never echoes it, and anything this command prints
- * is redacted of it anyway.
- */
-export async function runKanbanFocusedDelegation(options: KanbanFocusedDelegationOptions): Promise<KanbanResult> {
-  const env = options.env ?? process.env;
-  if (!options.cardId) return fail('usage', 'a cardId is required');
-  if (!options.file) return fail('usage', 'a document path (or - for stdin) is required');
-  const resolved = resolveKanbanContext(env, options.workspaceFlag);
-  if (!resolved.ok) return resolved.failure;
-  const { commonApiUrl, userToken, workspaceId } = resolved;
-
-  const read = options.readFileImpl ?? ((p: string) => (p === '-' ? fs.readFileSync(0, 'utf-8') : defaultReadFile(p)));
-  let contents: string;
-  try { contents = read(options.file); } catch (err) {
-    return fail('usage', `could not read '${options.file}': ${describeError(err)}`);
-  }
-  let secret: string | undefined;
-  try {
-    const parsed = JSON.parse(contents) as { delegation?: { accessToken?: unknown } };
-    secret = typeof parsed?.delegation?.accessToken === 'string' ? parsed.delegation.accessToken : undefined;
-  } catch {
-    // Never quote the document: it holds a bearer.
-    return fail('usage', `'${options.file}' is not valid JSON`);
-  }
-  const path = `/workspaces/${encodeURIComponent(workspaceId)}/kanban/cards/${encodeURIComponent(options.cardId)}/focused-delegation`;
-  let response;
-  try {
-    response = await userRouteRequest({ commonApiUrl, userToken, fetchImpl: options.fetchImpl }, path, { method: 'POST', rawBody: contents });
-  } catch (err) {
-    return fail('http', redactSecret(`kanban.focused_delegation.submit failed: ${describeError(err)}`, secret));
-  }
-  const body = redactSecret(await safeReadText(response), secret);
-  if (!response.ok) {
-    return fail('http', `kanban.focused_delegation.submit failed: HTTP ${response.status} — ${body}`, { status: response.status });
-  }
-  let summary = body;
-  try {
-    const r = JSON.parse(body) as { taskId?: string; delegationId?: string; expiresAt?: string; verbs?: string[] };
-    summary = `Stored delegation ${r.delegationId} for Octocove task ${r.taskId} (expires ${r.expiresAt}; verbs ${(r.verbs ?? []).join(', ')})`;
-  } catch { /* the server's words, already redacted */ }
-  return { ok: true, output: summary, raw: false, workspaceId };
-}
-
-export interface ParsedFocusedDelegationArgs { ok: true; cardId: string; file: string; workspaceFlag?: string }
-
-export function parseKanbanFocusedDelegationArgs(args: string[]): ParsedFocusedDelegationArgs | ParseError {
-  const positional: string[] = [];
-  let workspaceFlag: string | undefined;
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i]!;
-    if (a === '--workspace') {
-      const v = args[++i];
-      if (!v || v.startsWith('--')) return { ok: false, message: '--workspace requires a value' };
-      workspaceFlag = v;
-    } else if (a.startsWith('--workspace=')) {
-      const v = a.slice('--workspace='.length);
-      if (!v) return { ok: false, message: '--workspace requires a value' };
-      workspaceFlag = v;
-    } else if (a !== '-' && a.startsWith('-')) {
-      // No option takes the token: it is read from the document only.
-      return { ok: false, message: `unknown option: ${a}` };
-    } else {
-      positional.push(a);
-    }
-  }
-  if (positional.length !== 2) return { ok: false, message: 'expected <cardId> <file|->' };
-  return { ok: true, cardId: positional[0]!, file: positional[1]!, workspaceFlag };
-}
-
 // ─── Shared resolution ────────────────────────────────────────────────────
 
 type ResolvedContext =
@@ -439,15 +349,6 @@ const EXPORT_USAGE = [
 ].join('\n');
 const IMPORT_USAGE = 'Usage: yolo kanban import <boardId> <file> [--workspace <wsId>]\n';
 const MODELS_USAGE = 'Usage: yolo kanban models [--json] [--workspace <wsId>]\n';
-const FOCUSED_DELEGATION_USAGE = [
-  'Usage: yolo kanban focused-delegation <cardId> <file|-> [--workspace <wsId>]',
-  '',
-  '  Hand Studio the Octocove agent delegation YOU obtained from Octocove\'s claim flow for this card\'s task:',
-  '  a JSON document { authorization: { taskId, projectId, claimAttemptId, delegationId, verbs },',
-  '  delegation: { delegationId, accessToken, tokenType, expiresAt, revocationId } }, read from <file> or stdin (-).',
-  '  Human-only. The token is never printed.',
-  '',
-].join('\n');
 const KANBAN_USAGE = [
   'Usage: yolo kanban <subcommand>',
   '',
@@ -455,7 +356,6 @@ const KANBAN_USAGE = [
   '  export <tileId> [-o <file>|-] Write a board\'s seed document to a file or stdout',
   '  import <boardId> <file>       Create cards on a board from a seed document',
   '  models [--json]               List the model ids a card can be pinned to',
-  '  focused-delegation <cardId> <file|->  Hand over an Octocove delegation for a focused card (human-only)',
   '',
   'Every subcommand takes --workspace <wsId> (defaults to this session\'s workspace).',
   '',
@@ -566,8 +466,7 @@ export async function runKanbanCmd(args: string[], deps: KanbanCmdDeps = {}): Pr
     return 0;
   }
   // `yolo kanban <sub> --help` prints that subcommand's usage rather than failing its parse.
-  const subUsage = sub === 'export' ? EXPORT_USAGE : sub === 'import' ? IMPORT_USAGE : sub === 'models' ? MODELS_USAGE
-    : sub === 'focused-delegation' ? FOCUSED_DELEGATION_USAGE : null;
+  const subUsage = sub === 'export' ? EXPORT_USAGE : sub === 'import' ? IMPORT_USAGE : sub === 'models' ? MODELS_USAGE : null;
   if (subUsage && args.slice(1).some((a) => a === '--help' || a === '-h')) {
     process.stdout.write(subUsage);
     return 0;
@@ -581,16 +480,6 @@ export async function runKanbanCmd(args: string[], deps: KanbanCmdDeps = {}): Pr
       return 64;
     }
     return report(await runKanbanModels({ json: parsed.json, workspaceFlag: parsed.workspaceFlag, ...deps }));
-  }
-
-  if (sub === 'focused-delegation') {
-    const parsed = parseKanbanFocusedDelegationArgs(args.slice(1));
-    if (!parsed.ok) {
-      process.stderr.write(`yolo: kanban focused-delegation: ${parsed.message}\n`);
-      process.stderr.write(FOCUSED_DELEGATION_USAGE);
-      return 64;
-    }
-    return report(await runKanbanFocusedDelegation({ cardId: parsed.cardId, file: parsed.file, workspaceFlag: parsed.workspaceFlag, ...deps }));
   }
 
   if (sub === 'export') {
