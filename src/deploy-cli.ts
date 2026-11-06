@@ -25,6 +25,7 @@
  */
 
 import * as path from 'node:path';
+import { formatOwnerApprovalPending, ownerApprovalRequestedOf } from './pod-owner-approval.js';
 import { statSync } from 'node:fs';
 
 /** Path kind for `validate`: a file, a directory, something else, or missing. */
@@ -806,7 +807,13 @@ async function runLinkCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
     const linked = await (deps.setProjectWorkspaceImpl ?? setProjectWorkspace)(auth.context, projectId!, {
       workspaceId, expectedWorkspaceId: snapshot.project.workspaceId ?? null,
     });
-    if (!linked.ok) { io.err(`${formatFail(linked)}\n`); return exitCodeForFailure(linked.kind); }
+    if (!linked.ok) {
+      // D040 P2: from a pod, the re-link is staged for the owner (202), not performed.
+      const staged = linked.kind === 'awaiting-approval' && linked.body ? ownerApprovalRequestedOf(linked.status ?? 0, linked.body) : null;
+      if (staged) { io.out(`${formatOwnerApprovalPending(staged, `linking project ${projectId} to workspace ${workspaceId ?? 'none'}`)}\n`); return 3; }
+      io.err(`${formatFail(linked)}\n`);
+      return exitCodeForFailure(linked.kind);
+    }
     const after = await read(auth.context, projectId!);
     if (!after.ok) { io.err(`${formatFail(after)}\n`); return exitCodeForFailure(after.kind); }
     if ((after.value as { project?: { workspaceId?: string | null } } | null)?.project?.workspaceId !== (workspaceId?.toLowerCase() ?? null)) {

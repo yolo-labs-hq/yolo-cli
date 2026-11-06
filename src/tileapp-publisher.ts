@@ -96,7 +96,7 @@ export async function runTileAppSign(opts: SignOptions): Promise<CmdResult> {
   } catch (e) {
     return { ok: false, kind: 'http', message: `sign request failed: ${(e as Error).message}` };
   }
-  if (!res.ok) return { ok: false, kind: 'http', message: `sign failed: HTTP ${res.status} — ${await safeText(res)}` };
+  if (!res.ok) return { ok: false, kind: 'http', message: podRefusalMessage('sign', res.status, await safeText(res)) };
   const json = (await res.json()) as { signature?: string; publisherKeyId?: string };
   if (!json.signature || !json.publisherKeyId) return { ok: false, kind: 'http', message: 'sign response missing signature/publisherKeyId' };
 
@@ -135,10 +135,22 @@ export async function runTileAppPublish(opts: PublishOptions): Promise<CmdResult
   } catch (e) {
     return { ok: false, kind: 'http', message: `publish request failed: ${(e as Error).message}` };
   }
-  if (!res.ok) return { ok: false, kind: 'http', message: `publish failed: HTTP ${res.status} — ${await safeText(res)}` };
+  if (!res.ok) return { ok: false, kind: 'http', message: podRefusalMessage('publish', res.status, await safeText(res)) };
   const json = (await res.json()) as { releaseId?: string; status?: string };
   if (!json.releaseId) return { ok: false, kind: 'http', message: 'publish response missing releaseId' };
   return { ok: true, output: `Submitted ${json.releaseId} (status: ${json.status ?? 'submitted'}) — awaiting review` };
+}
+
+/**
+ * MOGUL-D040 P2 / OD-5: marketplace sign/publish is a human act and is refused
+ * to a workspace pod's credential (403 POD_TOKEN_FORBIDDEN). Say so plainly
+ * instead of dumping the JSON body.
+ */
+function podRefusalMessage(step: 'sign' | 'publish', status: number, body: string): string {
+  if (status === 403 && body.includes('POD_TOKEN_FORBIDDEN')) {
+    return `${step} refused: marketplace publishing cannot be done from a workspace pod. The owner publishes from Studio (or a signed-in terminal outside the workspace); use \`yolo tileapp publish --personal\` for a personal app.`;
+  }
+  return `${step} failed: HTTP ${status} — ${body}`;
 }
 
 export function exitCodeForFailure(kind: 'usage' | 'auth' | 'io' | 'http'): number {

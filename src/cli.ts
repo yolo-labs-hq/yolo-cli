@@ -296,6 +296,8 @@ async function runTileAppPublishCmd(args: string[]): Promise<number> {
     const { runTileAppPublishPersonal, exitCodeForFailure } = await import('./tileapp-personal.js');
     const result = await runTileAppPublishPersonal({ manifestPath, bundleDir, context, dockerfile, builder, live });
     if (result.ok) { process.stdout.write(`${result.output}\n`); return 0; }
+    // D040 P2: staged for the owner — PENDING on stdout, not a FAIL.
+    if (result.kind === 'awaiting-approval') { process.stdout.write(`${result.message}\n`); return exitCodeForFailure(result.kind); }
     process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
     return exitCodeForFailure(result.kind);
   }
@@ -341,6 +343,7 @@ async function runTileAppMediaCmd(args: string[]): Promise<number> {
   if (!manifestPath) return tileAppUsage('media', 'a manifest path is required');
   const result = await runTileAppMediaPush({ manifestPath, dir });
   if (result.ok) { process.stdout.write(`${result.output}\n`); return 0; }
+  if (result.kind === 'awaiting-approval') { process.stdout.write(`${result.message}\n`); return exitCodeForFailure(result.kind); }
   process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
   return exitCodeForFailure(result.kind);
 }

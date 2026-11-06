@@ -30,6 +30,7 @@
 
 import { resolveUserToken, type ReadFileImpl } from './auth-context.js';
 import { userRouteRequest } from './work-client.js';
+import { ownerApprovalRequestedOf } from './pod-owner-approval.js';
 
 // ─── Fetch shape ──────────────────────────────────────────────────────────
 
@@ -757,11 +758,27 @@ async function jsonLeg(
     return networkFailure(err);
   }
   if (response.ok) {
+    let value: unknown;
     try {
-      return { ok: true, value: await response.json() };
+      value = await response.json();
     } catch {
       return { ok: true, value: {} };
     }
+    // MOGUL-D040 P2: from a pod, an account-wide step is STAGED for the owner
+    // (202), not performed. Not a success, and never resent: the approval runs it.
+    const staged = ownerApprovalRequestedOf(response.status, value);
+    if (staged) {
+      return {
+        ok: false,
+        kind: 'awaiting-approval',
+        message: staged.message,
+        status: response.status,
+        detail: { approvalId: staged.approvalId, ...(staged.statement ? { statement: staged.statement } : {}), ...(staged.expiresAt ? { expiresAt: staged.expiresAt } : {}) },
+        ...(staged.hint ? { hint: staged.hint } : {}),
+        body: value as Record<string, unknown>,
+      };
+    }
+    return { ok: true, value };
   }
   return mapErrorResponse(response);
 }

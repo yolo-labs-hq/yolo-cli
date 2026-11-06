@@ -24,6 +24,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { resolveUserToken } from './auth-context.js';
+import { formatOwnerApprovalPending, ownerApprovalRequestedOf } from './pod-owner-approval.js';
 import { validateManifest, isRuntimeManifest, isWorkerRuntimeManifest, workerBundleErrors } from './tileapp-validator.js';
 import { readImageDimensions } from './image-dimensions.js';
 import { resolveBundleDir } from './tileapp-developer.js';
@@ -52,9 +53,11 @@ function defaultExec(file: string, args: string[]): Promise<{ code: number | nul
 
 export type CmdResult =
   | { ok: true; output: string }
-  | { ok: false; kind: 'usage' | 'auth' | 'io' | 'http' | 'validation'; message: string };
+  | { ok: false; kind: 'usage' | 'auth' | 'io' | 'http' | 'validation' | 'awaiting-approval'; message: string };
 
-export function exitCodeForFailure(kind: 'usage' | 'auth' | 'io' | 'http' | 'validation'): number {
+export function exitCodeForFailure(kind: 'usage' | 'auth' | 'io' | 'http' | 'validation' | 'awaiting-approval'): number {
+  // MOGUL-D040 P2: staged for the workspace owner — NOT an error (same exit as a pending prod ship).
+  if (kind === 'awaiting-approval') return 3;
   if (kind === 'http') return 1;
   if (kind === 'validation') return 65; // EX_DATAERR
   return 64; // EX_USAGE / auth / io
@@ -83,6 +86,18 @@ function resolveAuth(env: Record<string, string | undefined>): Auth {
 
 async function safeText(res: { text(): Promise<string> }): Promise<string> {
   try { return await res.text(); } catch { return '<no body>'; }
+}
+
+/**
+ * MOGUL-D040 P2: a 202 staged-approval answer (the step was NOT performed; the
+ * owner approves it in Studio and it then runs as the owner). Null otherwise.
+ */
+async function stagedForOwner(res: { status: number; clone?: () => { json(): Promise<unknown> }; json(): Promise<unknown> }, what: string): Promise<CmdResult | null> {
+  if (res.status !== 202) return null;
+  let body: unknown;
+  try { body = await (res.clone ? res.clone() : res).json(); } catch { return null; }
+  const staged = ownerApprovalRequestedOf(res.status, body);
+  return staged ? { ok: false, kind: 'awaiting-approval', message: formatOwnerApprovalPending(staged, what) } : null;
 }
 
 function readManifest(p: string): { ok: true; manifest: Record<string, unknown> } | { ok: false; message: string } {
@@ -384,6 +399,8 @@ export async function runTileAppMediaPush(opts: MediaPushOptions): Promise<CmdRe
         headers,
         body: JSON.stringify({ files: batch }),
       });
+      const staged = await stagedForOwner(res, `uploading media for ${appId}`);
+      if (staged) return staged;
       if (!res.ok) {
         const sofar = uploaded.length > 0 ? ` (${uploaded.length} image(s) already uploaded)` : '';
         return { ok: false, kind: 'http', message: `media upload failed: HTTP ${res.status} — ${await safeText(res)}${sofar}` };
@@ -561,6 +578,8 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
       headers,
       body: JSON.stringify({ id: localId, manifest: read.manifest }),
     });
+    const staged = await stagedForOwner(res, `registering personal app '${localId}'`);
+    if (staged) return staged;
     if (!res.ok) return { ok: false, kind: 'http', message: `register failed: HTTP ${res.status} — ${await safeText(res)}` };
     const json = (await res.json()) as { appId?: string };
     if (!json.appId) return { ok: false, kind: 'http', message: 'register response missing appId' };
@@ -577,6 +596,8 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
       headers,
       body: JSON.stringify({ files: collected.files, ...(opts.live ? { live: true } : {}) }),
     });
+    const staged = await stagedForOwner(res, `uploading the bundle of ${appId}`);
+    if (staged) return staged;
     if (!res.ok) {
       const body = await safeText(res);
       if (res.status === 409 && body.includes(DYNAMIC_WORKERS_DISABLED)) {
