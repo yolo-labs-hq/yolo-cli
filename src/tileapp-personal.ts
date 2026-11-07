@@ -23,7 +23,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { resolveUserToken } from './auth-context.js';
+import { podSessionTelemetryHeaders, resolveUserToken } from './auth-context.js';
 import { formatOwnerApprovalPending, ownerApprovalRequestedOf } from './pod-owner-approval.js';
 import { validateManifest, isRuntimeManifest, isWorkerRuntimeManifest, workerBundleErrors } from './tileapp-validator.js';
 import { readImageDimensions } from './image-dimensions.js';
@@ -335,7 +335,7 @@ export async function runTileAppMediaPush(opts: MediaPushOptions): Promise<CmdRe
 
   const fetchImpl = opts.fetchImpl ?? fetch;
   const base = apiBase(auth.commonApiUrl);
-  const headers = { 'content-type': 'application/json', authorization: `Bearer ${auth.userToken}` };
+  const headers = { 'content-type': 'application/json', authorization: `Bearer ${auth.userToken}`, ...podSessionTelemetryHeaders() };
 
   // Resolve the namespaced appId (pa-<ownerId>-<localId>) — the caller only
   // knows the local slug; the owner half is server-side.
@@ -573,7 +573,7 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
 
   const fetchImpl = opts.fetchImpl ?? fetch;
   const base = apiBase(auth.commonApiUrl);
-  const headers = { 'content-type': 'application/json', authorization: `Bearer ${auth.userToken}` };
+  const headers = { 'content-type': 'application/json', authorization: `Bearer ${auth.userToken}`, ...podSessionTelemetryHeaders() };
 
   // MOGUL-D040 P2 ruling (2026-11-07): inside a workspace pod, register + upload
   // go in ONE request, so the owner approves the publish once. Falls back to the
@@ -819,6 +819,7 @@ async function publishRuntime(p: RuntimePublishParams): Promise<CmdResult> {
       headers: {
         'content-type': 'application/octet-stream',
         authorization: `Bearer ${p.auth.userToken}`,
+        ...podSessionTelemetryHeaders(),
         'x-tileapp-manifest': manifestHeader,
       },
       body: fs.createReadStream(archiveTmp),

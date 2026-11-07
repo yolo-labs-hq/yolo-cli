@@ -28,7 +28,7 @@
  * or the real FS — the work-client.test.ts convention.
  */
 
-import { resolveUserToken, type ReadFileImpl } from './auth-context.js';
+import { podSessionTelemetryHeaders, resolveUserToken, type ReadFileImpl } from './auth-context.js';
 import { userRouteRequest } from './work-client.js';
 import { ownerApprovalRequestedOf } from './pod-owner-approval.js';
 
@@ -307,7 +307,7 @@ export async function finalizeShip(
   if (!fetchImpl) return noFetchFailure();
   const url = `${stripTrailingSlash(ctx.commonApiUrl)}/v1/deploy/projects/${enc(projectId)}/ship/${enc(shipId)}/finalize`;
   // Optional session provenance for the hosting audit record.
-  const requestHeaders = sessionContextHeaders(ctx.env);
+  const requestHeaders = { ...sessionContextHeaders(ctx.env), ...podSessionTelemetryHeaders(ctx.env) };
   // Resume-after-grant: the pending-store rerun redeems the operator's grant
   // explicitly (x-approval-id → approvalNonce server-side), which yields crisp
   // approval-pending/-denied/-expired outcomes instead of the nonce-less

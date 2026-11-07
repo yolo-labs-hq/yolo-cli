@@ -15,7 +15,7 @@
  */
 
 import fs from 'node:fs';
-import { resolveUserToken } from './auth-context.js';
+import { podSessionTelemetryHeaders, resolveUserToken } from './auth-context.js';
 
 export type FetchLike = typeof fetch;
 
@@ -90,7 +90,7 @@ export async function runTileAppSign(opts: SignOptions): Promise<CmdResult> {
   try {
     res = await fetchImpl(`${apiBase(auth.commonApiUrl)}/publisher/sign`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${auth.userToken}` },
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${auth.userToken}`, ...podSessionTelemetryHeaders() },
       body: JSON.stringify({ publisherId: opts.publisherId, keyId: opts.keyId, manifest: read.manifest }),
     });
   } catch (e) {
@@ -129,7 +129,7 @@ export async function runTileAppPublish(opts: PublishOptions): Promise<CmdResult
     if (opts.imageDigest) body.imageDigest = opts.imageDigest;
     res = await fetchImpl(`${apiBase(auth.commonApiUrl)}/publisher/publish`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${auth.userToken}` },
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${auth.userToken}`, ...podSessionTelemetryHeaders() },
       body: JSON.stringify(body),
     });
   } catch (e) {

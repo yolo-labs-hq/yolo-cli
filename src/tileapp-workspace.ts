@@ -22,7 +22,7 @@
  * same resolution as `tileapp publish --personal`.
  */
 
-import { resolveUserToken } from './auth-context.js';
+import { podSessionTelemetryHeaders, resolveUserToken } from './auth-context.js';
 
 export type FetchLike = typeof fetch;
 
@@ -77,7 +77,7 @@ export async function runTileAppInstall(opts: InstallOptions): Promise<CmdResult
   try {
     const res = await fetchImpl(`${base}/tileapps/${encodeURIComponent(opts.appId)}/install`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${auth.userToken}` },
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${auth.userToken}`, ...podSessionTelemetryHeaders() },
       body: JSON.stringify(body),
     });
     if (!res.ok) return { ok: false, kind: 'http', message: `install failed: HTTP ${res.status} — ${await safeText(res)}` };
@@ -131,7 +131,7 @@ export async function runTileAppAddTile(opts: AddTileOptions): Promise<CmdResult
 
   const fetchImpl = opts.fetchImpl ?? fetch;
   const base = apiBase(auth.commonApiUrl);
-  const headers = { 'content-type': 'application/json', authorization: `Bearer ${auth.userToken}` };
+  const headers = { 'content-type': 'application/json', authorization: `Bearer ${auth.userToken}`, ...podSessionTelemetryHeaders() };
 
   // Preflight 1 — the app must EXIST. Always performed (even with explicit
   // --version/--name): the tiles route validates only the tile shape, so

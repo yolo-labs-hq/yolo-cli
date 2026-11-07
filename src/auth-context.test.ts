@@ -6,7 +6,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  EXECUTION_MARKER_ENVS, EXECUTION_WORKER_UID, inRestrictedExecution, resolveSubstrateContext, resolveUserToken,
+  EXECUTION_MARKER_ENVS, EXECUTION_WORKER_UID, inRestrictedExecution, podSessionTelemetryHeaders, resolveSubstrateContext, resolveUserToken,
 } from './auth-context.js';
 
 const BASE_ENV = {
@@ -143,5 +143,13 @@ describe('resolveSubstrateContext — restricted Runner execution', () => {
       const result = resolveSubstrateContext(env, fileStub({ '/home/yolo/.config/yolo/token': 'file-token' }));
       assert.deepEqual(result, { ok: true, context: { sessionId: 'sess-1', commonApiUrl: 'https://api.example.com', userToken: 'file-token' } });
     }
+  });
+});
+
+describe('X-Yolo-Pod-Session telemetry header (MOGUL-D040 P1)', () => {
+  it('names a 24-hex SESSION_ID, lowercased, and nothing else', () => {
+    assert.deepEqual(podSessionTelemetryHeaders({ SESSION_ID: 'ABCDEFABCDEFABCDEFABCDEF' }), { 'X-Yolo-Pod-Session': 'abcdefabcdefabcdefabcdef' });
+    assert.deepEqual(podSessionTelemetryHeaders({ SESSION_ID: 'sess-1' }), {});
+    assert.deepEqual(podSessionTelemetryHeaders({}), {});
   });
 });

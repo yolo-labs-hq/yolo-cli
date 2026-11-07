@@ -1,6 +1,6 @@
 /** Session-bound delegated authentication and workspace artifact transport. */
 
-import { inRestrictedExecution, RESTRICTED_EXECUTION_MESSAGE } from './auth-context.js';
+import { inRestrictedExecution, podSessionTelemetryHeaders, RESTRICTED_EXECUTION_MESSAGE } from './auth-context.js';
 
 export const SUBSTRATE_CLI_AGENT_ID = 'substrate-cli';
 
@@ -99,6 +99,7 @@ export async function mintSubstrateToken(options: MintTokenOptions): Promise<Min
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${options.userToken}`,
+      ...podSessionTelemetryHeaders(),
     },
     body: JSON.stringify({
       sessionId: options.sessionId,
@@ -245,7 +246,7 @@ export async function userRouteRequest(
   if (!options.userToken) {
     throw new WorkClientError('no user token available for user-route request', 0, 'INTERNAL');
   }
-  const authHeaders: Record<string, string> = { Authorization: `Bearer ${options.userToken}` };
+  const authHeaders: Record<string, string> = { Authorization: `Bearer ${options.userToken}`, ...podSessionTelemetryHeaders() };
   const url = `${stripTrailingSlash(options.commonApiUrl)}/v1${routePath}`;
   const headers: Record<string, string> = {
     ...(init.headers ?? {}),

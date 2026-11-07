@@ -13,7 +13,7 @@
  * Exit codes: 0 success · 1 http · 64 usage/auth.
  */
 
-import { resolveSubstrateContext } from './auth-context.js';
+import { podSessionTelemetryHeaders, resolveSubstrateContext } from './auth-context.js';
 import { SUBSTRATE_CLI_AGENT_ID, type FetchLike } from './work-client.js';
 
 export interface McpScopesOptions {
@@ -58,7 +58,7 @@ export async function runMcpScopes(options: McpScopesOptions): Promise<McpScopes
   try {
     const response = await fetchImpl(url, {
       method: 'GET',
-      headers: { Authorization: `Bearer ${userToken}` },
+      headers: { Authorization: `Bearer ${userToken}`, ...podSessionTelemetryHeaders() },
     });
     if (!response.ok) {
       const text = await safeReadText(response);

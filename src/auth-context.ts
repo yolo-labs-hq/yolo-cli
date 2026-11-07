@@ -132,6 +132,18 @@ export function resolveUserToken(
   return undefined;
 }
 
+/**
+ * MOGUL-D040 P1 (docs/plans/d040-pod-scoped-token.md §4.2): `X-Yolo-Pod-Session`
+ * names this pod's workspace session so common-api can COUNT legacy (unclaimed)
+ * pod tokens per route. Telemetry only: the server never authorizes on it. Sent
+ * with the user token, and only when SESSION_ID is a 24-hex session id (the
+ * same header container-api's `user-token.js` sends).
+ */
+export function podSessionTelemetryHeaders(env: Record<string, string | undefined> = process.env): Record<string, string> {
+  const sid = typeof env.SESSION_ID === 'string' ? env.SESSION_ID.trim().toLowerCase() : '';
+  return /^[a-f0-9]{24}$/.test(sid) ? { 'X-Yolo-Pod-Session': sid } : {};
+}
+
 export function defaultReadFile(filePath: string): string | undefined {
   try {
     return fs.readFileSync(filePath, 'utf-8');
