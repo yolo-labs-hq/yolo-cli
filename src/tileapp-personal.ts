@@ -84,6 +84,11 @@ function resolveAuth(env: Record<string, string | undefined>): Auth {
   return { ok: true, commonApiUrl, userToken };
 }
 
+/** A workspace pod (container-api sets SESSION_ID; the deploy CLI reads the same marker). */
+function inWorkspacePod(env: Record<string, string | undefined>): boolean {
+  return typeof env.SESSION_ID === 'string' && env.SESSION_ID.length > 0;
+}
+
 async function safeText(res: { text(): Promise<string> }): Promise<string> {
   try { return await res.text(); } catch { return '<no body>'; }
 }
@@ -570,44 +575,81 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
   const base = apiBase(auth.commonApiUrl);
   const headers = { 'content-type': 'application/json', authorization: `Bearer ${auth.userToken}` };
 
-  // 1) Register the manifest (id + publisher are stamped server-side).
-  let appId: string;
-  try {
-    const res = await fetchImpl(`${base}/tileapps/personal`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ id: localId, manifest: read.manifest }),
-    });
-    const staged = await stagedForOwner(res, `registering personal app '${localId}'`);
-    if (staged) return staged;
-    if (!res.ok) return { ok: false, kind: 'http', message: `register failed: HTTP ${res.status} — ${await safeText(res)}` };
-    const json = (await res.json()) as { appId?: string };
-    if (!json.appId) return { ok: false, kind: 'http', message: 'register response missing appId' };
-    appId = json.appId;
-  } catch (e) {
-    return { ok: false, kind: 'http', message: `register request failed: ${(e as Error).message}` };
+  // MOGUL-D040 P2 ruling (2026-11-07): inside a workspace pod, register + upload
+  // go in ONE request, so the owner approves the publish once. Falls back to the
+  // two-step path below on a server that predates the batch route.
+  let uploadJson: BundleUploadResponse = {};
+  let appId = '';
+  let batched = false;
+  if (inWorkspacePod(env)) {
+    try {
+      const res = await fetchImpl(`${base}/tileapps/personal/publish-batch`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ id: localId, manifest: read.manifest, files: collected.files, ...(opts.live ? { live: true } : {}) }),
+      });
+      const staged = await stagedForOwner(res, `publishing personal app '${localId}'`);
+      if (staged) return staged;
+      const text = await safeText(res);
+      let json: { appId?: string; bundle?: BundleUploadResponse; failedStep?: string; code?: string } = {};
+      try { json = JSON.parse(text) as typeof json; } catch { /* not JSON */ }
+      const missingRoute = res.status === 404 && json.code !== 'feature-disabled';
+      if (!missingRoute) {
+        if (!res.ok) {
+          if (res.status === 409 && text.includes(DYNAMIC_WORKERS_DISABLED)) {
+            return { ok: false, kind: 'http', message: DYNAMIC_WORKERS_DISABLED_MESSAGE };
+          }
+          const step = json.failedStep === 'bundle' ? 'bundle upload' : 'register';
+          return { ok: false, kind: 'http', message: `${step} failed: HTTP ${res.status} — ${text}` };
+        }
+        if (!json.appId) return { ok: false, kind: 'http', message: 'publish response missing appId' };
+        appId = json.appId;
+        uploadJson = json.bundle ?? {};
+        batched = true;
+      }
+    } catch (e) {
+      return { ok: false, kind: 'http', message: `publish request failed: ${(e as Error).message}` };
+    }
   }
 
-  // 2) Upload the bundle.
-  let uploadJson: BundleUploadResponse = {};
-  try {
-    const res = await fetchImpl(`${base}/tileapps/personal/${encodeURIComponent(appId)}/bundle`, {
-      method: 'PUT',
-      headers,
-      body: JSON.stringify({ files: collected.files, ...(opts.live ? { live: true } : {}) }),
-    });
-    const staged = await stagedForOwner(res, `uploading the bundle of ${appId}`);
-    if (staged) return staged;
-    if (!res.ok) {
-      const body = await safeText(res);
-      if (res.status === 409 && body.includes(DYNAMIC_WORKERS_DISABLED)) {
-        return { ok: false, kind: 'http', message: DYNAMIC_WORKERS_DISABLED_MESSAGE };
-      }
-      return { ok: false, kind: 'http', message: `bundle upload failed: HTTP ${res.status} — ${body}` };
+  if (!batched) {
+    // 1) Register the manifest (id + publisher are stamped server-side).
+    try {
+      const res = await fetchImpl(`${base}/tileapps/personal`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ id: localId, manifest: read.manifest }),
+      });
+      const staged = await stagedForOwner(res, `registering personal app '${localId}'`);
+      if (staged) return staged;
+      if (!res.ok) return { ok: false, kind: 'http', message: `register failed: HTTP ${res.status} — ${await safeText(res)}` };
+      const json = (await res.json()) as { appId?: string };
+      if (!json.appId) return { ok: false, kind: 'http', message: 'register response missing appId' };
+      appId = json.appId;
+    } catch (e) {
+      return { ok: false, kind: 'http', message: `register request failed: ${(e as Error).message}` };
     }
-    try { uploadJson = ((await res.json()) ?? {}) as BundleUploadResponse; } catch { /* older servers: no report */ }
-  } catch (e) {
-    return { ok: false, kind: 'http', message: `bundle upload request failed: ${(e as Error).message}` };
+
+    // 2) Upload the bundle.
+    try {
+      const res = await fetchImpl(`${base}/tileapps/personal/${encodeURIComponent(appId)}/bundle`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ files: collected.files, ...(opts.live ? { live: true } : {}) }),
+      });
+      const staged = await stagedForOwner(res, `uploading the bundle of ${appId}`);
+      if (staged) return staged;
+      if (!res.ok) {
+        const body = await safeText(res);
+        if (res.status === 409 && body.includes(DYNAMIC_WORKERS_DISABLED)) {
+          return { ok: false, kind: 'http', message: DYNAMIC_WORKERS_DISABLED_MESSAGE };
+        }
+        return { ok: false, kind: 'http', message: `bundle upload failed: HTTP ${res.status} — ${body}` };
+      }
+      try { uploadJson = ((await res.json()) ?? {}) as BundleUploadResponse; } catch { /* older servers: no report */ }
+    } catch (e) {
+      return { ok: false, kind: 'http', message: `bundle upload request failed: ${(e as Error).message}` };
+    }
   }
 
   const summary = `Published ${appId} (${collected.files.length} file${collected.files.length === 1 ? '' : 's'}, ${collected.totalBytes} bytes)`;

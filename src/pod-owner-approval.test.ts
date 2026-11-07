@@ -120,6 +120,48 @@ describe('tileapp publish --personal from a pod', () => {
   });
 });
 
+describe('tileapp publish --personal inside a pod: ONE request, ONE approval (ruling 2026-11-07)', () => {
+  const POD_ENV = { ...ENV, SESSION_ID: 'sess-1' };
+  function scaffold(): string {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'yolo-pod-batch-'));
+    runTileAppInit({ name: 'clock', cwd });
+    return path.join(cwd, 'clock', 'tileapp.json');
+  }
+
+  it('sends register + bundle as one publish-batch call and reports the staged approval (exit 3)', async () => {
+    const calls: string[] = [];
+    const r = await runTileAppPublishPersonal({ manifestPath: scaffold(), env: POD_ENV, fetchImpl: stubFetch(() => ({ status: 202, body: STAGED }), calls) });
+    assert.deepEqual(calls.map((c) => c.replace('https://api.example.com', '')), ['POST /v1/tileapps/personal/publish-batch']);
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.equal(r.kind, 'awaiting-approval');
+      assert.match(r.message, /publishing personal app 'clock' needs the workspace owner's approval/);
+    }
+  });
+
+  it('a direct success (boundary not enforcing) publishes in one call', async () => {
+    const calls: string[] = [];
+    const r = await runTileAppPublishPersonal({
+      manifestPath: scaffold(), env: POD_ENV,
+      fetchImpl: stubFetch(() => ({ status: 201, body: { appId: 'pa-x-clock', created: true, bundle: { uploaded: 2 } } }), calls),
+    });
+    assert.equal(r.ok, true, r.ok ? '' : (r as { message: string }).message);
+    assert.equal(calls.length, 1);
+    if (r.ok) assert.match(r.output, /Published pa-x-clock/);
+  });
+
+  it('falls back to the two-step path on a server without the batch route', async () => {
+    const calls: string[] = [];
+    const r = await runTileAppPublishPersonal({
+      manifestPath: scaffold(), env: POD_ENV,
+      fetchImpl: stubFetch((url) => (url.endsWith('/publish-batch') ? { status: 404, body: { error: 'Not found' } }
+        : url.endsWith('/tileapps/personal') ? { status: 201, body: { appId: 'pa-x-clock' } } : { status: 200, body: { uploaded: 2 } }), calls),
+    });
+    assert.equal(r.ok, true);
+    assert.equal(calls.length, 3);
+  });
+});
+
 describe('tileapp publish (marketplace) from a pod', () => {
   it('says plainly that it is refused from a workspace pod', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yolo-pod-publisher-'));
