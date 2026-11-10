@@ -80,6 +80,12 @@ export interface DeployConfig {
   worker?: DeployWorkerConfig;
   /** Passed through ship/start → WfP upload metadata (Next.js needs `nodejs_compat`). */
   compatibilityFlags?: string[];
+  /**
+   * Cron triggers (five-field UTC). When present it WINS over wrangler
+   * `triggers.crons`; `[]` explicitly ships with no schedule. Validated
+   * server-side (≤3, ≥5 min apart, weekdays by name).
+   */
+  crons?: string[];
   /** Binding EXPECTATIONS; mismatch at ship is a warning, not a failure. */
   bindings?: DeployBinding[];
 }
@@ -358,6 +364,18 @@ export function validateDeployConfig(value: unknown): ValidateDeployConfigResult
     }
   }
 
+  if (obj.crons !== undefined) {
+    if (!Array.isArray(obj.crons)) {
+      errors.push({ path: 'crons', message: `must be an array of cron strings, got ${describe(obj.crons)}` });
+    } else {
+      obj.crons.forEach((cron, i) => {
+        if (typeof cron !== 'string' || cron.trim() === '') {
+          errors.push({ path: `crons[${i}]`, message: `must be a non-empty cron string, got ${describe(cron)}` });
+        }
+      });
+    }
+  }
+
   if (obj.bindings !== undefined) {
     if (!Array.isArray(obj.bindings)) {
       errors.push({ path: 'bindings', message: `must be an array, got ${describe(obj.bindings)}` });
@@ -385,7 +403,7 @@ export function validateDeployConfig(value: unknown): ValidateDeployConfigResult
 // surfaced as warnings so a silently-ignored field doesn't mislead the author.
 // `bindings[]` entries intentionally allow extra keys (provisioning hints), so
 // they're excluded here.
-const KNOWN_TOP_KEYS = new Set(['$version', 'projectId', 'slug', 'type', 'build', 'worker', 'compatibilityFlags', 'bindings']);
+const KNOWN_TOP_KEYS = new Set(['$version', 'projectId', 'slug', 'type', 'build', 'worker', 'compatibilityFlags', 'crons', 'bindings']);
 const KNOWN_BUILD_KEYS = new Set(['command', 'outputDir']);
 const KNOWN_WORKER_KEYS = new Set(['entry', 'prebuilt', 'assetsDir']);
 
@@ -433,6 +451,7 @@ function canonicalize(config: DeployConfig): Record<string, unknown> {
     out.worker = worker;
   }
   if (config.compatibilityFlags !== undefined) out.compatibilityFlags = [...config.compatibilityFlags];
+  if (config.crons !== undefined) out.crons = [...config.crons];
   if (config.bindings !== undefined) {
     out.bindings = config.bindings.map((b) => {
       const entry: Record<string, unknown> = { kind: b.kind, binding: b.binding };

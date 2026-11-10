@@ -124,6 +124,16 @@ describe('deploy-config — validateDeployConfig', () => {
     }
   });
 
+  it('accepts crons as an array of non-empty strings and rejects anything else', () => {
+    const ok = validateDeployConfig({ $version: 1, crons: ['*/15 * * * *'] });
+    assert.equal(ok.ok, true);
+    if (ok.ok) assert.deepEqual(ok.warnings, []);
+    const bad = validateDeployConfig({ $version: 1, crons: ['', 3] });
+    assert.equal(bad.ok, false);
+    if (!bad.ok) assert.deepEqual(bad.errors.map((e) => e.path), ['crons[0]', 'crons[1]']);
+    assert.equal(validateDeployConfig({ $version: 1, crons: '*/5 * * * *' }).ok, false);
+  });
+
   it('collects ALL violations, not just the first', () => {
     const res = validateDeployConfig({
       $version: 1,

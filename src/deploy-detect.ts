@@ -422,6 +422,103 @@ function readWranglerConfig(cwd: string, read: ReadFileImpl): WranglerKeys | und
   return undefined;
 }
 
+/** Result of reading wrangler `triggers.crons` (top level only). */
+export type WranglerCronsResult =
+  | { ok: true; crons: string[]; sourceFile: string }
+  | { ok: true; crons: undefined }
+  | { ok: false; message: string };
+
+/**
+ * Read top-level `triggers.crons` from wrangler.jsonc / wrangler.json /
+ * wrangler.toml. YOLO Host used to DROP these silently; now they ship with the
+ * release (the server validates them and refuses while the platform flag is
+ * off). A malformed stanza is an error, never a silent skip. Env-scoped
+ * triggers (`env.<name>.triggers`) are not read — wrangler's env overrides are
+ * not a YOLO Host concept.
+ */
+export function readWranglerCrons(cwd: string, readFileImpl?: ReadFileImpl): WranglerCronsResult {
+  const read = readFileImpl ?? defaultReadFile;
+  for (const name of ['wrangler.jsonc', 'wrangler.json']) {
+    const text = read(path.join(cwd, name));
+    if (text === undefined) continue;
+    const parsed = parseJsonc(text);
+    if (parsed === undefined) return { ok: true, crons: undefined };
+    const triggers = parsed.triggers;
+    if (triggers === undefined || triggers === null) {
+      const envs = parsed.env;
+      const envCrons = envs !== null && typeof envs === 'object' && !Array.isArray(envs)
+        && Object.values(envs).some((e) => {
+          const t = e !== null && typeof e === 'object' ? (e as Record<string, unknown>).triggers : undefined;
+          return t !== null && typeof t === 'object' && Array.isArray((t as Record<string, unknown>).crons)
+            && ((t as Record<string, unknown>).crons as unknown[]).length > 0;
+        });
+      if (envCrons) {
+        return {
+          ok: false,
+          message: `${name}: crons are declared only under \`env.<name>.triggers\` — YOLO Host reads the top-level \`triggers.crons\``,
+        };
+      }
+      return { ok: true, crons: undefined };
+    }
+    if (typeof triggers !== 'object' || Array.isArray(triggers)) {
+      return { ok: false, message: `${name}: \`triggers\` must be an object like { "crons": ["*/15 * * * *"] }` };
+    }
+    const crons = (triggers as Record<string, unknown>).crons;
+    if (crons === undefined) return { ok: true, crons: undefined };
+    if (!Array.isArray(crons) || crons.some((c) => typeof c !== 'string')) {
+      return { ok: false, message: `${name}: \`triggers.crons\` must be an array of cron strings` };
+    }
+    return { ok: true, crons: crons as string[], sourceFile: name };
+  }
+  const toml = read(path.join(cwd, 'wrangler.toml'));
+  if (toml === undefined) return { ok: true, crons: undefined };
+  return extractTomlCrons(toml);
+}
+
+/**
+ * `[triggers]` → `crons = ["…", '…']`, single- or multi-line. Line comments
+ * outside strings are dropped. Anything else in the value is an error.
+ */
+function extractTomlCrons(text: string): WranglerCronsResult {
+  const lines = text.split('\n');
+  let section = '';
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!.trim();
+    const sectionMatch = /^\[([^\]]+)\]/.exec(line);
+    if (sectionMatch) {
+      section = sectionMatch[1]!.trim();
+      continue;
+    }
+    if (section !== 'triggers') continue;
+    const m = /^crons\s*=\s*(.*)$/.exec(line);
+    if (!m) continue;
+    let value = m[1]!;
+    while (!value.includes(']') && i + 1 < lines.length) value += '\n' + lines[++i]!;
+    const body = /^\[([\s\S]*)\]\s*(#.*)?$/.exec(value.trim());
+    if (!body) return { ok: false, message: 'wrangler.toml: `[triggers] crons` must be an array of cron strings' };
+    const crons: string[] = [];
+    const rest = body[1]!.replace(/#[^\n"']*$/gm, '').replace(/("[^"]*"|'[^']*')|\s+|,/g, (tok, str: string | undefined) => {
+      if (str) crons.push(str.slice(1, -1));
+      return '';
+    });
+    if (rest.trim() !== '') {
+      return { ok: false, message: 'wrangler.toml: `[triggers] crons` must be an array of quoted cron strings' };
+    }
+    return { ok: true, crons, sourceFile: 'wrangler.toml' };
+  }
+  // A `crons` key we could not attribute to a top-level `[triggers]` table (an
+  // inline table, or `[env.<name>.triggers]`) must not be skipped quietly.
+  if (/^\s*(triggers\s*=.*crons|crons\s*=)/m.test(text)) {
+    return {
+      ok: false,
+      message:
+        'wrangler.toml declares `crons` outside a top-level `[triggers]` table — YOLO Host reads only\n' +
+        '[triggers]\ncrons = ["*/15 * * * *"]',
+    };
+  }
+  return { ok: true, crons: undefined };
+}
+
 /**
  * Adapt an existing wrangler config into the canonical `.yolo/deploy.json`
  * shape — the migration `yolo deploy init` performs once when a project has a

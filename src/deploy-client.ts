@@ -166,6 +166,8 @@ export interface StartShipRequest {
   manifest: AssetManifest;
   worker?: { mainModule: string; sizeBytes: number };
   compatibilityFlags?: string[];
+  /** Cron triggers (wrangler `triggers.crons` / deploy.json `crons`). */
+  crons?: string[];
   gitSha?: string;
   /**
    * `git remote get-url origin` for the bundled directory — the source repo

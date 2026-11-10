@@ -965,7 +965,7 @@ async function runValidateCmd(args: string[], deps: DeployCliDeps, io: DeployIo)
   //    silent (the retro gotcha: "wrangler.toml silently ignored").
   if ((readFileImpl ?? defaultReadFile)(path.join(cwd, 'wrangler.toml')) !== undefined) {
     notes.push(
-      'wrangler.toml found — YOLO Host reads only top-level `main` + `[assets].directory` from toml; ' +
+      'wrangler.toml found — YOLO Host reads only top-level `main` + `[assets].directory` (and `[triggers] crons` at ship time) from toml; ' +
         'run `yolo deploy init` to adapt it into `.yolo/deploy.json` (the canonical format)',
     );
   }

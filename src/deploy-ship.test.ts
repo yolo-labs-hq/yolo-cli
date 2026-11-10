@@ -277,6 +277,38 @@ describe('deploy-ship — happy path (static)', () => {
     assert.equal(recorded.finalizeCalls[0]!.modules[0]!.name, 'worker.js');
   });
 
+  it('sends wrangler triggers.crons on ship/start and reports them', async () => {
+    const { deps, recorded } = makeDeps({
+      readWranglerCronsImpl: () => ({ ok: true, crons: ['*/15 * * * *'], sourceFile: 'wrangler.jsonc' }),
+    });
+    const { lines, promise } = runShip(deps);
+    const result = await promise;
+    assert.equal(result.ok, true);
+    if (result.ok) assert.deepEqual(result.crons, ['*/15 * * * *']);
+    assert.deepEqual(recorded.startCalls[0]!.request.crons, ['*/15 * * * *']);
+    assert.ok(lines.some((l) => l.includes('crons 1 declared in wrangler.jsonc')));
+  });
+
+  it('deploy.json `crons` wins over wrangler, and [] ships with no crons', async () => {
+    const { deps, recorded } = makeDeps({
+      readDeployConfigImpl: () => linked({ ...CONFIG, crons: [] }),
+      readWranglerCronsImpl: () => ({ ok: true, crons: ['*/15 * * * *'], sourceFile: 'wrangler.jsonc' }),
+    });
+    const result = await runShip(deps).promise;
+    assert.equal(result.ok, true);
+    assert.equal(recorded.startCalls[0]!.request.crons, undefined);
+  });
+
+  it('a malformed wrangler triggers stanza fails before any network call', async () => {
+    const { deps, recorded } = makeDeps({
+      readWranglerCronsImpl: () => ({ ok: false, message: 'wrangler.json: `triggers.crons` must be an array of cron strings' }),
+    });
+    const result = await runShip(deps).promise;
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.kind, 'cron-invalid');
+    assert.equal(recorded.startCalls.length, 0);
+  });
+
   it('skips uploads entirely when the server already has every asset', async () => {
     const { deps, recorded } = makeDeps({
       startShipImpl: async () => ({ ok: true, value: { ...START_RESPONSE, missing: [] } }),

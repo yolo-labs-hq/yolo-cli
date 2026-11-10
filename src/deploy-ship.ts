@@ -24,7 +24,7 @@ import * as fs from 'node:fs';
 import { spawn, execFileSync } from 'node:child_process';
 
 import { readDeployConfig, type DeployConfig } from './deploy-config.js';
-import { detectProjectShape, type ProjectShape } from './deploy-detect.js';
+import { detectProjectShape, readWranglerCrons, type ProjectShape } from './deploy-detect.js';
 import { bundleProject, type BundleAsset } from './deploy-bundle.js';
 import {
   resolveDeployContext,
@@ -58,6 +58,8 @@ export type RunBuildImpl = (
 export interface DeployShipDeps {
   readDeployConfigImpl?: typeof readDeployConfig;
   detectProjectShapeImpl?: typeof detectProjectShape;
+  /** wrangler `triggers.crons` reader. Default: readWranglerCrons. */
+  readWranglerCronsImpl?: typeof readWranglerCrons;
   bundleProjectImpl?: typeof bundleProject;
   startShipImpl?: typeof startShip;
   uploadAssetBucketImpl?: typeof uploadAssetBucket;
@@ -100,6 +102,8 @@ export interface DeployShipSuccess {
   fileCount: number;
   totalAssetBytes: number;
   bundleDigest: string;
+  /** Cron triggers shipped with this release (absent when none). */
+  crons?: string[];
   shipId?: string;
   releaseId?: string;
   url?: string;
@@ -288,6 +292,26 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
   if (!detected.ok) return fail('detect-failed', detected.message);
   const shape = detected.shape;
 
+  // 2.5 Cron triggers — deploy.json `crons` wins (`[]` = explicitly none),
+  // else wrangler `triggers.crons`. Sent as declared; the server validates
+  // (syntax, ≤3, min interval) and refuses — never drops — when the platform
+  // flag is off. A malformed stanza fails here rather than shipping without it.
+  let crons: string[] = [];
+  let cronsSource = '.yolo/deploy.json';
+  if (config.crons !== undefined) {
+    crons = config.crons;
+  } else {
+    const fromWrangler = (deps.readWranglerCronsImpl ?? readWranglerCrons)(cwd);
+    if (!fromWrangler.ok) return fail('cron-invalid', fromWrangler.message);
+    if (fromWrangler.crons !== undefined) {
+      crons = fromWrangler.crons;
+      cronsSource = fromWrangler.sourceFile;
+    }
+  }
+  if (crons.length > 0) {
+    progress(`deploy: crons ${crons.length} declared in ${cronsSource} (UTC): ${crons.join(' | ')}`);
+  }
+
   // 3. Build (if the shape carries a build command).
   if (shape.buildCommand) {
     const startedAt = Date.now();
@@ -327,6 +351,7 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
     fileCount,
     totalAssetBytes: bundled.totalAssetBytes,
     bundleDigest: bundled.bundleDigest,
+    ...(crons.length > 0 ? { crons } : {}),
   } as const;
 
   // 5. Dry-run stops here — fully offline by construction (auth + network
@@ -355,6 +380,7 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
   if (config.compatibilityFlags && config.compatibilityFlags.length > 0) {
     request.compatibilityFlags = config.compatibilityFlags;
   }
+  if (crons.length > 0) request.crons = crons;
   const gitSha = resolveGitSha(cwd);
   if (gitSha) request.gitSha = gitSha;
   // The source repo these exact bytes were built from. This is the only place

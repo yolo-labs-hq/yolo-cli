@@ -13,7 +13,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-import { DETECT_INIT_HINT, adaptWrangler, detectProjectShape } from './deploy-detect.js';
+import { DETECT_INIT_HINT, adaptWrangler, detectProjectShape, readWranglerCrons } from './deploy-detect.js';
 import type { DeployConfig } from './deploy-config.js';
 
 function makeTmpDir(): string {
@@ -593,5 +593,55 @@ describe('deploy-detect — detect-failed', () => {
       assert.equal(res.kind, 'detect-failed');
       assert.ok(res.message.includes(DETECT_INIT_HINT), res.message);
     }
+  });
+});
+
+describe('readWranglerCrons — wrangler `triggers.crons` (no longer silently dropped)', () => {
+  const cwd = '/proj';
+
+  it('reads top-level triggers.crons from wrangler.jsonc (comments + trailing commas ok)', () => {
+    const read = fileStub(cwd, {
+      'wrangler.jsonc': `{
+        // schedule
+        "main": "src/index.ts",
+        "triggers": { "crons": ["*/15 * * * *", "0 9 * * MON-FRI",] },
+      }`,
+    });
+    assert.deepEqual(readWranglerCrons(cwd, read), {
+      ok: true, crons: ['*/15 * * * *', '0 9 * * MON-FRI'], sourceFile: 'wrangler.jsonc',
+    });
+  });
+
+  it('reads wrangler.json and reports no triggers as undefined', () => {
+    assert.deepEqual(readWranglerCrons(cwd, fileStub(cwd, { 'wrangler.json': '{"main":"a.js"}' })), { ok: true, crons: undefined });
+    assert.deepEqual(readWranglerCrons(cwd, fileStub(cwd, {})), { ok: true, crons: undefined });
+  });
+
+  it('refuses a malformed JSON stanza and env-only crons instead of skipping them', () => {
+    const bad = readWranglerCrons(cwd, fileStub(cwd, { 'wrangler.json': '{"triggers":{"crons":"*/5 * * * *"}}' }));
+    assert.equal(bad.ok, false);
+    const envOnly = readWranglerCrons(cwd, fileStub(cwd, {
+      'wrangler.jsonc': '{"env":{"production":{"triggers":{"crons":["0 * * * *"]}}}}',
+    }));
+    assert.equal(envOnly.ok, false);
+    if (!envOnly.ok) assert.match(envOnly.message, /env\.<name>\.triggers/);
+  });
+
+  it('reads [triggers] crons from wrangler.toml, single- and multi-line', () => {
+    const one = readWranglerCrons(cwd, fileStub(cwd, {
+      'wrangler.toml': 'name = "x"\nmain = "src/index.ts"\n\n[triggers]\ncrons = ["*/30 * * * *", \'0 0 * * SUN\'] # nightly\n',
+    }));
+    assert.deepEqual(one, { ok: true, crons: ['*/30 * * * *', '0 0 * * SUN'], sourceFile: 'wrangler.toml' });
+    const multi = readWranglerCrons(cwd, fileStub(cwd, {
+      'wrangler.toml': '[triggers]\ncrons = [\n  "*/30 * * * *", # half-hourly\n  "0 0 * * SUN",\n]\n[vars]\nA = "b"\n',
+    }));
+    assert.deepEqual(multi, { ok: true, crons: ['*/30 * * * *', '0 0 * * SUN'], sourceFile: 'wrangler.toml' });
+  });
+
+  it('refuses toml crons it cannot attribute to a top-level [triggers] table', () => {
+    const scoped = readWranglerCrons(cwd, fileStub(cwd, { 'wrangler.toml': '[env.production.triggers]\ncrons = ["0 * * * *"]\n' }));
+    assert.equal(scoped.ok, false);
+    const garbage = readWranglerCrons(cwd, fileStub(cwd, { 'wrangler.toml': '[triggers]\ncrons = [5]\n' }));
+    assert.equal(garbage.ok, false);
   });
 });
