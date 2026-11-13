@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { formatSetRepository, parseSetRepositoryArgs, runSetRepository } from './workspace-cli.js';
 
 const SNAP = 'c'.repeat(64);
-const ENV = { SESSION_ID: 's-1', HOME: '/nonexistent-home', YOLO_API_TOKEN: 'user-jwt', YOLO_API_URL: 'http://api.test', WORKSPACE_ID: 'ws-1' };
+const ENV = { SESSION_ID: 's-1', HOME: '/nonexistent-home', YOLO_API_TOKEN_NONPROD: 'user-jwt', YOLO_API_URL: 'http://api.test', WORKSPACE_ID: 'ws-1' };
 
 function fakeFetch(status: number, body: unknown) {
   const calls: Array<{ url: string; init: { method?: string; headers: Record<string, string>; body?: string } }> = [];
@@ -67,7 +67,7 @@ describe('runSetRepository', () => {
 
   it('needs a workspace and a token', async () => {
     assert.equal((await runSetRepository({ url: 'u', json: false }, { env: { ...ENV, WORKSPACE_ID: '' } })).code, 64);
-    assert.equal((await runSetRepository({ url: 'u', json: false }, { env: { ...ENV, YOLO_API_TOKEN: '' } })).code, 64);
+    assert.equal((await runSetRepository({ url: 'u', json: false }, { env: { ...ENV, YOLO_API_TOKEN_NONPROD: '' } })).code, 64);
   });
 
   it('a blocked preview says so instead of offering --confirm', () => {

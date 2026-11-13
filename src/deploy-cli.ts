@@ -85,6 +85,7 @@ import { adaptWrangler, detectProjectShape, type ProjectShape } from './deploy-d
 import { collectNodeBuiltinsFromText } from './deploy-bundle.js';
 import { runDeployDev, type DevServerOptions } from './deploy-dev.js';
 import { defaultReadFile, type ReadFileImpl } from './auth-context.js';
+import { isProductionTarget, targetApiUrl } from './api-env.js';
 
 // ─── Injectable surface ───────────────────────────────────────────────────
 
@@ -518,7 +519,9 @@ async function runInitCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
     // lets server-side deploy lifecycle events route back to the workspace
     // (and therefore to VibeAssist event watchers). Local CLI use remains
     // unchanged because the field is optional.
-    ...(env.WORKSPACE_ID ? { workspaceId: env.WORKSPACE_ID } : {}),
+    // Never on a non-production API: `$WORKSPACE_ID` names this pod's own
+    // (production) workspace, which means nothing on another server (api-env.ts).
+    ...(env.WORKSPACE_ID && isProductionTarget(env) ? { workspaceId: env.WORKSPACE_ID } : {}),
     // Nesting S4 — passed straight through; the server verifies ownership,
     // depth and parent state. Not written to `.yolo/deploy.json`.
     ...(resolvedParentId ? { parentProjectId: resolvedParentId } : {}),
@@ -793,7 +796,18 @@ async function runLinkCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Pr
     );
     return exitCodeForFailure('already-linked');
   }
-  const workspaceId = parsed.unlinkWorkspace ? null : parsed.localOnly ? undefined : parsed.workspaceId ?? (deps.env ?? process.env).WORKSPACE_ID;
+  // `$WORKSPACE_ID` is this pod's own workspace, so it is the default only on the production API. On any
+  // other API (api-env.ts) the server association needs an explicit --workspace-id; without one, nothing
+  // is linked server-side.
+  const linkEnv = deps.env ?? process.env;
+  const defaultWorkspaceId = isProductionTarget(linkEnv) ? linkEnv.WORKSPACE_ID : undefined;
+  if (!defaultWorkspaceId && linkEnv.WORKSPACE_ID && !parsed.workspaceId && !parsed.localOnly && !parsed.unlinkWorkspace) {
+    io.err(
+      `yolo deploy link: ${targetApiUrl(linkEnv)} is not the production API, so this pod's WORKSPACE_ID is not linked; ` +
+        'pass --workspace-id <id> to associate a workspace on that server.\n',
+    );
+  }
+  const workspaceId = parsed.unlinkWorkspace ? null : parsed.localOnly ? undefined : parsed.workspaceId ?? defaultWorkspaceId;
   if (workspaceId !== undefined) {
     // Always read project.workspaceId, never the release-derived workspace.
     const read = deps.getProjectStatusImpl ?? getProjectStatus;

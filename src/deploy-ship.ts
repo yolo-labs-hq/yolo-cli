@@ -380,7 +380,10 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
   if (config.compatibilityFlags && config.compatibilityFlags.length > 0) {
     request.compatibilityFlags = config.compatibilityFlags;
   }
-  if (crons.length > 0) request.crons = crons;
+  // A Worker ship always sends `crons`, `[]` included: the field's presence is how the server tells a
+  // cron-aware client from a pre-cron CLI, whose Worker ships with scheduled() it refuses
+  // (`cron-client-outdated`) rather than shipping without the crons that CLI could not read.
+  if (crons.length > 0 || shape.type === 'worker') request.crons = crons;
   const gitSha = resolveGitSha(cwd);
   if (gitSha) request.gitSha = gitSha;
   // The source repo these exact bytes were built from. This is the only place

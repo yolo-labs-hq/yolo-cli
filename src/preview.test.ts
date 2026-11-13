@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runPreviewCmd } from './preview.js';
 import type { FetchLike } from './work-client.js';
-const env = { SESSION_ID: 'session', WORKSPACE_ID: 'untrusted-hint', YOLO_COMMON_API_URL: 'https://api.test', YOLO_API_TOKEN: 'user-token', HOME: '/nonexistent-preview-test-home' };
+const env = { SESSION_ID: 'session', WORKSPACE_ID: 'untrusted-hint', YOLO_COMMON_API_URL: 'https://api.test', YOLO_API_TOKEN_NONPROD: 'user-token', HOME: '/nonexistent-preview-test-home' };
 function fixture(response: unknown = {}, status = 200) {
   const calls: { url: string; init: any }[] = [];
   let out = '', err = '';

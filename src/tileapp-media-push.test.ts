@@ -17,7 +17,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { runTileAppMediaPush } from './tileapp-personal.js';
 
-const ENV = { YOLO_COMMON_API_URL: 'https://api.test', YOLO_API_TOKEN: 't0ken' };
+const ENV = { YOLO_COMMON_API_URL: 'https://api.test', YOLO_API_TOKEN_NONPROD: 't0ken' };
 
 /**
  * A PNG whose IHDR declares 1280x800.

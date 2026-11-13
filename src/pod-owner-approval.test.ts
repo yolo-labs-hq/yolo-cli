@@ -52,7 +52,7 @@ describe('deploy-client: a staged re-link is awaiting-approval, not success', ()
       ok: true, status: 202, json: async () => STAGED, text: async () => JSON.stringify(STAGED), body: null,
     });
     const r = await setProjectWorkspace(
-      { commonApiUrl: 'https://api.example.com', env: { HOME: '/home/test', YOLO_API_TOKEN: 'tok' }, readFileImpl: () => undefined, fetchImpl },
+      { commonApiUrl: 'https://api.example.com', env: { HOME: '/home/test', YOLO_API_TOKEN_NONPROD: 'tok' }, readFileImpl: () => undefined, fetchImpl },
       'p1', { workspaceId: 'w2', expectedWorkspaceId: 'w1' },
     );
     assert.equal(r.ok, false);
@@ -67,7 +67,7 @@ describe('deploy-client: a staged re-link is awaiting-approval, not success', ()
       ok: true, status: 200, json: async () => ({ project: { workspaceId: 'w2' } }), text: async () => '', body: null,
     });
     const r = await setProjectWorkspace(
-      { commonApiUrl: 'https://api.example.com', env: { HOME: '/home/test', YOLO_API_TOKEN: 'tok' }, readFileImpl: () => undefined, fetchImpl },
+      { commonApiUrl: 'https://api.example.com', env: { HOME: '/home/test', YOLO_API_TOKEN_NONPROD: 'tok' }, readFileImpl: () => undefined, fetchImpl },
       'p1', { workspaceId: 'w2', expectedWorkspaceId: 'w1' },
     );
     assert.equal(r.ok, true);
@@ -87,7 +87,7 @@ function stubFetch(handler: (url: string, init: RequestInit | undefined) => { st
   }) as unknown as typeof fetch;
 }
 
-const ENV = { YOLO_API_TOKEN: 'user-jwt', YOLO_COMMON_API_URL: 'https://api.example.com', HOME: '/nonexistent-home' };
+const ENV = { YOLO_API_TOKEN_NONPROD: 'user-jwt', YOLO_COMMON_API_URL: 'https://api.example.com', HOME: '/nonexistent-home' };
 
 describe('tileapp publish --personal from a pod', () => {
   function scaffold(): string {

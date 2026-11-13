@@ -25,7 +25,9 @@ import {
 } from './deploy-cli.js';
 import type { DeployShipResult } from './deploy-ship.js';
 
-const ENV = { YOLO_COMMON_API_URL: 'https://api.example.com', YOLO_API_TOKEN: 'tok', HOME: '/home/test' };
+const ENV = { YOLO_COMMON_API_URL: 'https://api.example.com', YOLO_API_TOKEN_NONPROD: 'tok', HOME: '/home/test' };
+/** The production API: the only one where the pod's WORKSPACE_ID (and sandbox token) is used by default. */
+const PROD_ENV = { YOLO_COMMON_API_URL: 'https://api.yolo.studio', YOLO_API_TOKEN: 'tok', HOME: '/home/test' };
 
 function makeIo(): DeployIo & { stdout: string[]; stderr: string[] } {
   const stdout: string[] = [];
@@ -1005,7 +1007,7 @@ function withProcessEnv<T>(vars: Record<string, string | undefined>, run: () => 
 }
 
 const DEPLOY_CREDS = {
-  YOLO_API_TOKEN: 'test-user-jwt',
+  YOLO_API_TOKEN_NONPROD: 'test-user-jwt',
   YOLO_COMMON_API_URL: 'https://api.test.invalid',
 };
 
@@ -1047,7 +1049,8 @@ const DEPLOY_CREDS = {
     // `workspaceId` so deploy lifecycle events route back to the workspace. It
     // was read as `deps.env?.WORKSPACE_ID`, which production never populates.
     const io = makeIo();
-    await withProcessEnv({ ...DEPLOY_CREDS, WORKSPACE_ID: 'ws_from_pod' }, async () => {
+    // Production API: the pod's WORKSPACE_ID is only a default there (api-env.ts).
+    await withProcessEnv({ YOLO_COMMON_API_URL: 'https://api.yolo.studio', YOLO_API_TOKEN: 'test-user-jwt', WORKSPACE_ID: 'ws_from_pod' }, async () => {
       let sent: unknown;
       await runDeployCmd(
         ['init', '--slug', 'my-api', '--no-parent'],
@@ -1143,7 +1146,7 @@ const DEPLOY_CREDS = {
     const code = await runDeployCmd(
       ['init', '--slug', 'my-app', '--type', 'static'],
       baseDeps(io, {
-        env: { ...ENV, WORKSPACE_ID: 'ws-current' },
+        env: { ...PROD_ENV, WORKSPACE_ID: 'ws-current' },
         readDeployConfigImpl: () => linked(null),
         createProjectImpl: async (_ctx, request) => {
           assert.equal(request.name, 'my-app');
@@ -2335,7 +2338,7 @@ describe('link server workspace association', () => {
     let persisted: string | null = null;
     let calls = 0;
     const deps = baseDeps(io, {
-      env: { ...ENV, WORKSPACE_ID: ws },
+      env: { ...PROD_ENV, WORKSPACE_ID: ws },
       getProjectStatusImpl: async () => ({ ok: true, value: { project: { id: 'hp_8f3a', workspaceId: persisted } } }),
       setProjectWorkspaceImpl: async (_ctx, _id, body) => { calls++; persisted = body.workspaceId; return { ok: true, value: {} }; },
     });
@@ -2344,6 +2347,59 @@ describe('link server workspace association', () => {
     assert.equal(await runDeployCmd(['link', '--project-id', 'hp_8f3a', '--local-only'], deps), 0);
     assert.equal(calls, 1);
     assert.match(io.stdout.join(''), /Local repository configuration only/);
+  });
+
+  // Cross-environment safety (api-env.ts): on a non-production API the pod's WORKSPACE_ID names a
+  // workspace on ANOTHER server, so it is never the default association.
+  it('on a non-production API, does NOT default to WORKSPACE_ID and says so', async () => {
+    const io = makeIo();
+    let calls = 0;
+    const code = await runDeployCmd(['link', '--project-id', 'hp_8f3a'], baseDeps(io, {
+      env: { ...ENV, YOLO_COMMON_API_URL: 'https://api-staging.yolo.studio', WORKSPACE_ID: ws },
+      getProjectStatusImpl: async () => ({ ok: true, value: { project: { id: 'hp_8f3a', workspaceId: null } } }),
+      setProjectWorkspaceImpl: async () => { calls++; return { ok: true, value: {} }; },
+    }));
+    assert.equal(code, 0);
+    assert.equal(calls, 0, 'no server-side workspace association without an explicit --workspace-id');
+    assert.match(io.stderr.join(''), /not the production API.*--workspace-id/s);
+  });
+  it('on a non-production API, an explicit --workspace-id still links', async () => {
+    const io = makeIo();
+    let persisted: string | null = null;
+    let sentBody: unknown;
+    const code = await runDeployCmd(['link', '--project-id', 'hp_8f3a', '--workspace-id', ws], baseDeps(io, {
+      env: { ...ENV, YOLO_COMMON_API_URL: 'https://api-staging.yolo.studio', WORKSPACE_ID: '507f1f77bcf86cd799439099' },
+      getProjectStatusImpl: async () => ({ ok: true, value: { project: { id: 'hp_8f3a', workspaceId: persisted } } }),
+      setProjectWorkspaceImpl: async (_ctx, _id, body) => { sentBody = body; persisted = body.workspaceId; return { ok: true, value: {} }; },
+    }));
+    assert.equal(code, 0);
+    assert.deepEqual(sentBody, { workspaceId: ws, expectedWorkspaceId: null });
+    assert.doesNotMatch(io.stderr.join(''), /not the production API/);
+  });
+  it('on a non-production API, init does not stamp WORKSPACE_ID on the new project', async () => {
+    const io = makeIo();
+    let request: Record<string, unknown> | undefined;
+    const code = await runDeployCmd(['init', '--slug', 'my-app', '--no-parent'], baseDeps(io, {
+      env: { ...ENV, YOLO_COMMON_API_URL: 'https://api-staging.yolo.studio', WORKSPACE_ID: ws },
+      readDeployConfigImpl: () => linked(null),
+      createProjectImpl: async (_ctx, req) => { request = req as unknown as Record<string, unknown>; return { ok: true, value: { project: { id: 'hp_new', slug: 'my-app' } } }; },
+      writeDeployConfigImpl: () => CONFIG_PATH,
+    }));
+    assert.equal(code, 0);
+    assert.ok(request);
+    assert.equal('workspaceId' in request!, false);
+  });
+  it('on a non-production API, the sandbox YOLO_API_TOKEN is refused before any request', async () => {
+    const io = makeIo();
+    let reached = false;
+    const code = await runDeployCmd(['link', '--project-id', 'hp_8f3a'], baseDeps(io, {
+      env: { YOLO_COMMON_API_URL: 'https://api-staging.yolo.studio', YOLO_API_TOKEN: 'prod-sandbox-token', HOME: '/home/test', WORKSPACE_ID: ws },
+      readFileImpl: () => undefined,
+      getProjectStatusImpl: async () => { reached = true; return { ok: true, value: { project: { id: 'hp_8f3a', workspaceId: null } } }; },
+    }));
+    assert.equal(code, 78);
+    assert.equal(reached, false);
+    assert.match(io.stderr.join(''), /YOLO_API_TOKEN_NONPROD/);
   });
 });
 

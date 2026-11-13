@@ -68,7 +68,7 @@ const FINALIZE_LIVE: FinalizeShipResult = {
   value: { releaseId: 'rel_0192', url: 'https://my-app.yolo.host', status: 'live' },
 };
 
-const ENV = { YOLO_COMMON_API_URL: 'https://api.example.com', YOLO_API_TOKEN: 'tok', HOME: '/home/test' };
+const ENV = { YOLO_COMMON_API_URL: 'https://api.example.com', YOLO_API_TOKEN_NONPROD: 'tok', HOME: '/home/test' };
 
 interface Recorded {
   startCalls: Array<{ projectId: string; request: Record<string, unknown> }>;
@@ -273,6 +273,8 @@ describe('deploy-ship — happy path (static)', () => {
     assert.equal(request.env, 'prod');
     assert.deepEqual(request.worker, { mainModule: 'worker.js', sizeBytes: 18 });
     assert.deepEqual(request.compatibilityFlags, ['nodejs_compat']);
+    // A Worker ship always sends `crons` ([] = none): its absence is how the server spots a pre-cron CLI.
+    assert.deepEqual(request.crons, []);
     assert.equal(recorded.finalizeCalls[0]!.modules.length, 1);
     assert.equal(recorded.finalizeCalls[0]!.modules[0]!.name, 'worker.js');
   });

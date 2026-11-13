@@ -68,7 +68,7 @@ function makeFetchStub(responses: StubResponse | StubResponse[]): { fetch: Deplo
 function makeContext(fetch: DeployFetchLike, overrides: Partial<DeployContext> = {}): DeployContext {
   return {
     commonApiUrl: 'https://api.example.com',
-    env: { HOME: '/home/test', YOLO_API_TOKEN: 'tok-env' },
+    env: { HOME: '/home/test', YOLO_API_TOKEN_NONPROD: 'tok-env' },
     readFileImpl: () => undefined,
     fetchImpl: fetch,
     ...overrides,
@@ -96,14 +96,14 @@ describe('deploy-client — resolveDeployContext', () => {
   });
 
   it('fails with kind auth when no token resolves from file or env', () => {
-    const result = resolveDeployContext({ YOLO_COMMON_API_URL: 'https://api.example.com', HOME: '/h' }, () => undefined);
+    const result = resolveDeployContext({ YOLO_COMMON_API_URL: 'https://api.yolo.studio', HOME: '/h' }, () => undefined);
     assert.equal(result.ok, false);
     if (!result.ok) assert.match(result.message, /no user token available/);
   });
 
   it('resolves with the rotation file preferred over the env token', () => {
     const result = resolveDeployContext(
-      { YOLO_COMMON_API_URL: 'https://api.example.com', HOME: '/h', YOLO_API_TOKEN: 'env-tok' },
+      { YOLO_COMMON_API_URL: 'https://api.yolo.studio', HOME: '/h', YOLO_API_TOKEN: 'env-tok' },
       () => 'file-tok',
     );
     assert.equal(result.ok, true);
@@ -234,6 +234,8 @@ describe('deploy-client — per-leg token re-resolution (rotation file)', () => 
     const tokens = ['tok-1', 'tok-2', 'tok-3'];
     let reads = 0;
     const ctx = makeContext(fetch, {
+      // The rotated token file is the sandbox credential, used by default on the production API.
+      commonApiUrl: 'https://api.yolo.studio',
       env: { HOME: '/home/test' },
       readFileImpl: () => tokens[reads++],
     });
@@ -386,7 +388,7 @@ describe('deploy-client — finalizeShip', () => {
 describe('deploy-client — finalize session provenance headers', () => {
   const SESSION_ENV = {
     HOME: '/home/test',
-    YOLO_API_TOKEN: 'tok-env',
+    YOLO_API_TOKEN_NONPROD: 'tok-env',
     SESSION_ID: 'sess-abc',
   };
 
@@ -439,7 +441,7 @@ describe('deploy-client — thin wrappers', () => {
 
   it('rollbackProject forwards session provenance headers for rollback.provenance', async () => {
     const { fetch, calls } = makeFetchStub({ jsonBody: { releaseId: 'rel_3' } });
-    const env = { HOME: '/h', YOLO_API_TOKEN: 'tok', SESSION_ID: 'sess-r' };
+    const env = { HOME: '/h', YOLO_API_TOKEN_NONPROD: 'tok', SESSION_ID: 'sess-r' };
     await rollbackProject(makeContext(fetch, { env }), 'hp_9', { releaseId: 'rel_3' });
     assert.equal(calls[0]!.headers['X-Yolo-Session-Id'], 'sess-r');
   });

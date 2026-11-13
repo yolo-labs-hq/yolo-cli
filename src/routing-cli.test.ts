@@ -15,7 +15,7 @@ const CARD = '507f1f77bcf86cd799439022';
 const BOARD = '507f1f77bcf86cd799439033';
 const BASE = `https://api.example.com/v1/workspaces/${WS}/yolo-background/routing`;
 const ENV = {
-  SESSION_ID: 'sess-abc', HOME: '/nonexistent-yolo-cli-test-home', YOLO_API_TOKEN: 'user-jwt',
+  SESSION_ID: 'sess-abc', HOME: '/nonexistent-yolo-cli-test-home', YOLO_API_TOKEN_NONPROD: 'user-jwt',
   YOLO_COMMON_API_URL: 'https://api.example.com', WORKSPACE_ID: WS,
 };
 
