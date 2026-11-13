@@ -10,8 +10,9 @@ yolo tileapp init my-app
 yolo deploy --dry-run
 ```
 
-Authenticated commands require `SESSION_ID`, `YOLO_COMMON_API_URL` (or
-`YOLO_API_URL`), and a user access JWT. The CLI reads the rotated token at
+Authenticated commands require `SESSION_ID` and a user access JWT. The API
+origin comes from `YOLO_COMMON_API_URL`, then `YOLO_API_URL`; with neither set
+it defaults to production (`https://api.yolo.studio`). The CLI reads the rotated token at
 `~/.config/yolo/token`, falling back to `YOLO_API_TOKEN`. The session record
 supplies the workspace identity.
 

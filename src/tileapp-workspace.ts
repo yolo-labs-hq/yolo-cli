@@ -24,6 +24,7 @@
 
 import { missingUserTokenMessage } from './api-env.js';
 import { podSessionTelemetryHeaders, resolveUserToken } from './auth-context.js';
+import { resolveCommonApiUrl } from './api-url.js';
 
 export type FetchLike = typeof fetch;
 
@@ -42,8 +43,7 @@ function apiBase(commonApiUrl: string): string {
 
 type Auth = { ok: true; commonApiUrl: string; userToken: string } | { ok: false; message: string };
 function resolveAuth(env: Record<string, string | undefined>): Auth {
-  const commonApiUrl = env.YOLO_COMMON_API_URL || env.YOLO_API_URL;
-  if (!commonApiUrl) return { ok: false, message: 'YOLO_COMMON_API_URL (or YOLO_API_URL) env var is required' };
+  const commonApiUrl = resolveCommonApiUrl(env);
   const userToken = resolveUserToken(env);
   if (!userToken) return { ok: false, message: missingUserTokenMessage(env) };
   return { ok: true, commonApiUrl, userToken };

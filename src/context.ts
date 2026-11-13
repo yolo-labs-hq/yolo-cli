@@ -17,6 +17,7 @@
  */
 
 import { resolveUserToken } from './auth-context.js';
+import { resolveCommonApiUrl } from './api-url.js';
 
 export interface SessionContext {
   sessionId: string;
@@ -43,13 +44,8 @@ export function readSessionContext(): SessionContext {
     );
   }
 
-  const commonApiUrl = process.env.YOLO_COMMON_API_URL || process.env.YOLO_API_URL;
-  if (!commonApiUrl || commonApiUrl.length === 0) {
-    throw new ContextResolutionError(
-      'session-required: YOLO_COMMON_API_URL env var is empty or missing.',
-      78,
-    );
-  }
+  // Defaults to production when neither URL env var is set (api-url.ts).
+  const commonApiUrl = resolveCommonApiUrl(process.env);
 
   const userToken = resolveUserToken(process.env);
   return {

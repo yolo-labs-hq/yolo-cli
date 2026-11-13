@@ -81,10 +81,15 @@ describe('resolveSubstrateContext', () => {
     if (!res.ok) assert.match(res.message, /SESSION_ID/);
   });
 
-  it('fails when the common-api URL is missing', () => {
-    const res = resolveSubstrateContext({ SESSION_ID: 's', INTERNAL_API_KEY: 'k' }, fileStub({}));
+  it('defaults the common-api URL to production when neither URL env var is set', () => {
+    const res = resolveSubstrateContext({ SESSION_ID: 's', YOLO_API_TOKEN: 'tok', HOME: '/home/yolo' }, fileStub({}));
+    assert.equal(res.ok, true);
+    if (res.ok) assert.equal(res.context.commonApiUrl, 'https://api.yolo.studio');
+  });
+
+  it('still fails without a token when only the URL defaulted (no token fallback)', () => {
+    const res = resolveSubstrateContext({ SESSION_ID: 's', HOME: '/home/yolo' }, fileStub({}));
     assert.equal(res.ok, false);
-    if (!res.ok) assert.match(res.message, /YOLO_COMMON_API_URL/);
   });
 
   it('fails when no user token is available', () => {
