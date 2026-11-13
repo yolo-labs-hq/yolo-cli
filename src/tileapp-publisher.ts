@@ -16,6 +16,7 @@
 
 import fs from 'node:fs';
 import { podSessionTelemetryHeaders, resolveUserToken } from './auth-context.js';
+import { resolveCommonApiUrl } from './api-url.js';
 
 export type FetchLike = typeof fetch;
 
@@ -27,8 +28,7 @@ export type FetchLike = typeof fetch;
  */
 type PublisherAuth = { ok: true; commonApiUrl: string; userToken: string } | { ok: false; message: string };
 function resolvePublisherAuth(env: Record<string, string | undefined>): PublisherAuth {
-  const commonApiUrl = env.YOLO_COMMON_API_URL || env.YOLO_API_URL;
-  if (!commonApiUrl) return { ok: false, message: 'YOLO_COMMON_API_URL (or YOLO_API_URL) env var is required' };
+  const commonApiUrl = resolveCommonApiUrl(env);
   const userToken = resolveUserToken(env);
   if (!userToken) {
     return { ok: false, message: 'no user token: set YOLO_API_TOKEN or sign in (~/.config/yolo/token)' };

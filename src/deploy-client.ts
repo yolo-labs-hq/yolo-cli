@@ -31,6 +31,7 @@
 import { podSessionTelemetryHeaders, resolveUserToken, type ReadFileImpl } from './auth-context.js';
 import { userRouteRequest } from './work-client.js';
 import { ownerApprovalRequestedOf } from './pod-owner-approval.js';
+import { resolveCommonApiUrl } from './api-url.js';
 
 // ─── Fetch shape ──────────────────────────────────────────────────────────
 
@@ -111,10 +112,8 @@ export function resolveDeployContext(
   readFileImpl?: ReadFileImpl,
   fetchImpl?: DeployFetchLike,
 ): DeployContextResult {
-  const commonApiUrl = env.YOLO_COMMON_API_URL || env.YOLO_API_URL;
-  if (!commonApiUrl) {
-    return { ok: false, kind: 'auth', message: 'YOLO_COMMON_API_URL (or YOLO_API_URL) env var is required' };
-  }
+  // Defaults to production when neither URL env var is set (api-url.ts).
+  const commonApiUrl = resolveCommonApiUrl(env);
   const token = currentTokenFrom(env, readFileImpl);
   if (!token) {
     return {

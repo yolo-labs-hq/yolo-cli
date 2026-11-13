@@ -86,13 +86,22 @@ const START_OK = {
 // ─── resolveDeployContext ─────────────────────────────────────────────────
 
 describe('deploy-client — resolveDeployContext', () => {
-  it('fails with kind auth when no common-api URL is configured', () => {
-    const result = resolveDeployContext({}, () => undefined);
+  it('defaults to the production API when no common-api URL is configured', () => {
+    const result = resolveDeployContext({ HOME: '/h', YOLO_API_TOKEN: 'env-tok' }, () => undefined);
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal(result.context.commonApiUrl, 'https://api.yolo.studio');
+  });
+
+  it('an explicit URL env var still wins over the default', () => {
+    const result = resolveDeployContext({ HOME: '/h', YOLO_API_TOKEN: 'env-tok', YOLO_API_URL: 'https://api-staging.yolo.studio' }, () => undefined);
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal(result.context.commonApiUrl, 'https://api-staging.yolo.studio');
+  });
+
+  it('with no URL and no token it still fails with kind auth (the token is never defaulted)', () => {
+    const result = resolveDeployContext({ HOME: '/h' }, () => undefined);
     assert.equal(result.ok, false);
-    if (!result.ok) {
-      assert.equal(result.kind, 'auth');
-      assert.match(result.message, /YOLO_COMMON_API_URL/);
-    }
+    if (!result.ok) assert.equal(result.kind, 'auth');
   });
 
   it('fails with kind auth when no token resolves from file or env', () => {

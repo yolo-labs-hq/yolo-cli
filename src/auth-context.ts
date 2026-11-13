@@ -21,6 +21,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { resolveCommonApiUrl } from './api-url.js';
 
 export interface SubstrateContext {
   sessionId: string;
@@ -80,12 +81,10 @@ export function resolveSubstrateContext(
   probe: ExecutionDomainProbe = processProbe,
 ): ResolveResult {
   const sessionId = env.SESSION_ID;
-  const commonApiUrl = env.YOLO_COMMON_API_URL || env.YOLO_API_URL;
+  // Defaults to production when neither URL env var is set (api-url.ts).
+  const commonApiUrl = resolveCommonApiUrl(env);
   if (!sessionId) {
     return { ok: false, message: 'SESSION_ID env var is required (substrate CLI is container-only in v1)' };
-  }
-  if (!commonApiUrl) {
-    return { ok: false, message: 'YOLO_COMMON_API_URL (or YOLO_API_URL) env var is required' };
   }
 
   // Inside a restricted Runner execution (docs/RUNNER_EXECUTION_BOOTSTRAP_PROTOCOL.md) the CLI has no
