@@ -21,9 +21,6 @@
  * Auth requires SESSION_ID + a common-api URL + a user access JWT.
  */
 
-import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import {
   NONPROD_TOKEN_ENV,
   NONPROD_TOKEN_FILE_ENV,
@@ -33,8 +30,9 @@ import {
   sameApiOrigin,
   targetApiUrl,
 } from './api-env.js';
-
-export { missingUserTokenMessage };
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 export interface SubstrateContext {
   sessionId: string;
@@ -185,6 +183,9 @@ export function podSessionTelemetryHeaders(env: Record<string, string | undefine
   const sid = typeof env.SESSION_ID === 'string' ? env.SESSION_ID.trim().toLowerCase() : '';
   return /^[a-f0-9]{24}$/.test(sid) ? { 'X-Yolo-Pod-Session': sid } : {};
 }
+
+/** Re-exported so every token consumer can import the failure message alongside `resolveUserToken`. */
+export { missingUserTokenMessage };
 
 export function defaultReadFile(filePath: string): string | undefined {
   try {
