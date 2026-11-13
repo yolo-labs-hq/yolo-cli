@@ -23,7 +23,9 @@
  * Production behaviour is unchanged.
  */
 
-export const PRODUCTION_API_URL = 'https://api.yolo.studio';
+import { DEFAULT_YOLO_API_URL, resolveCommonApiUrl } from './api-url.js';
+
+export const PRODUCTION_API_URL = DEFAULT_YOLO_API_URL;
 
 /** The env var holding an explicit token for a non-production API. */
 export const NONPROD_TOKEN_ENV = 'YOLO_API_TOKEN_NONPROD';
@@ -36,11 +38,10 @@ type Env = Record<string, string | undefined>;
 
 /**
  * The API the CLI will call: `YOLO_COMMON_API_URL`, then `YOLO_API_URL`, then
- * production when neither is set (the same precedence and default as the
- * CLI's URL resolution).
+ * production when neither is set (api-url.ts, the CLI's single URL resolver).
  */
 export function targetApiUrl(env: Env): string {
-  return env.YOLO_COMMON_API_URL || env.YOLO_API_URL || PRODUCTION_API_URL;
+  return resolveCommonApiUrl(env);
 }
 
 function originOf(url: string): string | undefined {

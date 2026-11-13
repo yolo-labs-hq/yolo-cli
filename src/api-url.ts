@@ -8,7 +8,7 @@
  *
  * Only the URL defaults. The token and workspace are still resolved as before
  * and are never guessed, so an unset URL cannot pair a staging credential with
- * prod by itself (staging/prod safety is tracked separately).
+ * prod by itself. Which token a non-production URL may use is api-env.ts.
  */
 export const DEFAULT_YOLO_API_URL = 'https://api.yolo.studio';
 

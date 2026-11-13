@@ -93,7 +93,8 @@ describe('deploy-client — resolveDeployContext', () => {
   });
 
   it('an explicit URL env var still wins over the default', () => {
-    const result = resolveDeployContext({ HOME: '/h', YOLO_API_TOKEN: 'env-tok', YOLO_API_URL: 'https://api-staging.yolo.studio' }, () => undefined);
+    // A non-production URL needs its own token: the sandbox YOLO_API_TOKEN is never sent there (api-env.ts).
+    const result = resolveDeployContext({ HOME: '/h', YOLO_API_TOKEN_NONPROD: 'env-tok', YOLO_API_URL: 'https://api-staging.yolo.studio' }, () => undefined);
     assert.equal(result.ok, true);
     if (result.ok) assert.equal(result.context.commonApiUrl, 'https://api-staging.yolo.studio');
   });
