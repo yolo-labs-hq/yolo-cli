@@ -17,7 +17,7 @@ import { runTileAppSign, runTileAppPublish, exitCodeForFailure } from './tileapp
 import type { FetchLike } from './tileapp-publisher.js';
 
 // No SESSION_ID — the publisher CLI is off-pod.
-const ENV = { YOLO_API_TOKEN: 'user-jwt', YOLO_COMMON_API_URL: 'https://api.example.com', HOME: '/nonexistent-home' };
+const ENV = { YOLO_API_TOKEN_NONPROD: 'user-jwt', YOLO_COMMON_API_URL: 'https://api.example.com', HOME: '/nonexistent-home' };
 const MANIFEST = { id: 'acme-app', version: '1.0.0', displayName: 'Acme', publisher: 'acme', description: 'x', ui: { icon: 'a', color: '#fff', label: 'A' }, surface: { kind: 'iframe', entry: 'index.html' }, permissions: { required: [] } };
 
 function tmpManifest(obj: unknown): string {

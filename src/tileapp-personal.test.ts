@@ -16,7 +16,7 @@ import path from 'node:path';
 import { runTileAppInit, runTileAppPublishPersonal, exitCodeForFailure, DYNAMIC_WORKERS_DISABLED_MESSAGE } from './tileapp-personal.js';
 import type { FetchLike } from './tileapp-personal.js';
 
-const ENV = { YOLO_API_TOKEN: 'user-jwt', YOLO_COMMON_API_URL: 'https://api.example.com', HOME: '/nonexistent-home' };
+const ENV = { YOLO_API_TOKEN_NONPROD: 'user-jwt', YOLO_COMMON_API_URL: 'https://api.example.com', HOME: '/nonexistent-home' };
 
 function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'yolo-personal-'));

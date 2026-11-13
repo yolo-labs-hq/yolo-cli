@@ -51,7 +51,7 @@ const STUB_BOARD = '507f1f77bcf86cd799439099';
 const STUB_ENV = {
   SESSION_ID: 'sess-abc',
   HOME: '/nonexistent-yolo-cli-test-home',
-  YOLO_API_TOKEN: 'user-jwt',
+  YOLO_API_TOKEN_NONPROD: 'user-jwt',
   YOLO_COMMON_API_URL: 'https://api.example.com',
   WORKSPACE_ID: STUB_WS,
 };
@@ -352,7 +352,7 @@ describe('kanban import', () => {
 // ─── Auth and workspace resolution ────────────────────────────────────────
 
 describe('kanban-cli — auth and workspace', () => {
-  const noToken = { ...STUB_ENV, YOLO_API_TOKEN: undefined };
+  const noToken = { ...STUB_ENV, YOLO_API_TOKEN_NONPROD: undefined };
 
   it('exits 64 with resolveSubstrateContext\'s own message when the token is missing', async () => {
     const expected = resolveSubstrateContext(noToken);

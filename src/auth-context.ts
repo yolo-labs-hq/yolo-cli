@@ -14,10 +14,22 @@
  *      problem: a long-lived shell holds whatever token was in scope at
  *      its own launch, but the file is always fresh.
  *   2. `YOLO_API_TOKEN` env — the pod-injected user JWT (≤24h TTL).
+ * Both are the sandbox's own credential, so for a NON-production API neither is
+ * used by default (api-env.ts): `YOLO_API_TOKEN_NONPROD` or `YOLO_API_TOKEN_FILE`
+ * is required instead, unless the pod was provisioned for that API.
  *
  * Auth requires SESSION_ID + a common-api URL + a user access JWT.
  */
 
+import {
+  NONPROD_TOKEN_ENV,
+  NONPROD_TOKEN_FILE_ENV,
+  isProductionApiUrl,
+  missingUserTokenMessage,
+  podProvisionedApiUrl,
+  sameApiOrigin,
+  targetApiUrl,
+} from './api-env.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -102,7 +114,7 @@ export function resolveSubstrateContext(
     return {
       ok: false,
       message:
-        'no user token available: expected a user access JWT in ~/.config/yolo/token or the YOLO_API_TOKEN env var. ' +
+        `${missingUserTokenMessage(env).replace(/\.$/, '')}. ` +
         'The substrate CLI is user-JWT-only — the INTERNAL_API_KEY fallback was removed.',
     };
   }
@@ -124,10 +136,38 @@ export function resolveUserToken(
   if (inRestrictedExecution(env, probe)) return undefined;
   const home = env.HOME || os.homedir();
   const tokenFile = path.join(home, '.config', 'yolo', 'token');
+  const target = targetApiUrl(env);
+  if (!isProductionApiUrl(target)) return resolveNonProdToken(env, target, tokenFile, readFileImpl);
   const fromFile = readFileImpl(tokenFile);
   if (fromFile && fromFile.trim()) return fromFile.trim();
   const fromEnv = env.YOLO_API_TOKEN;
   if (fromEnv && fromEnv.trim()) return fromEnv.trim();
+  return undefined;
+}
+
+/**
+ * A non-production API never gets the sandbox credential by default (see api-env.ts): an explicit
+ * `YOLO_API_TOKEN_NONPROD`, then the file named by `YOLO_API_TOKEN_FILE`, then the rotated token file
+ * ONLY when this pod was provisioned for that same API. `$YOLO_API_TOKEN` is never read here.
+ */
+function resolveNonProdToken(
+  env: Record<string, string | undefined>,
+  target: string,
+  defaultTokenFile: string,
+  readFileImpl: ReadFileImpl,
+): string | undefined {
+  const explicit = env[NONPROD_TOKEN_ENV];
+  if (explicit && explicit.trim()) return explicit.trim();
+  const explicitFile = env[NONPROD_TOKEN_FILE_ENV];
+  if (explicitFile && explicitFile.trim()) {
+    const fromExplicitFile = readFileImpl(explicitFile.trim());
+    return fromExplicitFile && fromExplicitFile.trim() ? fromExplicitFile.trim() : undefined;
+  }
+  const podUrl = podProvisionedApiUrl(env, readFileImpl);
+  if (podUrl && !isProductionApiUrl(podUrl) && sameApiOrigin(podUrl, target)) {
+    const fromFile = readFileImpl(defaultTokenFile);
+    if (fromFile && fromFile.trim()) return fromFile.trim();
+  }
   return undefined;
 }
 
@@ -142,6 +182,9 @@ export function podSessionTelemetryHeaders(env: Record<string, string | undefine
   const sid = typeof env.SESSION_ID === 'string' ? env.SESSION_ID.trim().toLowerCase() : '';
   return /^[a-f0-9]{24}$/.test(sid) ? { 'X-Yolo-Pod-Session': sid } : {};
 }
+
+/** Re-exported so every token consumer can import the failure message alongside `resolveUserToken`. */
+export { missingUserTokenMessage };
 
 export function defaultReadFile(filePath: string): string | undefined {
   try {

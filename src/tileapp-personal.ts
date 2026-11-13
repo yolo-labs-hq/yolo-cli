@@ -26,6 +26,7 @@ import { spawn } from 'node:child_process';
 import { podSessionTelemetryHeaders, resolveUserToken } from './auth-context.js';
 import { resolveCommonApiUrl } from './api-url.js';
 import { formatOwnerApprovalPending, ownerApprovalRequestedOf } from './pod-owner-approval.js';
+import { missingUserTokenMessage } from './api-env.js';
 import { validateManifest, isRuntimeManifest, isWorkerRuntimeManifest, workerBundleErrors } from './tileapp-validator.js';
 import { readImageDimensions } from './image-dimensions.js';
 import { resolveBundleDir } from './tileapp-developer.js';
@@ -80,7 +81,7 @@ type Auth = { ok: true; commonApiUrl: string; userToken: string } | { ok: false;
 function resolveAuth(env: Record<string, string | undefined>): Auth {
   const commonApiUrl = resolveCommonApiUrl(env);
   const userToken = resolveUserToken(env);
-  if (!userToken) return { ok: false, message: 'no user token: set YOLO_API_TOKEN or sign in (~/.config/yolo/token)' };
+  if (!userToken) return { ok: false, message: missingUserTokenMessage(env) };
   return { ok: true, commonApiUrl, userToken };
 }
 

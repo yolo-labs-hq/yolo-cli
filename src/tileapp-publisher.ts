@@ -14,6 +14,7 @@
  * no MCP delegation. The HTTP transport is injectable for unit tests.
  */
 
+import { missingUserTokenMessage } from './api-env.js';
 import fs from 'node:fs';
 import { podSessionTelemetryHeaders, resolveUserToken } from './auth-context.js';
 import { resolveCommonApiUrl } from './api-url.js';
@@ -31,7 +32,7 @@ function resolvePublisherAuth(env: Record<string, string | undefined>): Publishe
   const commonApiUrl = resolveCommonApiUrl(env);
   const userToken = resolveUserToken(env);
   if (!userToken) {
-    return { ok: false, message: 'no user token: set YOLO_API_TOKEN or sign in (~/.config/yolo/token)' };
+    return { ok: false, message: missingUserTokenMessage(env) };
   }
   return { ok: true, commonApiUrl, userToken };
 }

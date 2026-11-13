@@ -22,6 +22,7 @@
  * same resolution as `tileapp publish --personal`.
  */
 
+import { missingUserTokenMessage } from './api-env.js';
 import { podSessionTelemetryHeaders, resolveUserToken } from './auth-context.js';
 import { resolveCommonApiUrl } from './api-url.js';
 
@@ -44,7 +45,7 @@ type Auth = { ok: true; commonApiUrl: string; userToken: string } | { ok: false;
 function resolveAuth(env: Record<string, string | undefined>): Auth {
   const commonApiUrl = resolveCommonApiUrl(env);
   const userToken = resolveUserToken(env);
-  if (!userToken) return { ok: false, message: 'no user token: set YOLO_API_TOKEN or sign in (~/.config/yolo/token)' };
+  if (!userToken) return { ok: false, message: missingUserTokenMessage(env) };
   return { ok: true, commonApiUrl, userToken };
 }
 

@@ -32,7 +32,7 @@ import {
 
 const STUB_ENV = {
   HOME: '/nonexistent-yolo-cli-test-home',
-  YOLO_API_TOKEN: 'user-jwt',
+  YOLO_API_TOKEN_NONPROD: 'user-jwt',
   YOLO_COMMON_API_URL: 'https://api.example.com',
 };
 const WS = '507f1f77bcf86cd799439011';

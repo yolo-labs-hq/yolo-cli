@@ -28,7 +28,7 @@
  * or the real FS — the work-client.test.ts convention.
  */
 
-import { podSessionTelemetryHeaders, resolveUserToken, type ReadFileImpl } from './auth-context.js';
+import { missingUserTokenMessage, podSessionTelemetryHeaders, resolveUserToken, type ReadFileImpl } from './auth-context.js';
 import { userRouteRequest } from './work-client.js';
 import { ownerApprovalRequestedOf } from './pod-owner-approval.js';
 import { resolveCommonApiUrl } from './api-url.js';
@@ -119,8 +119,7 @@ export function resolveDeployContext(
     return {
       ok: false,
       kind: 'auth',
-      message:
-        'no user token available: expected a user access JWT in ~/.config/yolo/token or the YOLO_API_TOKEN env var',
+      message: missingUserTokenMessage(env),
     };
   }
   return { ok: true, context: { commonApiUrl, env, readFileImpl, fetchImpl } };
@@ -303,7 +302,7 @@ export async function finalizeShip(
   // surfaces as kind 'network' (exit 4); the operator checks `yolo deploy
   // status` before rerunning rather than auto-looping into a misleading error.
   const token = currentToken(ctx);
-  if (!token) return missingTokenFailure();
+  if (!token) return missingTokenFailure({ ...ctx.env, YOLO_COMMON_API_URL: ctx.commonApiUrl });
   const fetchImpl = resolveFetch(ctx);
   if (!fetchImpl) return noFetchFailure();
   const url = `${stripTrailingSlash(ctx.commonApiUrl)}/v1/deploy/projects/${enc(projectId)}/ship/${enc(shipId)}/finalize`;
@@ -726,7 +725,9 @@ async function withRetry<T extends { ok: boolean; kind?: string }>(
  * rotation must not expire a multi-leg ship mid-flight).
  */
 function currentToken(ctx: DeployContext): string | undefined {
-  return currentTokenFrom(ctx.env, ctx.readFileImpl);
+  // Decide which credential is allowed against the URL this context actually calls (api-env.ts), not
+  // whatever the env says: a context built for staging must never pick up the production token.
+  return currentTokenFrom({ ...ctx.env, YOLO_COMMON_API_URL: ctx.commonApiUrl }, ctx.readFileImpl);
 }
 
 function currentTokenFrom(
@@ -747,7 +748,7 @@ async function jsonLeg(
   init: { method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'; jsonBody?: unknown; headers?: Record<string, string> },
 ): Promise<ClientResult<unknown>> {
   const token = currentToken(ctx);
-  if (!token) return missingTokenFailure();
+  if (!token) return missingTokenFailure({ ...ctx.env, YOLO_COMMON_API_URL: ctx.commonApiUrl });
   let response;
   try {
     response = await userRouteRequest(
@@ -830,12 +831,11 @@ async function mapErrorResponse(response: {
   };
 }
 
-function missingTokenFailure(): DeployClientFailure {
+function missingTokenFailure(env: Record<string, string | undefined>): DeployClientFailure {
   return {
     ok: false,
     kind: 'auth',
-    message:
-      'no user token available: expected a user access JWT in ~/.config/yolo/token or the YOLO_API_TOKEN env var',
+    message: missingUserTokenMessage(env),
   };
 }
 

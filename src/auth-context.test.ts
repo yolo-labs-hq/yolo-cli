@@ -9,9 +9,10 @@ import {
   EXECUTION_MARKER_ENVS, EXECUTION_WORKER_UID, inRestrictedExecution, podSessionTelemetryHeaders, resolveSubstrateContext, resolveUserToken,
 } from './auth-context.js';
 
+// The production API: where the sandbox credential (token file, YOLO_API_TOKEN) is the default.
 const BASE_ENV = {
   SESSION_ID: 'sess-1',
-  YOLO_COMMON_API_URL: 'https://api.example.com',
+  YOLO_COMMON_API_URL: 'https://api.yolo.studio',
 };
 
 // A readFile stub that returns content only for the rotated-token path.
@@ -52,7 +53,7 @@ describe('resolveSubstrateContext', () => {
     if (res.ok) {
       assert.equal(res.context.userToken, 'file-token');
       assert.equal(res.context.sessionId, 'sess-1');
-      assert.equal(res.context.commonApiUrl, 'https://api.example.com');
+      assert.equal(res.context.commonApiUrl, 'https://api.yolo.studio');
     }
   });
 
@@ -146,7 +147,7 @@ describe('resolveSubstrateContext — restricted Runner execution', () => {
   it('is unchanged everywhere else: the variable absent or empty is an ordinary session', () => {
     for (const env of [{ ...BASE_ENV, HOME: '/home/yolo' }, { ...BASE_ENV, HOME: '/home/yolo', YOLO_EXECUTION_BROKER_SOCKET: '' }]) {
       const result = resolveSubstrateContext(env, fileStub({ '/home/yolo/.config/yolo/token': 'file-token' }));
-      assert.deepEqual(result, { ok: true, context: { sessionId: 'sess-1', commonApiUrl: 'https://api.example.com', userToken: 'file-token' } });
+      assert.deepEqual(result, { ok: true, context: { sessionId: 'sess-1', commonApiUrl: 'https://api.yolo.studio', userToken: 'file-token' } });
     }
   });
 });

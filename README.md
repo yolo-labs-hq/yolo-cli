@@ -21,6 +21,20 @@ Artifact commands mint a scoped delegated token through
 Offline commands such as app scaffolding, validation, and local serving do not
 require authentication.
 
+**Non-production APIs.** The token file and `YOLO_API_TOKEN` are the sandbox's
+own credential, so when the API URL is not production (`https://api.yolo.studio`)
+the CLI does not use them by default. Set `YOLO_API_TOKEN_NONPROD` to a token for
+that API, or `YOLO_API_TOKEN_FILE` to a file holding one. Without either, commands
+fail and say so. A sandbox provisioned for that same API (its `/run/yolo/env`
+names it) still uses its rotated token file. On a non-production API,
+`yolo deploy init` and `yolo deploy link` also do not use `$WORKSPACE_ID`, so a
+server-side workspace association needs an explicit `--workspace-id`.
+
+Worker ships always send `crons` (`[]` when none are declared). The server
+refuses a Worker that defines `scheduled()` from a client that omits the field
+(`cron-client-outdated`). CLIs older than 1.1.0 cannot read wrangler
+`triggers.crons` and would ship without them.
+
 Build and test locally:
 
 ```sh
