@@ -91,10 +91,12 @@ function printHelp(): void {
       '  git doctor [opts]                         Diagnose why git (not gh) can\'t authenticate to github.com.',
       '    [--fix]                                 Repair what is safe to (store file, helpers, remote URL), then re-check.',
       '    [--offline] [--remote <name>] [--json]  Skip network checks; remote to probe (default: origin); JSON output.',
+      '  tileapp --help                            List the tileapp subcommands; `yolo tileapp <sub> --help` for one.',
       '  tileapp init <name>                       Scaffold a personal app (./<name>/tileapp.json + index.html).',
       '  tileapp validate <manifest> [opts]        Offline lint: manifest schema + bundle layout (no auth).',
-      '  tileapp media push <manifest> [--dir d]   Upload store screenshots (additive — leaves the rest of the bundle alone).',
+      '    [--personal | --marketplace]            Rules to apply (default: personal when `publisher` is absent or "personal").',
       '    [--bundle-dir <dir>]                    Override the static-bundle directory to check.',
+      '  tileapp media push <manifest> [--dir d]   Upload store screenshots (additive — leaves the rest of the bundle alone).',
       '  tileapp dev <manifest> [opts]             Serve the bundle locally + a mock broker (offline iterate).',
       '    [--port N] [--host H]                   Bind (default: 127.0.0.1:$PORT|3000).',
       '    [--bundle-dir <dir>] [--deny]           Override bundle dir; --deny = mock broker denies all.',
@@ -107,6 +109,7 @@ function printHelp(): void {
       "                                            'worker'`): uploads the bundle incl. its _worker/ backend, no build.",
       '    [--live]                                Worker: run the backend live on Dynamic Workers (owner only, in-progress).',
       '    [--bundle-dir <dir>]                    Pure-UI: override the static-bundle directory to upload.',
+      '    [--include <path>]                      Upload a README*/*.md file that is skipped by default (repeatable).',
       '    [--context <dir>] [--dockerfile <f>]    Runtime: build context + Dockerfile (default: the manifest dir).',
       '    [--builder auto|podman|skopeo]          Runtime build engine. auto (default): skopeo assembler for RUN-less',
       '                                            Dockerfiles (no container engine — works in-pod), else podman.',
@@ -152,20 +155,57 @@ interface ParseError {
   message: string;
 }
 
-function tileAppUsage(sub: 'sign' | 'publish' | 'validate' | 'dev' | 'init' | 'install' | 'add-tile' | 'media', message: string): number {
+type TileAppSub = 'sign' | 'publish' | 'validate' | 'dev' | 'init' | 'install' | 'add-tile' | 'media';
+
+/** One usage block per `yolo tileapp` subcommand: printed to stdout for `--help`, to stderr on a usage error. */
+const TILEAPP_USAGE: Record<TileAppSub, string> = {
+  init: 'Usage: yolo tileapp init <name>\n'
+    + '  Scaffold a personal app: ./<name>/tileapp.json + index.html + app.js + style.css.\n'
+    + '  The manifest has `id` (the app\'s local name) and no `publisher`: the server stamps it.\n',
+  sign: 'Usage: yolo tileapp sign <manifest.json> --publisher <id> [--key <keyId>] [--stdout]\n'
+    + '  KMS-sign a marketplace manifest (POST /v1/publisher/sign).\n',
+  publish: 'Usage: yolo tileapp publish <manifest.json> --personal [--bundle-dir <dir>] [--include <path>]... [--context <dir>] [--dockerfile <f>] [--builder auto|podman|skopeo] [--live]   (personal app)\n'
+    + '   or: yolo tileapp publish <manifest.json> [--channel beta|stable] [--image-digest <d>]   (marketplace)\n'
+    + '  Bundle files: dotfiles, node_modules/, README* and *.md / *.markdown files are NOT uploaded (the\n'
+    + '  bundle is served publicly) unless the file is surface.entry, is referenced by another uploaded\n'
+    + '  file, or is named with --include <path> (repeatable, relative to the bundle dir).\n'
+    + '  If the app is installed in this workspace, a new version moves that install to it\n'
+    + '  (when it asks for no new permissions); otherwise the output names the one command to run.\n',
+  validate: 'Usage: yolo tileapp validate <manifest.json> [--bundle-dir <dir>] [--personal | --marketplace]\n'
+    + '  Offline lint (no auth). Without a flag, a manifest with no `publisher` (or "personal") is\n'
+    + '  checked with the personal-app rules, any other publisher with the marketplace rules.\n',
+  dev: 'Usage: yolo tileapp dev <manifest.json> [--port N] [--host H] [--bundle-dir <dir>] [--deny]\n'
+    + '  Serve the bundle locally with a mock broker (allow-all; --deny refuses everything).\n',
+  install: 'Usage: yolo tileapp install <appId> --workspace <workspaceId> [--accept-optional <perm>]...\n',
+  'add-tile': 'Usage: yolo tileapp add-tile <appId> --workspace <workspaceId> [--name <name>] [--version <v>]\n',
+  media: 'Usage: yolo tileapp media push <manifest.json> [--dir <dir>]   (uploads store screenshots; additive, never touches the rest of the bundle)\n',
+};
+
+const TILEAPP_SUBS: TileAppSub[] = ['init', 'validate', 'dev', 'sign', 'publish', 'media', 'install', 'add-tile'];
+
+const TILEAPP_GROUP_USAGE = [
+  'Usage: yolo tileapp <subcommand> [args]   (`yolo tileapp <subcommand> --help` for its options)',
+  '',
+  '  init <name>                     Scaffold a personal app.',
+  '  validate <manifest>             Offline lint: manifest schema + bundle layout.',
+  '  dev <manifest>                  Serve the bundle locally with a mock broker.',
+  '  publish <manifest> --personal   Register a personal app (no signing or review).',
+  '  publish <manifest>              Submit a signed manifest for marketplace review.',
+  '  sign <manifest>                 KMS-sign a marketplace manifest.',
+  '  media push <manifest>           Upload store screenshots.',
+  '  install <appId>                 Install an app into a workspace.',
+  '  add-tile <appId>                Place an app tile in a workspace.',
+  '',
+].join('\n');
+
+/** `--help` / `-h` anywhere in a subcommand's args. */
+function wantsHelp(args: readonly string[]): boolean {
+  return args.some((a) => a === '--help' || a === '-h');
+}
+
+function tileAppUsage(sub: TileAppSub, message: string): number {
   process.stderr.write(`yolo tileapp ${sub}: ${message}\n`);
-  const usage: Record<string, string> = {
-    init: 'Usage: yolo tileapp init <name>   (scaffolds ./<name>/tileapp.json + index.html)\n',
-    sign: 'Usage: yolo tileapp sign <manifest.json> --publisher <id> [--key <keyId>] [--stdout]\n',
-    publish: 'Usage: yolo tileapp publish <manifest.json> --personal [--bundle-dir <dir>] [--context <dir>] [--dockerfile <f>] [--builder auto|podman|skopeo] [--live]   (personal app)\n'
-      + '   or: yolo tileapp publish <manifest.json> [--channel beta|stable] [--image-digest <d>]   (marketplace)\n',
-    validate: 'Usage: yolo tileapp validate <manifest.json> [--bundle-dir <dir>] [--personal]\n',
-    dev: 'Usage: yolo tileapp dev <manifest.json> [--port N] [--host H] [--bundle-dir <dir>] [--deny]\n',
-    install: 'Usage: yolo tileapp install <appId> --workspace <workspaceId> [--accept-optional <perm>]...\n',
-    'add-tile': 'Usage: yolo tileapp add-tile <appId> --workspace <workspaceId> [--name <name>] [--version <v>]\n',
-    media: 'Usage: yolo tileapp media push <manifest.json> [--dir <dir>]   (uploads store screenshots; additive, never touches the rest of the bundle)\n',
-  };
-  process.stderr.write(usage[sub]);
+  process.stderr.write(TILEAPP_USAGE[sub]);
   return 64;
 }
 
@@ -268,9 +308,11 @@ async function runTileAppPublishCmd(args: string[]): Promise<number> {
   let builder: 'auto' | 'podman' | 'skopeo' | undefined;
   let personal = false;
   let live = false;
+  const include: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === '--personal' || a === '--private') { personal = true; }
+    else if (a === '--include') { const v = args[++i]; if (!v || v.startsWith('--')) return tileAppUsage('publish', '--include requires a value'); include.push(v); }
     else if (a === '--live') { live = true; }
     else if (a === '--bundle-dir') { bundleDir = args[++i]; if (bundleDir === undefined) return tileAppUsage('publish', '--bundle-dir requires a value'); }
     else if (a === '--context') { context = args[++i]; if (context === undefined) return tileAppUsage('publish', '--context requires a value'); }
@@ -294,14 +336,14 @@ async function runTileAppPublishCmd(args: string[]): Promise<number> {
   // bundle (no signing/review). Distinct from the marketplace publish below.
   if (personal) {
     const { runTileAppPublishPersonal, exitCodeForFailure } = await import('./tileapp-personal.js');
-    const result = await runTileAppPublishPersonal({ manifestPath, bundleDir, context, dockerfile, builder, live });
+    const result = await runTileAppPublishPersonal({ manifestPath, bundleDir, include, context, dockerfile, builder, live });
     if (result.ok) { process.stdout.write(`${result.output}\n`); return 0; }
     // D040 P2: staged for the owner — PENDING on stdout, not a FAIL.
     if (result.kind === 'awaiting-approval') { process.stdout.write(`${result.message}\n`); return exitCodeForFailure(result.kind); }
     process.stderr.write(`FAIL [${result.kind}]: ${result.message}\n`);
     return exitCodeForFailure(result.kind);
   }
-  if (bundleDir || context || dockerfile || builder || live) return tileAppUsage('publish', '--bundle-dir/--context/--dockerfile/--builder/--live are only valid with --personal');
+  if (bundleDir || include.length > 0 || context || dockerfile || builder || live) return tileAppUsage('publish', '--bundle-dir/--include/--context/--dockerfile/--builder/--live are only valid with --personal');
 
   const result = await runTileAppPublish({ manifestPath, channel, imageDigest });
   if (result.ok) { process.stdout.write(`${result.output}\n`); return 0; }
@@ -352,11 +394,12 @@ async function runTileAppValidateCmd(args: string[]): Promise<number> {
   const { runTileAppValidate, devExitCode } = await import('./tileapp-developer.js');
   let manifestPath: string | undefined;
   let bundleDir: string | undefined;
-  let personal = false;
+  let personal: boolean | undefined;
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === '--bundle-dir') { bundleDir = args[++i]; if (bundleDir === undefined) return tileAppUsage('validate', '--bundle-dir requires a value'); }
-    else if (a === '--personal') { personal = true; }
+    else if (a === '--personal') { if (personal === false) return tileAppUsage('validate', '--personal and --marketplace are mutually exclusive'); personal = true; }
+    else if (a === '--marketplace') { if (personal === true) return tileAppUsage('validate', '--personal and --marketplace are mutually exclusive'); personal = false; }
     else if (!a.startsWith('-') && !manifestPath) manifestPath = a;
     else return tileAppUsage('validate', `unexpected argument '${a}'`);
   }
@@ -598,20 +641,30 @@ async function main(argv: string[]): Promise<number> {
 
   if (cmd === 'tileapp') {
     const sub = args[1];
-    if (sub === 'init') return runTileAppInitCmd(args.slice(2));
-    if (sub === 'sign') return runTileAppSignCmd(args.slice(2));
-    if (sub === 'publish') return runTileAppPublishCmd(args.slice(2));
-    if (sub === 'validate') return runTileAppValidateCmd(args.slice(2));
-    if (sub === 'dev') return runTileAppDevCmd(args.slice(2));
-    if (sub === 'install') return runTileAppInstallCmd(args.slice(2));
-    if (sub === 'add-tile') return runTileAppAddTileCmd(args.slice(2));
-    if (sub === 'media') return runTileAppMediaCmd(args.slice(2));
+    const rest = args.slice(2);
+    if (sub === '--help' || sub === '-h' || sub === 'help') {
+      process.stdout.write(TILEAPP_GROUP_USAGE);
+      return 0;
+    }
+    if (sub && (TILEAPP_SUBS as string[]).includes(sub) && wantsHelp(rest)) {
+      process.stdout.write(TILEAPP_USAGE[sub as TileAppSub]);
+      return 0;
+    }
+    if (sub === 'init') return runTileAppInitCmd(rest);
+    if (sub === 'sign') return runTileAppSignCmd(rest);
+    if (sub === 'publish') return runTileAppPublishCmd(rest);
+    if (sub === 'validate') return runTileAppValidateCmd(rest);
+    if (sub === 'dev') return runTileAppDevCmd(rest);
+    if (sub === 'install') return runTileAppInstallCmd(rest);
+    if (sub === 'add-tile') return runTileAppAddTileCmd(rest);
+    if (sub === 'media') return runTileAppMediaCmd(rest);
     if (!sub) {
       process.stderr.write('yolo: tileapp requires a subcommand (init, validate, dev, sign, publish, media, install, add-tile)\n');
+      process.stderr.write(TILEAPP_GROUP_USAGE);
       return 64;
     }
     process.stderr.write(`yolo: unknown tileapp subcommand '${sub}'\n`);
-    process.stderr.write('Subcommands: init, validate, dev, sign, publish, media, install, add-tile\n');
+    process.stderr.write(TILEAPP_GROUP_USAGE);
     return 64;
   }
 

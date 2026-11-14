@@ -22,7 +22,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as http from 'node:http';
 import { createServeHandler } from './serve.js';
-import { validateManifest, isRuntimeManifest, isWorkerRuntimeManifest, publishGateErrors } from './tileapp-validator.js';
+import { isRuntimeManifest, isPersonalManifest, lintManifest } from './tileapp-validator.js';
 
 /** The mock-broker + helper routes the dev server mounts (under a reserved
  *  prefix so they can't collide with a real bundle asset path). */
@@ -116,10 +116,11 @@ export interface ValidateOptions {
   manifestPath: string;
   bundleDir?: string;
   /**
-   * Lint as a PERSONAL app (`publish --personal`). Off by default because the
-   * partner path is the stricter one: partner ingest uploads no media, so a
-   * `media/<file>` screenshot ref must fail here rather than pass the lint and
-   * be rejected server-side at publish.
+   * Lint as a PERSONAL app (`publish --personal`): true = `--personal`, false =
+   * `--marketplace`, undefined = infer from the manifest (`isPersonalManifest`:
+   * no `publisher`, or `"personal"`, means personal). The marketplace rules are
+   * the stricter ones (a `publisher`, a pinned image digest for a runtime app,
+   * https-only screenshots, since partner ingest uploads no media).
    */
   personal?: boolean;
 }
@@ -128,15 +129,9 @@ export function runTileAppValidate(opts: ValidateOptions): DevResult {
   const read = readManifestFile(opts.manifestPath);
   if (!read.ok) return { ok: false, kind: 'io', message: read.message };
 
-  // A runtime personal app publishes an OCI archive and gets no R2 bundle, so
-  // only a PURE-UI personal manifest may use the `media/<file>` ref form.
-  const v = validateManifest(read.manifest, {
-    allowPlatformHostedScreenshots: !!opts.personal && !isRuntimeManifest(read.manifest),
-  });
-  // The image-digest gate is the marketplace publish rule; a PERSONAL worker app
-  // ships its backend in the bundle and has no image to pin.
-  const skipGate = !!opts.personal && isWorkerRuntimeManifest(read.manifest);
-  const errors = [...v.errors, ...(skipGate ? [] : publishGateErrors(read.manifest))];
+  const inferred = opts.personal === undefined;
+  const personal = opts.personal ?? isPersonalManifest(read.manifest);
+  const errors = lintManifest(read.manifest, { personal });
 
   // A non-object manifest is fully reported by validateManifest; bail before the
   // bundle/runtime checks (which deref manifest fields) so we never crash on it.
@@ -157,13 +152,17 @@ export function runTileAppValidate(opts: ValidateOptions): DevResult {
   }
 
   if (errors.length > 0) {
-    return { ok: false, kind: 'validation', message: `manifest invalid (${errors.length} issue${errors.length === 1 ? '' : 's'}):\n  - ${errors.join('\n  - ')}` };
+    const rules = personal ? 'personal-app rules' : 'marketplace rules';
+    return { ok: false, kind: 'validation', message: `manifest invalid under the ${rules} (${errors.length} issue${errors.length === 1 ? '' : 's'}):\n  - ${errors.join('\n  - ')}` };
   }
   const id = String(read.manifest.id);
   const version = String(read.manifest.version);
+  const modeNote = personal
+    ? `\n  rules: personal app${inferred ? ' (no marketplace `publisher`; pass --marketplace for the marketplace rules)' : ''} — publish with: yolo tileapp publish ${opts.manifestPath} --personal`
+    : `\n  rules: marketplace${inferred ? ` (publisher '${String(read.manifest.publisher)}'; pass --personal for a personal app)` : ''}`;
   return {
     ok: true,
-    output: `OK: ${id}@${version} is valid.${bundleNote}\n  note: mcp-scope + secret-key NAMES are confirmed server-side at publish.`,
+    output: `OK: ${id}@${version} is valid.${bundleNote}${modeNote}\n  note: mcp-scope + secret-key NAMES are confirmed server-side at publish.`,
   };
 }
 
@@ -219,7 +218,7 @@ export async function runTileAppDev(opts: DevServeOptions): Promise<number> {
   // Block on schema AND publish-gate errors before serving — `dev` claims to
   // validate before serving, so it must reject anything publish would (e.g. an
   // image-only manifest missing its pinned digest).
-  const gateErrors = [...validateManifest(read.manifest).errors, ...publishGateErrors(read.manifest)];
+  const gateErrors = lintManifest(read.manifest, { personal: isPersonalManifest(read.manifest) });
   if (gateErrors.length) {
     process.stderr.write(`FAIL [validation]: manifest invalid:\n  - ${gateErrors.join('\n  - ')}\n`);
     return devExitCode('validation');

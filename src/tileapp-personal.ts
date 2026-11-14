@@ -23,7 +23,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { podSessionTelemetryHeaders, resolveUserToken } from './auth-context.js';
+import { defaultReadFile, podSessionTelemetryHeaders, resolveUserToken } from './auth-context.js';
+import { isProductionTarget, podProvisionedApiUrl, sameApiOrigin, targetApiUrl } from './api-env.js';
 import { resolveCommonApiUrl } from './api-url.js';
 import { formatOwnerApprovalPending, ownerApprovalRequestedOf } from './pod-owner-approval.js';
 import { missingUserTokenMessage } from './api-env.js';
@@ -132,7 +133,9 @@ export function runTileAppInit(opts: InitOptions): CmdResult {
     id: name,
     version: '1.0.0',
     displayName: title,
-    publisher: 'personal',
+    // No `publisher`: a personal app omits it and the server stamps
+    // `personal:<ownerId>`. `id` is the app's LOCAL name; the server namespaces
+    // it to `pa-<ownerId>-<id>` (see isPersonalManifest).
     description: `${title} — a personal tile-app.`,
     ui: { icon: '🧩', color: '#4f46e5', label: title },
     surface: { kind: 'iframe', entry: 'index.html', tilePrefersSize: { rowSpan: 2, colSpan: 2 } },
@@ -193,36 +196,10 @@ body { font: 15px/1.5 system-ui, sans-serif; margin: 0; display: grid; place-ite
 const status = document.getElementById('status');
 if (status) status.textContent = 'Ready — edit app.js to build your app.';
 `;
-  // Store screenshots live in `media/`. Scaffolding the directory (with a
-  // README, since an empty dir wouldn't survive and a dotfile is skipped by
-  // both the collector and the server) is what makes the feature discoverable
-  // — an author who never learns the folder exists ships a listing with no
-  // preview and no idea one was possible.
-  const mediaReadme = `# Store screenshots
-
-Drop screenshots here, then reference them from tileapp.json:
-
-    "screenshots": ["media/01-main.webp"]
-
-\`yolo tileapp publish tileapp.json --personal\` walks this directory and
-uploads whatever is in it; the platform serves each file at
-/v1/tileapps/<appId>/media/<file>.
-
-  format   1280x800 (16:10) webp, <= 400 KB each, 1-6 images, first is the hero
-  capture  render at 2x and downscale — the store card crops to ~320px wide
-  content  show the app doing its job on realistic data; an empty state or a
-           permission prompt is a wasted slot
-  budget   bundles cap at 100 files / 3 MB total
-
-An absolute https:// URL works too, and is the ONLY option for a runtime app
-(it publishes an image, not a bundle, so it has nowhere to put these).
-
-Upload (additive — leaves the rest of your bundle alone):
-
-    yolo tileapp media push tileapp.json
-
-Check refs before publishing:  yolo tileapp validate tileapp.json --personal
-`;
+  // Store screenshots live in `media/`. The directory is created EMPTY: a
+  // README there would be uploaded with the bundle and served publicly (and
+  // `publish` now skips README/*.md files anyway). The guidance is in the
+  // output below instead.
   try {
     fs.mkdirSync(dir, { recursive: false });
     fs.writeFileSync(path.join(dir, 'tileapp.json'), `${JSON.stringify(manifest, null, 2)}\n`);
@@ -230,13 +207,12 @@ Check refs before publishing:  yolo tileapp validate tileapp.json --personal
     fs.writeFileSync(path.join(dir, 'app.js'), appJs);
     fs.writeFileSync(path.join(dir, 'style.css'), styleCss);
     fs.mkdirSync(path.join(dir, 'media'), { recursive: false });
-    fs.writeFileSync(path.join(dir, 'media', 'README.md'), mediaReadme);
   } catch (e) {
     return { ok: false, kind: 'io', message: `scaffold failed: ${(e as Error).message}` };
   }
   return {
     ok: true,
-    output: `Created ${name}/ (tileapp.json + index.html + app.js + style.css + media/)\n  note: bundle CSP is \`script-src 'self'\` — keep JS in app.js (no inline <script>, no eval, no network); CSS goes in style.css\n  note: drop a 1280x800 webp in media/ and add \`"screenshots": ["media/01-main.webp"]\` to get a store preview (see media/README.md)\n  next: cd ${name} && yolo tileapp publish tileapp.json --personal`,
+    output: `Created ${name}/ (tileapp.json + index.html + app.js + style.css + media/)\n  note: bundle CSP is \`script-src 'self'\` — keep JS in app.js (no inline <script>, no eval, no network); CSS goes in style.css\n  note: store preview: drop a 1280x800 (16:10) webp, <= 400 KB, in media/ and add \`"screenshots": ["media/01-main.webp"]\` (1-6 images, the first is the hero; \`yolo tileapp media push tileapp.json\` uploads them without a full publish)\n  note: tileapp.json has no \`publisher\` on purpose: the server stamps it; \`id\` is your app's local name\n  next: cd ${name} && yolo tileapp publish tileapp.json --personal`,
   };
 }
 
@@ -316,7 +292,7 @@ export async function runTileAppMediaPush(opts: MediaPushOptions): Promise<CmdRe
   const dir = path.resolve(opts.dir ?? path.join(path.dirname(path.resolve(opts.manifestPath)), 'media'));
   let entries: string[];
   try { entries = fs.readdirSync(dir); }
-  catch { return { ok: false, kind: 'io', message: `no media directory at ${dir} — create it and add your screenshots (see media/README.md from \`yolo tileapp init\`)` }; }
+  catch { return { ok: false, kind: 'io', message: `no media directory at ${dir} — create it and add your screenshots (1280x800 webp, referenced as \"screenshots\": [\"media/<file>\"])` }; }
 
   const files: Array<{ name: string; content: string }> = [];
   for (const name of entries.sort()) {
@@ -437,6 +413,8 @@ export async function runTileAppMediaPush(opts: MediaPushOptions): Promise<CmdRe
 export interface PublishPersonalOptions {
   manifestPath: string;
   bundleDir?: string;
+  /** Doc files (README*, *.md) to upload anyway — see `collectBundleFiles`. */
+  include?: string[];
   /** Runtime apps: build context + Dockerfile (default: the manifest's dir). */
   context?: string;
   dockerfile?: string;
@@ -451,22 +429,58 @@ export interface PublishPersonalOptions {
   env?: Record<string, string | undefined>;
 }
 
-/** Recursively collect a bundle dir's files as upload entries. Skips VCS/dep
- *  dirs and the manifest itself; classifies text vs binary by extension. */
-function collectBundleFiles(
+type BundleFile = { path: string; content: string; encoding: 'utf8' | 'base64' };
+
+/**
+ * Documentation files the bundle does NOT upload by default: `README*` (any
+ * extension, any case) and `*.md` / `*.markdown`, at any depth. A bundle is
+ * served PUBLICLY at the app's origin, and these are almost always notes for
+ * the author (e.g. the old `init`'s media/README.md), not app content.
+ */
+export function isBundleDocFile(relPath: string): boolean {
+  const base = relPath.slice(relPath.lastIndexOf('/') + 1).toLowerCase();
+  return /^readme(\..*)?$/.test(base) || base.endsWith('.md') || base.endsWith('.markdown');
+}
+
+/**
+ * Recursively collect a bundle dir's files as upload entries.
+ *
+ * What is NOT uploaded (the bundle is public):
+ *   - dotfiles / dot-directories, and the `node_modules`, VCS and `.yolo` dirs
+ *   - the manifest itself
+ *   - documentation files (`isBundleDocFile`), UNLESS the file is
+ *       · `surface.entry`, or
+ *       · named in `include` (`--include <path>`, relative to the bundle dir), or
+ *       · referenced from an uploaded text file (html/js/css/json/svg/…) by its
+ *         bundle path or its file name — the app fetches or links it.
+ * Skipped doc files are returned in `skipped` so publish can say so.
+ */
+export function collectBundleFiles(
   rootDir: string,
   manifestPath: string,
-): { ok: true; files: Array<{ path: string; content: string; encoding: 'utf8' | 'base64' }>; totalBytes: number } | { ok: false; message: string } {
-  const out: Array<{ path: string; content: string; encoding: 'utf8' | 'base64' }> = [];
+  opts: { entry?: string; include?: readonly string[] } = {},
+): { ok: true; files: BundleFile[]; totalBytes: number; skipped: string[] } | { ok: false; message: string } {
+  const out: BundleFile[] = [];
+  const docs: Array<{ rel: string; abs: string }> = [];
   const manifestAbs = path.resolve(manifestPath);
   const root = path.resolve(rootDir);
   let total = 0;
   const SKIP_DIRS = new Set(['node_modules', '.git', '.yolo']);
 
+  const add = (rel: string, buf: Buffer): string | null => {
+    total += buf.byteLength;
+    if (out.length + 1 > MAX_FILES) return `too many files (max ${MAX_FILES})`;
+    if (total > MAX_TOTAL_BYTES) return `bundle exceeds ${MAX_TOTAL_BYTES} bytes — use a smaller bundle`;
+    const ext = path.extname(rel).toLowerCase();
+    if (TEXT_EXTS.has(ext)) out.push({ path: rel, content: buf.toString('utf8'), encoding: 'utf8' });
+    else out.push({ path: rel, content: buf.toString('base64'), encoding: 'base64' });
+    return null;
+  };
+
   const walk = (abs: string): string | null => {
     for (const entry of fs.readdirSync(abs, { withFileTypes: true })) {
       // Skip dotfiles/dotdirs entirely — the bundle is served PUBLICLY, so a
-      // stray .env/.npmrc/.git from the project dir must never be uploaded (the
+      // stray .env/.npmrc from the project dir must never be uploaded (the
       // server's sanitizeBundlePath also rejects dot-leading paths). codex Round-3 P1.
       if (entry.name.startsWith('.')) continue;
       const childAbs = path.join(abs, entry.name);
@@ -479,13 +493,9 @@ function collectBundleFiles(
       if (!entry.isFile()) continue;
       if (path.resolve(childAbs) === manifestAbs) continue; // never upload the manifest
       const rel = path.relative(root, childAbs).split(path.sep).join('/');
-      const buf = fs.readFileSync(childAbs);
-      total += buf.byteLength;
-      if (out.length + 1 > MAX_FILES) return `too many files (max ${MAX_FILES})`;
-      if (total > MAX_TOTAL_BYTES) return `bundle exceeds ${MAX_TOTAL_BYTES} bytes — use a smaller bundle`;
-      const ext = path.extname(rel).toLowerCase();
-      if (TEXT_EXTS.has(ext)) out.push({ path: rel, content: buf.toString('utf8'), encoding: 'utf8' });
-      else out.push({ path: rel, content: buf.toString('base64'), encoding: 'base64' });
+      if (isBundleDocFile(rel)) { docs.push({ rel, abs: childAbs }); continue; } // decided below
+      const err = add(rel, fs.readFileSync(childAbs));
+      if (err) return err;
     }
     return null;
   };
@@ -496,8 +506,36 @@ function collectBundleFiles(
   } catch (e) {
     return { ok: false, message: `reading bundle failed: ${(e as Error).message}` };
   }
+
+  const norm = (p: string) => p.split('\\').join('/').replace(/^(\.\/)+/, '').replace(/^\/+/, '');
+  const include = new Set((opts.include ?? []).map(norm));
+  const docPaths = new Set(docs.map((d) => d.rel));
+  for (const inc of include) {
+    if (!docPaths.has(inc) && !out.some((f) => f.path === inc)) {
+      return { ok: false, message: `--include ${inc}: no such file in the bundle dir ${rootDir} (dotfiles are never uploaded)` };
+    }
+  }
+  const entry = norm(opts.entry || 'index.html');
+  const texts = out.filter((f) => f.encoding === 'utf8').map((f) => f.content);
+  const referenced = (rel: string) => {
+    const base = rel.slice(rel.lastIndexOf('/') + 1);
+    return texts.some((t) => t.includes(rel) || t.includes(base));
+  };
+  const skipped: string[] = [];
+  for (const d of docs.sort((x, y) => (x.rel < y.rel ? -1 : x.rel > y.rel ? 1 : 0))) {
+    if (d.rel === entry || include.has(d.rel) || referenced(d.rel)) {
+      try {
+        const err = add(d.rel, fs.readFileSync(d.abs));
+        if (err) return { ok: false, message: err };
+      } catch (e) {
+        return { ok: false, message: `reading bundle failed: ${(e as Error).message}` };
+      }
+    } else {
+      skipped.push(d.rel);
+    }
+  }
   if (out.length === 0) return { ok: false, message: `no files found in bundle dir: ${rootDir}` };
-  return { ok: true, files: out, totalBytes: total };
+  return { ok: true, files: out, totalBytes: total, skipped };
 }
 
 export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): Promise<CmdResult> {
@@ -540,7 +578,7 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
   // Pure-UI path: strict schema lint (the server re-validates authoritatively).
   // This IS the path that gets an R2 bundle, so the `media/<file>` screenshot
   // form is available to it — see ScreenshotRefOptions.
-  const v = validateManifest(read.manifest, { allowPlatformHostedScreenshots: true });
+  const v = validateManifest(read.manifest, { personal: true, allowPlatformHostedScreenshots: true });
   if (v.errors.length > 0) {
     return { ok: false, kind: 'validation', message: `manifest invalid:\n  - ${v.errors.join('\n  - ')}` };
   }
@@ -549,7 +587,10 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
   // fails before we create a registry doc.
   const resolved = resolveBundleDir(opts.manifestPath, read.manifest, opts.bundleDir);
   if (!resolved.ok) return { ok: false, kind: 'io', message: `bundle: ${resolved.message}` };
-  const collected = collectBundleFiles(resolved.dir, opts.manifestPath);
+  const collected = collectBundleFiles(resolved.dir, opts.manifestPath, {
+    entry: (read.manifest.surface as { entry?: string } | undefined)?.entry,
+    include: opts.include,
+  });
   if (!collected.ok) return { ok: false, kind: 'io', message: collected.message };
   // The server refuses a worker bundle without its backend (INVALID_WORKER_BUNDLE)
   // — but only at upload, after the manifest is registered. Check it first.
@@ -580,6 +621,8 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
   // go in ONE request, so the owner approves the publish once. Falls back to the
   // two-step path below on a server that predates the batch route.
   let uploadJson: BundleUploadResponse = {};
+  let installReport: InstallUpgradeReport | undefined;
+  const workspaceId = workspaceIdOf(env);
   let appId = '';
   let batched = false;
   if (inWorkspacePod(env)) {
@@ -587,12 +630,18 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
       const res = await fetchImpl(`${base}/tileapps/personal/publish-batch`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ id: localId, manifest: read.manifest, files: collected.files, ...(opts.live ? { live: true } : {}) }),
+        // `workspaceId`: this pod's workspace, so the server can move an existing
+        // install there to the new version (the install route's own checks apply).
+        body: JSON.stringify({
+          id: localId, manifest: read.manifest, files: collected.files,
+          ...(opts.live ? { live: true } : {}),
+          ...(workspaceId ? { workspaceId } : {}),
+        }),
       });
       const staged = await stagedForOwner(res, `publishing personal app '${localId}'`);
       if (staged) return staged;
       const text = await safeText(res);
-      let json: { appId?: string; bundle?: BundleUploadResponse; failedStep?: string; code?: string } = {};
+      let json: { appId?: string; bundle?: BundleUploadResponse; install?: InstallUpgradeReport; failedStep?: string; code?: string } = {};
       try { json = JSON.parse(text) as typeof json; } catch { /* not JSON */ }
       const missingRoute = res.status === 404 && json.code !== 'feature-disabled';
       if (!missingRoute) {
@@ -606,6 +655,7 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
         if (!json.appId) return { ok: false, kind: 'http', message: 'publish response missing appId' };
         appId = json.appId;
         uploadJson = json.bundle ?? {};
+        installReport = json.install;
         batched = true;
       }
     } catch (e) {
@@ -653,9 +703,10 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
     }
   }
 
-  const summary = `Published ${appId} (${collected.files.length} file${collected.files.length === 1 ? '' : 's'}, ${collected.totalBytes} bytes)`;
-  const next = '  next: install it + add a tile from the workspace (or via the studio.install_app / studio.create_app_tile MCP tools).';
-  if (!isWorker) return { ok: true, output: `${summary}\n${next}` };
+  const summary = `Published ${appId} (${collected.files.length} file${collected.files.length === 1 ? '' : 's'}, ${collected.totalBytes} bytes)`
+    + (collected.skipped.length > 0 ? `\n  skipped (docs are not uploaded; --include <path> to upload one): ${collected.skipped.join(', ')}` : '');
+  const next = installNextLines(appId, workspaceId, installReport);
+  if (!isWorker) return { ok: true, output: [summary, ...next].join('\n') };
 
   // A worker app's bundle is stored either way; `publish` says whether its
   // backend made it, and `live` whether that backend runs on Dynamic Workers.
@@ -675,13 +726,74 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
   } else {
     lines.push('  backend: no worker placement report — the worker placement may be off on this deployment, so the backend was not published.');
   }
-  lines.push(next);
+  lines.push(...next);
   return { ok: true, output: lines.join('\n') };
 }
 
 /** The refusal code (HTTP 409) for a live worker tile when Dynamic Workers is off on the deployment. */
 const DYNAMIC_WORKERS_DISABLED = 'dynamic-workers-disabled';
 export const DYNAMIC_WORKERS_DISABLED_MESSAGE = 'live worker tiles are not enabled on this deployment; publish without --live';
+
+/**
+ * `install` in the publish-batch answer: what the server did with an existing
+ * install of the app in the pod's workspace (`workspaceId` in the request).
+ *   upgraded            — the install now grants the new version (open tiles refreshed)
+ *   current             — the install was already on this version
+ *   not-installed       — no install in that workspace
+ *   reconsent-required  — the new version changes permissions: the user must re-install
+ *   failed              — the install step was refused or errored; the publish still stands
+ */
+export interface InstallUpgradeReport {
+  status: 'upgraded' | 'current' | 'not-installed' | 'reconsent-required' | 'failed';
+  version?: string;
+  refreshedTileIds?: string[];
+  newRequiredPermissions?: string[];
+  stalePermissions?: string[];
+  error?: string;
+}
+
+/**
+ * This pod's workspace id (`WORKSPACE_ID`, set in every session pod), or
+ * undefined. Only when the API is the one the pod belongs to (production, or the
+ * API the pod was provisioned for): `$WORKSPACE_ID` names a workspace there,
+ * not on another API — the same rule `yolo deploy` follows.
+ */
+export function workspaceIdOf(env: Record<string, string | undefined>, readFileImpl: (p: string) => string | undefined = defaultReadFile): string | undefined {
+  const ws = (env.WORKSPACE_ID ?? '').trim().toLowerCase();
+  if (!inWorkspacePod(env) || !/^[a-f0-9]{24}$/.test(ws)) return undefined;
+  if (isProductionTarget(env)) return ws;
+  const provisioned = podProvisionedApiUrl(env, readFileImpl);
+  return provisioned && sameApiOrigin(provisioned, targetApiUrl(env)) ? ws : undefined;
+}
+
+/**
+ * The publish output's install line(s): what happened to the workspace install,
+ * and exactly ONE next command when one is needed.
+ */
+export function installNextLines(appId: string, workspaceId: string | undefined, report: InstallUpgradeReport | undefined): string[] {
+  const ws = workspaceId ?? '<workspaceId>';
+  const install = `yolo tileapp install ${appId} --workspace ${ws}`;
+  const addTile = `yolo tileapp add-tile ${appId} --workspace ${ws}`;
+  switch (report?.status) {
+    case 'upgraded': {
+      const n = report.refreshedTileIds?.length ?? 0;
+      return [`  install: this workspace's install moved to ${report.version ?? 'the new version'}${n > 0 ? ` (${n} open tile${n === 1 ? '' : 's'} reloading)` : ''} — nothing else to run.`];
+    }
+    case 'current':
+      return ['  install: this workspace already runs this version — nothing else to run.'];
+    case 'not-installed':
+      return [`  next: ${install} && ${addTile}`];
+    case 'reconsent-required': {
+      const perms = [...(report.newRequiredPermissions ?? []), ...(report.stalePermissions ?? []).map((p) => `-${p}`)];
+      return [`  next: ${install}   (this version changes the app's permissions${perms.length ? `: ${perms.join(', ')}` : ''}, so it needs your consent again)`];
+    }
+    case 'failed':
+      return [`  install: not moved to the new version (${report.error ?? 'the install step failed'})`, `  next: ${install}`];
+    default:
+      // No report: published outside a workspace pod, or a server that predates it.
+      return [`  next: if it's already installed, ${install} moves the install to this version; if not, also run ${addTile}`];
+  }
+}
 
 /** `PUT /tileapps/personal/:appId/bundle` response fields the CLI reports. */
 interface BundleUploadResponse {
@@ -832,7 +944,7 @@ async function publishRuntime(p: RuntimePublishParams): Promise<CmdResult> {
     if (!json.appId) return { ok: false, kind: 'http', message: 'publish-image response missing appId' };
     return {
       ok: true,
-      output: `Published runtime app ${json.appId}\n  image: ${json.ref}:${json.tag}@${json.digest}\n  next: install it + add a tile (studio.install_app / studio.create_app_tile).`,
+      output: [`Published runtime app ${json.appId}`, `  image: ${json.ref}:${json.tag}@${json.digest}`, ...installNextLines(json.appId, workspaceIdOf(p.env), undefined)].join('\n'),
     };
   } catch (e) {
     return { ok: false, kind: 'http', message: `publish-image request failed: ${(e as Error).message}` };

@@ -14,7 +14,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parsePermissionShape, validateManifest, isValidOciDigest, isRuntimeManifest, isWorkerRuntimeManifest, workerBundleErrors } from './tileapp-validator.js';
+import { parsePermissionShape, validateManifest, isValidOciDigest, isRuntimeManifest, isWorkerRuntimeManifest, workerBundleErrors, isPersonalManifest, lintManifest } from './tileapp-validator.js';
 
 /** The minimum manifest `validateManifest` accepts, so each case below tests one rule. */
 const base = {
@@ -153,8 +153,15 @@ describe("runtime.kind 'worker'", () => {
     assert.equal(isRuntimeManifest({ ...base, runtime: { port: 8080 } }), true);
   });
 
-  it('mirrors the server: port still required, unknown kinds and an ignored image/exec refused', () => {
-    assert.ok(errorsFor({ ...base, runtime: { kind: 'worker' } }).some((e) => /runtime\.port/.test(e)));
+  it('mirrors the server: a worker needs no port (any given is ignored); process runtimes still need one', () => {
+    assert.deepEqual(errorsFor({ ...base, runtime: { kind: 'worker' } }), []);
+    assert.deepEqual(errorsFor({ ...base, runtime: { kind: 'worker', port: 'ignored' } }), []);
+    assert.ok(errorsFor({ ...base, runtime: { exec: 'node x.js' } }).includes('runtime.port must be a positive number'));
+    assert.ok(errorsFor({ ...base, runtime: { kind: 'process', exec: 'node x.js' } }).includes('runtime.port must be a positive number'));
+    assert.ok(errorsFor({ ...base, runtime: { port: 0, exec: 'node x.js' } }).includes('runtime.port must be a positive number'));
+  });
+
+  it('mirrors the server: unknown kinds and an ignored image/exec refused', () => {
     assert.ok(errorsFor({ ...base, runtime: { kind: 'lambda', port: 1, exec: 'x' } }).includes("runtime.kind must be 'process' | 'worker' when present"));
     assert.ok(errorsFor({ ...worker, image: { ref: 'r/x', tag: '1' } }).some((e) => /remove `image`/.test(e)));
     assert.ok(errorsFor({ ...base, runtime: { kind: 'worker', port: 1, exec: 'node x.js' } }).some((e) => /remove `runtime\.exec`/.test(e)));
@@ -165,5 +172,47 @@ describe("runtime.kind 'worker'", () => {
     assert.match(workerBundleErrors(['index.html']).join(' '), /_worker\/index\.js/);
     assert.match(workerBundleErrors(['index.html', '_worker/index.js', '_worker/data.json']).join(' '), /\.js or \.mjs/);
     assert.match(workerBundleErrors(['_worker/index.js']).join(' '), /UI files/);
+  });
+});
+
+describe('personal vs marketplace identity rule', () => {
+  const { publisher: _p, ...personal } = base;
+
+  it('a manifest with no publisher, or "personal" / "personal:<id>", is personal; any other publisher is marketplace', () => {
+    assert.equal(isPersonalManifest(personal), true);
+    assert.equal(isPersonalManifest({ ...base, publisher: '' }), true);
+    assert.equal(isPersonalManifest({ ...base, publisher: 'personal' }), true);
+    assert.equal(isPersonalManifest({ ...base, publisher: 'personal:abc' }), true);
+    assert.equal(isPersonalManifest(base), false);
+    assert.equal(isPersonalManifest(null), false);
+  });
+
+  it('personal rules: publisher optional, id is the 2-32 char local slug', () => {
+    assert.deepEqual(errorsFor(personal, { personal: true }), []);
+    assert.deepEqual(errorsFor({ ...base, publisher: 'personal' }, { personal: true }), []);
+    assert.ok(errorsFor({ ...personal, id: 'a'.repeat(33) }, { personal: true }).some((e) => /2-32 chars/.test(e)));
+    assert.ok(errorsFor({ ...personal, id: undefined }, { personal: true }).some((e) => /^id must be/.test(e)));
+  });
+
+  it('marketplace rules still require a publisher', () => {
+    assert.ok(errorsFor(personal).includes('publisher is required'));
+  });
+
+  it('lintManifest: a personal worker passes with no publisher, port or image; marketplace still needs the digest', () => {
+    const worker = { ...personal, runtime: { kind: 'worker' } };
+    assert.deepEqual(lintManifest(worker, { personal: true }), []);
+    const market = lintManifest({ ...worker, publisher: 'acme' }, { personal: false });
+    assert.ok(market.some((e) => /signed image pinned to a valid content digest/.test(e)), market.join('; '));
+  });
+
+  it('lintManifest: a personal runtime app needs no image (the push fills it) but still a port', () => {
+    assert.deepEqual(lintManifest({ ...personal, runtime: { port: 8080 } }, { personal: true }), []);
+    assert.ok(lintManifest({ ...personal, runtime: {} }, { personal: true }).includes('runtime.port must be a positive number'));
+  });
+
+  it('lintManifest: media/<file> screenshots only for a personal bundle app', () => {
+    const shot = { screenshots: ['media/01.webp'] };
+    assert.deepEqual(lintManifest({ ...personal, ...shot }, { personal: true }), []);
+    assert.ok(lintManifest({ ...base, ...shot }, { personal: false }).length > 0);
   });
 });

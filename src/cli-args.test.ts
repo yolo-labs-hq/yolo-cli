@@ -75,3 +75,53 @@ describe('flag-value parsing — a following flag is never consumed as a value',
     assert.match(r.stderr, /--agent requires a value/);
   });
 });
+
+describe('yolo tileapp --help (DG1 report #10)', () => {
+  function runOut(args: string[]): { status: number | null; stdout: string; stderr: string } {
+    const r = spawnSync(process.execPath, [cliPath, ...args], {
+      encoding: 'utf-8',
+      env: { PATH: process.env.PATH, HOME: '/nonexistent-yolo-cli-test-home' },
+    });
+    return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+  }
+
+  for (const flag of ['--help', '-h', 'help']) {
+    it(`tileapp ${flag} lists the subcommands on stdout and exits 0`, () => {
+      const r = runOut(['tileapp', flag]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /^Usage: yolo tileapp <subcommand>/);
+      for (const sub of ['init', 'validate', 'dev', 'publish', 'sign', 'media push', 'install', 'add-tile']) assert.match(r.stdout, new RegExp(`\\b${sub}\\b`));
+      assert.equal(r.stderr, '');
+    });
+  }
+
+  for (const sub of ['init', 'validate', 'dev', 'sign', 'publish', 'media', 'install', 'add-tile']) {
+    for (const flag of ['--help', '-h']) {
+      it(`tileapp ${sub} ${flag} prints its usage and exits 0 (before any other parsing)`, () => {
+        const r = runOut(['tileapp', sub, flag]);
+        assert.equal(r.status, 0, r.stderr);
+        assert.match(r.stdout, new RegExp(`^Usage: yolo tileapp ${sub}`));
+        assert.equal(r.stderr, '');
+      });
+    }
+  }
+
+  it('help after other args still wins (tileapp publish x.json --personal --help)', () => {
+    const r = runOut(['tileapp', 'publish', 'x.json', '--personal', '--help']);
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /--include <path>/);
+  });
+
+  it('an unknown subcommand still fails with 64 and prints the group usage to stderr', () => {
+    const r = runOut(['tileapp', 'frobnicate']);
+    assert.equal(r.status, 64);
+    assert.match(r.stderr, /unknown tileapp subcommand 'frobnicate'/);
+    assert.match(r.stderr, /Usage: yolo tileapp <subcommand>/);
+  });
+
+  it('validate rejects --personal with --marketplace', () => {
+    const r = runOut(['tileapp', 'validate', 'x.json', '--personal', '--marketplace']);
+    assert.equal(r.status, 64);
+    assert.match(r.stderr, /mutually exclusive/);
+  });
+});

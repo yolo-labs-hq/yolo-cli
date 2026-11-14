@@ -163,6 +163,50 @@ describe('runTileAppValidate', () => {
     if (!r.ok) assert.equal(r.kind, 'validation');
   });
 
+  // DG1 report #6: a valid personal worker manifest failed `validate` on the
+  // marketplace digest gate, though `publish --personal` accepts it.
+  const personalWorker = () => {
+    const { publisher: _p, ...m } = MANIFEST({ runtime: { kind: 'worker' } });
+    return m;
+  };
+
+  it('infers the personal rules when the manifest has no publisher (a personal worker passes)', () => {
+    const { manifestPath } = tmpProject(personalWorker());
+    const r = runTileAppValidate({ manifestPath });
+    assert.equal(r.ok, true, r.ok ? '' : r.message);
+    if (r.ok) assert.match(r.output, /rules: personal app/);
+  });
+
+  it('publisher "personal" (the old init output) is personal too', () => {
+    const { manifestPath } = tmpProject({ ...personalWorker(), publisher: 'personal' });
+    const r = runTileAppValidate({ manifestPath });
+    assert.equal(r.ok, true, r.ok ? '' : r.message);
+  });
+
+  it('--marketplace (personal: false) applies the marketplace rules to the same manifest', () => {
+    const { manifestPath } = tmpProject(personalWorker());
+    const r = runTileAppValidate({ manifestPath, personal: false });
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.match(r.message, /marketplace rules/);
+      assert.match(r.message, /publisher is required/);
+      assert.match(r.message, /content digest/);
+    }
+  });
+
+  it('a marketplace publisher keeps the marketplace rules (worker without a digest fails)', () => {
+    const { manifestPath } = tmpProject(MANIFEST({ runtime: { kind: 'worker' } }));
+    const r = runTileAppValidate({ manifestPath });
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.match(r.message, /content digest/);
+  });
+
+  it('--personal forces the personal rules even with a publisher set', () => {
+    const { manifestPath } = tmpProject(MANIFEST({ runtime: { kind: 'worker' } }));
+    const r = runTileAppValidate({ manifestPath, personal: true });
+    assert.equal(r.ok, true, r.ok ? '' : r.message);
+  });
+
   it('io failure for a missing manifest file', () => {
     const r = runTileAppValidate({ manifestPath: '/nope/manifest.json' });
     assert.equal(r.ok, false);

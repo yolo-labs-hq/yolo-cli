@@ -28,6 +28,8 @@ interface ParsedPermission {
 }
 
 const ID_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
+/** A personal app's local slug (`PERSONAL_LOCAL_ID_RE` server-side). */
+const PERSONAL_LOCAL_ID_RE = /^[a-z0-9][a-z0-9-]{1,31}$/;
 
 // ── Store screenshots ───────────────────────────────────────────────────────
 // Mirror of `common-api/src/types/tileapp-screenshots.ts`. The rules a
@@ -52,6 +54,13 @@ function hasAllowedScreenshotExt(pathname: string): boolean {
 }
 
 export interface ScreenshotRefOptions {
+  /**
+   * Lint as a PERSONAL app (`publish --personal` / `studio.create_personal_app`).
+   * The server stamps `publisher` (`personal:<ownerId>`) and namespaces `id`
+   * (`pa-<ownerId>-<id>`), so `publisher` is optional and ignored, and `id` is the
+   * app's LOCAL slug (2-32 chars). See `isPersonalManifest`.
+   */
+  personal?: boolean;
   /**
    * Whether the `media/<file>` form is available to this publishing path.
    * Default FALSE — the PARTNER-SAFE default. Partner ingest uploads no media,
@@ -168,10 +177,15 @@ export function validateManifest(raw: unknown, opts: ScreenshotRefOptions = {}):
   const errors: string[] = [];
   if (!isObj(raw)) return { ok: false, errors: ['manifest is not an object'] };
 
-  if (!isStr(raw.id) || !ID_RE.test(raw.id)) errors.push('id must be a lowercase kebab-case slug (2-64 chars)');
+  if (opts.personal) {
+    // The local slug: the server namespaces it to `pa-<ownerId>-<id>` (the CLI
+    // reads it from the manifest; `studio.create_personal_app` takes it as its `id` argument).
+    if (!isStr(raw.id) || !PERSONAL_LOCAL_ID_RE.test(raw.id)) errors.push('id must be a lowercase kebab-case slug, 2-32 chars (the app\'s local name; the server namespaces it)');
+  } else if (!isStr(raw.id) || !ID_RE.test(raw.id)) errors.push('id must be a lowercase kebab-case slug (2-64 chars)');
   if (!isStr(raw.version) || !SEMVER_RE.test(raw.version)) errors.push('version must be semver (e.g. 1.0.0)');
   if (!isStr(raw.displayName)) errors.push('displayName is required');
-  if (!isStr(raw.publisher)) errors.push('publisher is required');
+  // Personal: optional and ignored — the server always stamps `personal:<ownerId>`.
+  if (!opts.personal && !isStr(raw.publisher)) errors.push('publisher is required');
   if (!isStr(raw.description)) errors.push('description is required');
 
   if (!isObj(raw.ui) || !isStr(raw.ui.icon) || !isStr(raw.ui.color) || !isStr(raw.ui.label)) {
@@ -195,7 +209,9 @@ export function validateManifest(raw: unknown, opts: ScreenshotRefOptions = {}):
     if (!isObj(raw.runtime)) {
       errors.push('runtime must be an object when present');
     } else {
-      if (typeof raw.runtime.port !== 'number' || raw.runtime.port <= 0) errors.push('runtime.port must be a positive number');
+      // A worker (Cloudflare edge backend) listens on no port: `port` is optional
+      // there and ignored if given. Process/container runtimes still need it.
+      if (raw.runtime.kind !== 'worker' && (typeof raw.runtime.port !== 'number' || raw.runtime.port <= 0)) errors.push('runtime.port must be a positive number');
       if (raw.runtime.exec !== undefined && !isStr(raw.runtime.exec)) errors.push('runtime.exec must be a non-empty string when present');
       if (raw.runtime.kind !== undefined && raw.runtime.kind !== 'process' && raw.runtime.kind !== 'worker') {
         errors.push("runtime.kind must be 'process' | 'worker' when present");
@@ -300,6 +316,40 @@ export function publishGateErrors(manifest: unknown): string[] {
     }
   }
   return errors;
+}
+
+/** The schema error a runtime manifest without `image`/`runtime.exec` gets (the personal publish fills `image`). */
+export const RUNTIME_NEEDS_IMAGE_PREFIX = 'runtime requires either `image`';
+
+/**
+ * Whether a manifest is linted as a PERSONAL app when no `--personal` /
+ * `--marketplace` flag says otherwise. The rule (one rule for init, validate,
+ * publish and `studio.create_personal_app`): a personal app OMITS `publisher`
+ * (the server stamps `personal:<ownerId>`); `"personal"` or `"personal:<id>"`
+ * also mean personal. Any other publisher is a marketplace publisher id, linted
+ * with the marketplace rules.
+ */
+export function isPersonalManifest(manifest: unknown): boolean {
+  if (!isObj(manifest)) return false;
+  const p = manifest.publisher;
+  if (p === undefined || p === null || p === '') return true;
+  return typeof p === 'string' && (p === 'personal' || p.startsWith('personal:'));
+}
+
+/**
+ * Every lint error for `manifest` under the personal or the marketplace rules —
+ * what `validate` and `dev` report. Personal mirrors `publish --personal`: no
+ * `publisher`, a local-slug `id`, `media/<file>` screenshots for a bundle app,
+ * and no signed-image digest gate (a worker ships its backend in the bundle; a
+ * runtime app's `image` is filled server-side from the pushed digest).
+ * Marketplace adds the publish gate (`publishGateErrors`).
+ */
+export function lintManifest(manifest: unknown, opts: { personal: boolean }): string[] {
+  if (!opts.personal) return [...validateManifest(manifest).errors, ...publishGateErrors(manifest)];
+  const runtime = isRuntimeManifest(manifest);
+  const subject = runtime && isObj(manifest) ? (({ image: _image, ...rest }) => rest)(manifest) : manifest;
+  const errors = validateManifest(subject, { personal: true, allowPlatformHostedScreenshots: !runtime }).errors;
+  return runtime ? errors.filter((e) => !e.startsWith(RUNTIME_NEEDS_IMAGE_PREFIX)) : errors;
 }
 
 /**
