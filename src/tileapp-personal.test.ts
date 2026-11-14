@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { runTileAppInit, runTileAppPublishPersonal, exitCodeForFailure, DYNAMIC_WORKERS_DISABLED_MESSAGE, collectBundleFiles, isBundleDocFile, installNextLines, workspaceIdOf } from './tileapp-personal.js';
+import { runTileAppInit, runTileAppPublishPersonal, exitCodeForFailure, DYNAMIC_WORKERS_DISABLED_MESSAGE, STATIC_LIVE_DISABLED_MESSAGE, collectBundleFiles, isBundleDocFile, installNextLines, workspaceIdOf } from './tileapp-personal.js';
 import { validateManifest, isPersonalManifest } from './tileapp-validator.js';
 import type { FetchLike } from './tileapp-personal.js';
 
@@ -407,6 +407,44 @@ describe("yolo tileapp publish --personal (runtime.kind 'worker')", () => {
     assert.equal(r.ok, false);
     assert.equal((r as any).kind, 'usage');
     assert.equal(seen.length, 0);
+  });
+
+  function scaffoldUi(): { manifestPath: string } {
+    const dir = path.join(tmpDir(), 'ui');
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, 'tileapp.json'), JSON.stringify({
+      id: 'notes', version: '1.0.0', displayName: 'Notes', publisher: 'personal', description: 'd',
+      ui: { icon: 'x', color: '#fff', label: 'N' }, surface: { kind: 'iframe', entry: 'index.html' },
+      permissions: { required: [] },
+    }));
+    fs.writeFileSync(path.join(dir, 'index.html'), '<!doctype html><script src="app.js" type="module"></script>');
+    fs.writeFileSync(path.join(dir, 'app.js'), 'console.log(1)');
+    return { manifestPath: path.join(dir, 'tileapp.json') };
+  }
+
+  it('--live on an interface-only app sends live: true and reports an owner-only preview', async () => {
+    const { manifestPath } = scaffoldUi();
+    const { calls, fetchImpl } = recordingFetch({ status: 200, body: { uploaded: 2, live: true, publish: { status: 'published' }, versionHash: '0123456789abcdef' } });
+    const r = await runTileAppPublishPersonal({ manifestPath, env: ENV, fetchImpl, live: true });
+    assert.equal(r.ok, true);
+    assert.equal(calls[1]!.body.live, true);
+    assert.match((r as any).output, /owner-only preview/);
+    assert.match((r as any).output, /publish without --live to ship/);
+  });
+
+  it('--live on an interface-only app maps 409 static-live-disabled to a clear message', async () => {
+    const { manifestPath } = scaffoldUi();
+    const { fetchImpl } = recordingFetch({ status: 409, body: { error: 'x', code: 'static-live-disabled' } });
+    const r = await runTileAppPublishPersonal({ manifestPath, env: ENV, fetchImpl, live: true });
+    assert.equal(r.ok, false);
+    assert.equal((r as any).message, STATIC_LIVE_DISABLED_MESSAGE);
+  });
+
+  it('--live on an interface-only app fails if the server did not store a live version (an older server)', async () => {
+    const { manifestPath } = scaffoldUi();
+    const { fetchImpl } = recordingFetch({ status: 200, body: { uploaded: 2, live: false } });
+    const r = await runTileAppPublishPersonal({ manifestPath, env: ENV, fetchImpl, live: true });
+    assert.equal(r.ok, false);
   });
 });
 

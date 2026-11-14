@@ -558,8 +558,10 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
   }
 
   const isWorker = isWorkerRuntimeManifest(read.manifest);
-  if (opts.live && !isWorker) {
-    return { ok: false, kind: 'usage', message: "--live applies only to a runtime.kind 'worker' app (its backend is what runs live); publish without --live" };
+  // --live on an image/container runtime app has nothing to run live; on a pure-UI app it is a
+  // static live edit (an owner-only preview), on a worker app its backend runs on Dynamic Workers.
+  if (opts.live && isRuntimeManifest(read.manifest)) {
+    return { ok: false, kind: 'usage', message: "--live applies to an interface-only or runtime.kind 'worker' app; publish without --live" };
   }
 
   // Runtime app (has `runtime`/`image`): build the image in-pod + mediated push.
@@ -646,6 +648,9 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
       const missingRoute = res.status === 404 && json.code !== 'feature-disabled';
       if (!missingRoute) {
         if (!res.ok) {
+          if (res.status === 409 && text.includes(STATIC_LIVE_DISABLED)) {
+            return { ok: false, kind: 'http', message: STATIC_LIVE_DISABLED_MESSAGE };
+          }
           if (res.status === 409 && text.includes(DYNAMIC_WORKERS_DISABLED)) {
             return { ok: false, kind: 'http', message: DYNAMIC_WORKERS_DISABLED_MESSAGE };
           }
@@ -692,6 +697,9 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
       if (staged) return staged;
       if (!res.ok) {
         const body = await safeText(res);
+        if (res.status === 409 && body.includes(STATIC_LIVE_DISABLED)) {
+          return { ok: false, kind: 'http', message: STATIC_LIVE_DISABLED_MESSAGE };
+        }
         if (res.status === 409 && body.includes(DYNAMIC_WORKERS_DISABLED)) {
           return { ok: false, kind: 'http', message: DYNAMIC_WORKERS_DISABLED_MESSAGE };
         }
@@ -706,6 +714,22 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
   const summary = `Published ${appId} (${collected.files.length} file${collected.files.length === 1 ? '' : 's'}, ${collected.totalBytes} bytes)`
     + (collected.skipped.length > 0 ? `\n  skipped (docs are not uploaded; --include <path> to upload one): ${collected.skipped.join(', ')}` : '');
   const next = installNextLines(appId, workspaceId, installReport);
+  if (!isWorker && opts.live) {
+    // A static live edit: stored beside the published bundle, shown only on the owner's tile.
+    if (uploadJson.live !== true) {
+      return { ok: false, kind: 'http', message: `${appId}: the server did not store a live version; publish without --live, or check the deployment has live edits on` };
+    }
+    return {
+      ok: true,
+      output: [
+        summary,
+        '  live: true (owner-only preview)',
+        "  Only your own tile shows this version (relaunch or reload the tile). Customers' portals and the published",
+        '  version are unchanged; publish without --live to ship it.',
+        ...next,
+      ].join('\n'),
+    };
+  }
   if (!isWorker) return { ok: true, output: [summary, ...next].join('\n') };
 
   // A worker app's bundle is stored either way; `publish` says whether its
@@ -733,6 +757,10 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
 /** The refusal code (HTTP 409) for a live worker tile when Dynamic Workers is off on the deployment. */
 const DYNAMIC_WORKERS_DISABLED = 'dynamic-workers-disabled';
 export const DYNAMIC_WORKERS_DISABLED_MESSAGE = 'live worker tiles are not enabled on this deployment; publish without --live';
+
+/** The refusal code (HTTP 409) for a live edit of an interface-only app where it is off. */
+const STATIC_LIVE_DISABLED = 'static-live-disabled';
+export const STATIC_LIVE_DISABLED_MESSAGE = 'live edits of interface-only apps are not enabled on this deployment; publish without --live';
 
 /**
  * `install` in the publish-batch answer: what the server did with an existing
