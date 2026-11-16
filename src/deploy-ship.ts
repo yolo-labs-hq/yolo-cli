@@ -21,6 +21,7 @@
 
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import { spawn, execFileSync } from 'node:child_process';
 
 import { readDeployConfig, type DeployConfig } from './deploy-config.js';
@@ -70,6 +71,13 @@ export interface DeployShipDeps {
   /** Best-effort git sha for the ship/start body. Default: `git rev-parse HEAD`. */
   resolveGitShaImpl?: (cwd: string) => string | undefined;
   /**
+   * Best-effort working-tree state for the ship/start body: whether the tree
+   * differs from HEAD (tracked changes or untracked non-ignored files) and the
+   * git tree hash of what is ACTUALLY on disk. Default: defaultResolveGitTreeState.
+   * `undefined` (non-git dir, git failure) ⇒ both fields omitted.
+   */
+  resolveGitTreeStateImpl?: (cwd: string) => GitTreeState | undefined;
+  /**
    * Best-effort source repo for the ship/start body. Default: `git remote
    * get-url origin` + the current branch, read in the directory being bundled.
    */
@@ -88,7 +96,25 @@ export interface DeployShipOptions {
   fetchImpl?: DeployFetchLike;
   /** Line sink for `deploy: …` progress (no trailing newline). */
   progress?: (line: string) => void;
+  /**
+   * Line sink for warnings the operator must see even under --json (the
+   * dirty-tree warning). Default: process.stderr.
+   */
+  warn?: (line: string) => void;
   deps?: DeployShipDeps;
+}
+
+/** What `git status` + a scratch-index `write-tree` say about the bundled tree. */
+export interface GitTreeState {
+  /** True when the working tree differs from HEAD (tracked or untracked non-ignored). */
+  dirty: boolean;
+  /** Changed entries per `git status --porcelain` (0 when clean). */
+  changedFiles: number;
+  /**
+   * Git tree object hash of the working tree as it is on disk (respecting
+   * .gitignore). Equals `HEAD^{tree}` when clean.
+   */
+  treeHash: string;
 }
 
 export interface DeployShipSuccess {
@@ -184,6 +210,8 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
   const runBuild = deps.runBuildImpl ?? defaultRunBuild;
   const readAssetFile = deps.readAssetFileImpl ?? defaultReadAssetFile;
   const resolveGitSha = deps.resolveGitShaImpl ?? defaultResolveGitSha;
+  const resolveGitTreeState = deps.resolveGitTreeStateImpl ?? defaultResolveGitTreeState;
+  const warn = options.warn ?? ((line: string) => process.stderr.write(`${line}\n`));
   const resolveRepoOrigin = deps.resolveRepoOriginImpl ?? defaultResolveRepoOrigin;
 
   // 1. Link — .yolo/deploy.json with a projectId is the durable bond.
@@ -386,6 +414,23 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
   if (crons.length > 0 || shape.type === 'worker') request.crons = crons;
   const gitSha = resolveGitSha(cwd);
   if (gitSha) request.gitSha = gitSha;
+  // gitSha names HEAD, which is NOT what was built when the tree is dirty. Say
+  // so on the release (gitDirty) and record the hash of the tree actually on
+  // disk (gitTreeHash), so a dirty release is never mistaken for HEAD. Both are
+  // sent whenever git could answer (gitDirty:false included, so "clean" is a
+  // recorded fact rather than an absence); a non-git dir omits both.
+  const treeState = resolveGitTreeState(cwd);
+  if (treeState) {
+    request.gitDirty = treeState.dirty;
+    request.gitTreeHash = treeState.treeHash;
+    if (treeState.dirty) {
+      warn(
+        `Warning: deploying from a dirty working tree (${treeState.changedFiles} changed file${treeState.changedFiles === 1 ? '' : 's'}). ` +
+          `The release records gitSha ${gitSha ?? '(none)'} with dirty: true and treeHash ${treeState.treeHash}; ` +
+          'commit first for a reproducible release.',
+      );
+    }
+  }
   // The source repo these exact bytes were built from. This is the only place
   // in the system that can know it — the server sees a bundle, and the owning
   // workspace may be gone by the time anyone asks. Best-effort in the same
@@ -928,6 +973,74 @@ function defaultResolveGitSha(cwd: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+const TREE_HASH_RE = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+
+/**
+ * `git status --porcelain` for dirtiness, then the tree hash of what is on
+ * disk. Clean ⇒ `HEAD^{tree}`. Dirty ⇒ a SCRATCH index (GIT_INDEX_FILE in
+ * os.tmpdir) seeded from HEAD, `add -A`, `write-tree` — the user's real index
+ * is never read or written, and .gitignore is honoured exactly as `git add`
+ * would. Side effect: `add -A` writes the dirty files' blobs into the object
+ * store as loose objects (unreferenced; a normal `git gc` reaps them).
+ *
+ * Best-effort: any failure (not a repo, no commits yet, git missing, timeout)
+ * ⇒ undefined, and the ship proceeds without the fields.
+ */
+export function defaultResolveGitTreeState(cwd: string): GitTreeState | undefined {
+  const git = (args: string[], env?: NodeJS.ProcessEnv): string =>
+    execFileSync('git', args, {
+      cwd,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 30000,
+      maxBuffer: 64 * 1024 * 1024,
+      ...(env ? { env } : {}),
+    }).toString();
+  let scratchDir: string | undefined;
+  try {
+    // -z: one NUL-terminated record per entry (renames carry a 2nd path field).
+    const status = git(['status', '--porcelain', '-z', '--untracked-files=all']);
+    const changedFiles = countPorcelainZEntries(status);
+    let treeHash: string;
+    if (changedFiles === 0) {
+      treeHash = git(['rev-parse', 'HEAD^{tree}']).trim();
+    } else {
+      scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yolo-deploy-index-'));
+      const env = { ...process.env, GIT_INDEX_FILE: path.join(scratchDir, 'index') };
+      git(['read-tree', 'HEAD'], env);
+      // `:/` — the whole worktree even when cwd is a subdirectory, matching
+      // what status reported and what HEAD^{tree} describes when clean.
+      git(['add', '-A', '--', ':/'], env);
+      treeHash = git(['write-tree'], env).trim();
+    }
+    if (!TREE_HASH_RE.test(treeHash)) return undefined;
+    return { dirty: changedFiles > 0, changedFiles, treeHash };
+  } catch {
+    return undefined;
+  } finally {
+    if (scratchDir) {
+      try {
+        fs.rmSync(scratchDir, { recursive: true, force: true });
+      } catch {
+        // best-effort cleanup of a tmp dir
+      }
+    }
+  }
+}
+
+/** Count entries in `git status --porcelain -z` output (renames/copies carry two fields). */
+function countPorcelainZEntries(out: string): number {
+  const fields = out.split('\0');
+  let count = 0;
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i]!;
+    if (field.length < 4) continue;
+    count++;
+    const x = field[0];
+    if (x === 'R' || x === 'C') i++; // skip the original-path field
+  }
+  return count;
 }
 
 const CONTENT_TYPES: Record<string, string> = {

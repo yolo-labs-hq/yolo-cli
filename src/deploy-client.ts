@@ -168,6 +168,14 @@ export interface StartShipRequest {
   crons?: string[];
   gitSha?: string;
   /**
+   * True when the working tree differed from HEAD at ship time (tracked
+   * changes or untracked non-ignored files) — `gitSha` then names the base
+   * commit, not the bytes. Sent (true or false) whenever git could answer.
+   */
+  gitDirty?: boolean;
+  /** Git tree hash of the working tree actually shipped (`HEAD^{tree}` when clean). */
+  gitTreeHash?: string;
+  /**
    * `git remote get-url origin` for the bundled directory — the source repo
    * these bytes came from. Sent RAW; the server normalizes it and strips any
    * credentials in the userinfo before storing.
