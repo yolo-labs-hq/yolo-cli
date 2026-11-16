@@ -7,9 +7,14 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 import {
   runDeployShip,
+  defaultResolveGitTreeState,
   exitCodeForFailure,
   formatShipSuccess,
   formatPending,
@@ -96,6 +101,7 @@ function makeDeps(overrides: Partial<DeployShipDeps> = {}): { deps: DeployShipDe
     },
     readAssetFileImpl: () => new TextEncoder().encode('file-bytes'),
     resolveGitShaImpl: () => 'f'.repeat(40),
+    resolveGitTreeStateImpl: () => undefined,
     resolveRepoOriginImpl: () => ({ repoUrl: 'git@github.com:acme/site.git', branch: 'main' }),
     ...overrides,
   };
@@ -320,6 +326,143 @@ describe('deploy-ship — happy path (static)', () => {
     assert.equal(result.ok, true);
     assert.equal(recorded.uploadCalls.length, 0);
     assert.ok(lines.includes('deploy: assets 0/0 buckets ok (0.0 MiB)'));
+  });
+});
+
+// ─── Dirty working tree (gitDirty / gitTreeHash) ──────────────────────────
+
+describe('deploy-ship — dirty working tree', () => {
+  const TREE = 'a'.repeat(40);
+
+  it('warns on stderr and sends gitDirty:true + the on-disk tree hash', async () => {
+    const { deps, recorded } = makeDeps({
+      resolveGitTreeStateImpl: () => ({ dirty: true, changedFiles: 3, treeHash: TREE }),
+    });
+    const warnings: string[] = [];
+    const { lines, promise } = runShip(deps, { warn: (line) => warnings.push(line) });
+    const result = await promise;
+
+    assert.equal(result.ok, true);
+    const request = recorded.startCalls[0]!.request;
+    assert.equal(request.gitSha, 'f'.repeat(40));
+    assert.equal(request.gitDirty, true);
+    assert.equal(request.gitTreeHash, TREE);
+    assert.deepEqual(warnings, [
+      `Warning: deploying from a dirty working tree (3 changed files). The release records gitSha ${'f'.repeat(40)} with dirty: true and treeHash ${TREE}; commit first for a reproducible release.`,
+    ]);
+    // The warning goes to the warn sink, not the agent-parseable progress protocol.
+    assert.ok(!lines.some((l) => /dirty/.test(l)));
+  });
+
+  it('clean tree: sends gitDirty:false + HEAD tree hash, no warning', async () => {
+    const { deps, recorded } = makeDeps({
+      resolveGitTreeStateImpl: () => ({ dirty: false, changedFiles: 0, treeHash: TREE }),
+    });
+    const warnings: string[] = [];
+    const { promise } = runShip(deps, { warn: (line) => warnings.push(line) });
+    assert.equal((await promise).ok, true);
+    const request = recorded.startCalls[0]!.request;
+    assert.equal(request.gitDirty, false);
+    assert.equal(request.gitTreeHash, TREE);
+    assert.deepEqual(warnings, []);
+  });
+
+  it('non-git directory: omits both fields and never warns', async () => {
+    const { deps, recorded } = makeDeps({
+      resolveGitShaImpl: () => undefined,
+      resolveGitTreeStateImpl: () => undefined,
+    });
+    const warnings: string[] = [];
+    const { promise } = runShip(deps, { warn: (line) => warnings.push(line) });
+    assert.equal((await promise).ok, true);
+    const request = recorded.startCalls[0]!.request;
+    assert.equal('gitDirty' in request, false);
+    assert.equal('gitTreeHash' in request, false);
+    assert.deepEqual(warnings, []);
+  });
+
+  describe('defaultResolveGitTreeState (real git)', () => {
+    const gitAvailable = (() => {
+      try {
+        execFileSync('git', ['--version'], { stdio: 'ignore' });
+        return true;
+      } catch {
+        return false;
+      }
+    })();
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync(
+        'git',
+        ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', ...args],
+        { cwd, stdio: ['ignore', 'pipe', 'ignore'] },
+      )
+        .toString()
+        .trim();
+    const makeRepo = () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yolo-ship-git-'));
+      git(dir, 'init', '-q');
+      fs.writeFileSync(path.join(dir, 'index.html'), '<h1>v1</h1>');
+      fs.writeFileSync(path.join(dir, '.gitignore'), 'ignored.txt\n');
+      git(dir, 'add', '-A');
+      git(dir, 'commit', '-q', '-m', 'init');
+      return dir;
+    };
+
+    it('non-git directory → undefined', { skip: !gitAvailable }, () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yolo-ship-nogit-'));
+      try {
+        // GIT_CEILING_DIRECTORIES keeps discovery from walking up into an
+        // enclosing repo (os.tmpdir() could live under one).
+        const prev = process.env.GIT_CEILING_DIRECTORIES;
+        process.env.GIT_CEILING_DIRECTORIES = path.dirname(dir);
+        try {
+          assert.equal(defaultResolveGitTreeState(dir), undefined);
+        } finally {
+          if (prev === undefined) delete process.env.GIT_CEILING_DIRECTORIES;
+          else process.env.GIT_CEILING_DIRECTORIES = prev;
+        }
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('clean repo → HEAD^{tree}; ignored files do not make it dirty', { skip: !gitAvailable }, () => {
+      const dir = makeRepo();
+      try {
+        fs.writeFileSync(path.join(dir, 'ignored.txt'), 'local only');
+        const state = defaultResolveGitTreeState(dir);
+        assert.deepEqual(state, { dirty: false, changedFiles: 0, treeHash: git(dir, 'rev-parse', 'HEAD^{tree}') });
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('dirty repo → tree hash of the on-disk tree, user index untouched', { skip: !gitAvailable }, () => {
+      const dir = makeRepo();
+      try {
+        const headTree = git(dir, 'rev-parse', 'HEAD^{tree}');
+        fs.writeFileSync(path.join(dir, 'index.html'), '<h1>v2</h1>'); // tracked modification
+        fs.writeFileSync(path.join(dir, 'new.js'), 'export {}'); // untracked, not ignored
+        fs.writeFileSync(path.join(dir, 'ignored.txt'), 'local only'); // ignored
+        const statusBefore = git(dir, 'status', '--porcelain');
+
+        const state = defaultResolveGitTreeState(dir);
+        assert.ok(state);
+        assert.equal(state.dirty, true);
+        assert.equal(state.changedFiles, 2);
+        assert.match(state.treeHash, /^[0-9a-f]{40}$/);
+        assert.notEqual(state.treeHash, headTree);
+        // The hash is what `git add -A && git write-tree` would produce.
+        const listing = git(dir, 'ls-tree', '--name-only', state.treeHash).split('\n').sort();
+        assert.deepEqual(listing, ['.gitignore', 'index.html', 'new.js']);
+        assert.equal(git(dir, 'cat-file', 'blob', `${state.treeHash}:index.html`), '<h1>v2</h1>');
+        // The user's real index is untouched: nothing got staged.
+        assert.equal(git(dir, 'status', '--porcelain'), statusBefore);
+        assert.equal(git(dir, 'diff', '--cached', '--name-only'), '');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 });
 
