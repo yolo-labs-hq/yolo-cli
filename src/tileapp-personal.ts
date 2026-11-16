@@ -730,7 +730,8 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
       ].join('\n'),
     };
   }
-  if (!isWorker) return { ok: true, output: [summary, ...next].join('\n') };
+  const pinLines = portalPinLines(uploadJson.portalPins);
+  if (!isWorker) return { ok: true, output: [summary, ...pinLines, ...next].join('\n') };
 
   // A worker app's bundle is stored either way; `publish` says whether its
   // backend made it, and `live` whether that backend runs on Dynamic Workers.
@@ -750,7 +751,7 @@ export async function runTileAppPublishPersonal(opts: PublishPersonalOptions): P
   } else {
     lines.push('  backend: no worker placement report — the worker placement may be off on this deployment, so the backend was not published.');
   }
-  lines.push(...next);
+  lines.push(...pinLines, ...next);
   return { ok: true, output: lines.join('\n') };
 }
 
@@ -827,6 +828,29 @@ export function installNextLines(appId: string, workspaceId: string | undefined,
 interface BundleUploadResponse {
   live?: boolean;
   publish?: { status: 'published' | 'failed'; backend?: boolean; error?: string };
+  /** Where the app is pinned in Mogul customer portals, after this publish (absent: nowhere). */
+  portalPins?: PortalPinLine[];
+}
+
+interface PortalPinLine {
+  scope: 'project' | 'relationship';
+  projectId: string;
+  relationshipId?: string;
+  title: string | null;
+  follow: 'pinned' | 'latest-published';
+  serving: boolean;
+  servingVersion: string | null;
+}
+
+/** The publish report's lines for portal pins: a pin that stopped serving says so, with the fix. */
+export function portalPinLines(pins: PortalPinLine[] | undefined): string[] {
+  if (!Array.isArray(pins) || pins.length === 0) return [];
+  return pins.slice(0, 20).map((p) => {
+    const where = p.scope === 'project' ? `pinned as project default on ${p.projectId}` : `pinned for customer ${p.relationshipId} (project ${p.projectId})`;
+    if (p.follow === 'latest-published') return `  portal: ${where}, follows latest published — customers now get ${p.servingVersion ?? 'this version'}`;
+    if (p.serving) return `  portal: ${where} — serving ${p.servingVersion ?? 'the pinned version'}`;
+    return `  portal: ${where} — not serving until re-pinned (mogul.portal_app_set; add follow: "latest-published" to skip this next time)`;
+  });
 }
 
 // ── publish (runtime / mediated push) ────────────────────────────────────────
