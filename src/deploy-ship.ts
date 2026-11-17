@@ -163,6 +163,12 @@ export interface DeployShipSuccess {
      */
     origin?: 'preview' | 'prod';
   };
+  /**
+   * Preview ships only, and only when the project has a D1/KV/R2 or a secret:
+   * the preview is bound to production's data and credentials (bindings come
+   * from the project, not the channel). `notice` is printed as a warn line.
+   */
+  sharedData?: { d1: string[]; kv: string[]; r2: string[]; secretCount: number; notice: string };
 }
 
 /** The T3 prod gate outcome — NOT an error; never blind-retried (exit 3). */
@@ -530,6 +536,8 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
   if (pageCheckHasProblems(pageCheck)) {
     for (const line of pageCheckLines(pageCheck!)) progress(line);
   }
+  const sharedData = parseSharedData(finalized.value.sharedData);
+  if (sharedData) progress(`deploy: warn — ${sharedData.notice}`);
 
   return {
     ok: true,
@@ -540,6 +548,7 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
     url: finalized.value.url,
     ...(bootCheck ? { bootCheck } : {}),
     ...(pageCheck ? { pageCheck } : {}),
+    ...(sharedData ? { sharedData } : {}),
   };
 }
 
@@ -583,6 +592,8 @@ async function resumeStagedShip(
     if (pageCheckHasProblems(pageCheck)) {
       for (const line of pageCheckLines(pageCheck!)) progress(line);
     }
+    const sharedData = parseSharedData(finalized.value.sharedData);
+    if (sharedData) progress(`deploy: warn — ${sharedData.notice}`);
     return {
       ok: true,
       dryRun: false,
@@ -602,6 +613,7 @@ async function resumeStagedShip(
       // warning goes to stderr and the structured verdict + samples would
       // otherwise be lost entirely for a resumed (approval-parked) ship.
       ...(pageCheck ? { pageCheck } : {}),
+      ...(sharedData ? { sharedData } : {}),
     };
   }
 
@@ -682,6 +694,21 @@ async function resumeStagedShip(
 
 function describeErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** Narrow the backend's optional preview `sharedData` warning; ignore anything malformed. */
+function parseSharedData(raw: unknown): DeployShipSuccess['sharedData'] | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.notice !== 'string' || !r.notice) return undefined;
+  const names = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+  return {
+    d1: names(r.d1),
+    kv: names(r.kv),
+    r2: names(r.r2),
+    secretCount: typeof r.secretCount === 'number' ? r.secretCount : 0,
+    notice: r.notice,
+  };
 }
 
 /** Narrow the backend's optional `bootCheck` envelope; ignore anything malformed. */
