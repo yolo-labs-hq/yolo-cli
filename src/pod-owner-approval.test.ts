@@ -12,7 +12,7 @@ import path from 'node:path';
 
 import { formatOwnerApprovalPending, ownerApprovalRequestedOf } from './pod-owner-approval.js';
 import { setProjectWorkspace, type DeployFetchLike } from './deploy-client.js';
-import { runTileAppInit, runTileAppPublishPersonal, exitCodeForFailure } from './tileapp-personal.js';
+import { runTileAppInit, runTileAppPublishPersonal, exitCodeForFailure, portalPinLines, type PortalPinLine } from './tileapp-personal.js';
 import { runTileAppPublish } from './tileapp-publisher.js';
 
 const STAGED = {
@@ -159,6 +159,43 @@ describe('tileapp publish --personal inside a pod: ONE request, ONE approval (ru
     });
     assert.equal(r.ok, true);
     assert.equal(calls.length, 3);
+  });
+
+  const PINS: PortalPinLine[] = [
+    { scope: 'project', projectId: 'proj-1', title: 'Menu', follow: 'pinned', serving: false, servingVersion: null },
+    { scope: 'relationship', projectId: 'proj-1', relationshipId: 'rel-9', title: null, follow: 'latest-published', serving: true, servingVersion: '1.2.0' },
+  ];
+
+  it('prints portal pins from the publish-batch answer (json.bundle.portalPins)', async () => {
+    const r = await runTileAppPublishPersonal({
+      manifestPath: scaffold(), env: POD_ENV,
+      fetchImpl: stubFetch(() => ({ status: 201, body: { appId: 'pa-x-clock', created: true, bundle: { uploaded: 2, portalPins: PINS } } })),
+    });
+    assert.equal(r.ok, true, r.ok ? '' : (r as { message: string }).message);
+    if (!r.ok) return;
+    assert.match(r.output, /portal: pinned as project default on proj-1 — not serving until re-pinned/);
+    assert.match(r.output, /portal: pinned for customer rel-9 \(project proj-1\), follows latest published — customers now get 1\.2\.0/);
+  });
+
+  it('prints portal pins on the two-step fallback too', async () => {
+    const r = await runTileAppPublishPersonal({
+      manifestPath: scaffold(), env: POD_ENV,
+      fetchImpl: stubFetch((url) => (url.endsWith('/publish-batch') ? { status: 404, body: { error: 'Not found' } }
+        : url.endsWith('/tileapps/personal') ? { status: 201, body: { appId: 'pa-x-clock' } } : { status: 200, body: { uploaded: 2, portalPins: [PINS[0]] } })),
+    });
+    assert.equal(r.ok, true);
+    if (r.ok) assert.match(r.output, /portal: pinned as project default on proj-1 — not serving until re-pinned/);
+  });
+});
+
+describe('portalPinLines', () => {
+  it('is empty with no pins, and says when a plain pin still serves', () => {
+    assert.deepEqual(portalPinLines(undefined), []);
+    assert.deepEqual(portalPinLines([]), []);
+    assert.deepEqual(
+      portalPinLines([{ scope: 'project', projectId: 'p', title: null, follow: 'pinned', serving: true, servingVersion: '1.0.0' }]),
+      ['  portal: pinned as project default on p — serving 1.0.0'],
+    );
   });
 });
 

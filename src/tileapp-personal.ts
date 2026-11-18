@@ -832,7 +832,7 @@ interface BundleUploadResponse {
   portalPins?: PortalPinLine[];
 }
 
-interface PortalPinLine {
+export interface PortalPinLine {
   scope: 'project' | 'relationship';
   projectId: string;
   relationshipId?: string;
