@@ -355,7 +355,10 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
   // ship that carries assets — a Worker with no assets already runs first.
   let runWorkerFirst: boolean | string[] | undefined = config.assets?.runWorkerFirst;
   let runWorkerFirstSource = '.yolo/deploy.json';
-  if (runWorkerFirst === undefined) {
+  if (runWorkerFirst === undefined && shape.type === 'worker') {
+    // Only a Worker ship reads the wrangler fallback: a project detected as
+    // static ships through the platform shim, and a wrangler setting it never
+    // asked YOLO Host to honour must not start failing its ships.
     const fromWrangler = (deps.readWranglerRunWorkerFirstImpl ?? readWranglerRunWorkerFirst)(cwd);
     if (!fromWrangler.ok) return fail('run-worker-first-invalid', fromWrangler.message);
     if (fromWrangler.value !== undefined) {

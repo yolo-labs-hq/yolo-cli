@@ -359,14 +359,28 @@ describe('deploy-ship — happy path (static)', () => {
       assert.equal(recorded.startCalls.length, 0);
     });
 
-    it('a static ship refuses runWorkerFirst: true', async () => {
+    it('a static ship refuses deploy.json runWorkerFirst: true', async () => {
       const { deps, recorded } = makeDeps({
-        readWranglerRunWorkerFirstImpl: () => ({ ok: true, value: true, sourceFile: 'wrangler.json' }),
+        readDeployConfigImpl: () => linked({ ...CONFIG, assets: { runWorkerFirst: true } }),
       });
       const result = await runShip(deps).promise;
       assert.equal(result.ok, false);
       if (!result.ok) assert.equal(result.kind, 'run-worker-first-invalid');
       assert.equal(recorded.startCalls.length, 0);
+    });
+
+    it('a static ship ignores the wrangler fallback (never reads it)', async () => {
+      let read = false;
+      const { deps, recorded } = makeDeps({
+        readWranglerRunWorkerFirstImpl: () => {
+          read = true;
+          return { ok: true, value: true, sourceFile: 'wrangler.json' };
+        },
+      });
+      const result = await runShip(deps).promise;
+      assert.equal(result.ok, true);
+      assert.equal(read, false);
+      assert.equal(recorded.startCalls[0]!.request.runWorkerFirst, undefined);
     });
   });
 
