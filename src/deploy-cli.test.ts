@@ -7,6 +7,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { Readable } from 'node:stream';
 
 import {
   runDeployCmd,
@@ -2413,4 +2414,41 @@ it('refuses an omitted persisted association instead of assuming it is unlinked'
   assert.equal(code, 2);
   assert.equal(calls, 0);
   assert.match(io.stderr.join(''), /invalid-response/);
+});
+
+
+describe('deploy secret set', () => {
+  it('sends exact stdin bytes in the owner-authenticated request without printing them', async () => {
+    const io = makeIo();
+    const value = '  fixture-secret\n';
+    let called = false;
+    const exit = await runDeployCmd(['secret', 'set', 'SIGNING_KEY'], baseDeps(io, {
+      stdin: Readable.from([value]),
+      fetchImpl: async (url, init) => {
+        called = true;
+        assert.equal(url, 'https://api.example.com/v1/deploy/projects/hp_8f3a/secrets/SIGNING_KEY');
+        assert.equal(init?.method, 'PUT');
+        assert.equal(init?.redirect, 'error');
+        assert.equal(init?.headers?.Authorization, 'Bearer tok');
+        assert.deepEqual(JSON.parse(String(init?.body)), { value });
+        return new Response(JSON.stringify({ secretNames: ['SIGNING_KEY'] }));
+      },
+    }));
+    assert.equal(called, true);
+    assert.equal(exit, 0);
+    assert.deepEqual(io.stdout, ['Secret SIGNING_KEY set.\n']);
+    assert.deepEqual(io.stderr, []);
+  });
+
+  it('keeps reflected input and accidental value arguments out of output', async () => {
+    const io = makeIo();
+    const value = 'fixture-secret';
+    const deps = baseDeps(io, {
+      stdin: Readable.from([value]),
+      fetchImpl: async () => new Response(JSON.stringify({ error: value }), { status: 400 }),
+    });
+    assert.equal(await runDeployCmd(['secret', 'set', 'SIGNING_KEY', value], deps), 64);
+    assert.equal(await runDeployCmd(['secret', 'set', 'SIGNING_KEY'], deps), 2);
+    assert.doesNotMatch([...io.stdout, ...io.stderr].join(''), /fixture-secret/);
+  });
 });

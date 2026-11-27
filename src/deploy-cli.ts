@@ -27,6 +27,7 @@
 import * as path from 'node:path';
 import { formatOwnerApprovalPending, ownerApprovalRequestedOf } from './pod-owner-approval.js';
 import { statSync } from 'node:fs';
+import type { Readable } from 'node:stream';
 
 /** Path kind for `validate`: a file, a directory, something else, or missing. */
 export type PathKind = 'file' | 'dir' | 'other' | 'missing';
@@ -68,6 +69,7 @@ import {
   getLogs,
   pollTail,
   queryD1,
+  setProjectSecret,
   type DeployClientFailure,
   type DeployContext,
   type DeployFetchLike,
@@ -98,6 +100,7 @@ export interface DeployCliDeps {
   cwd?: string;
   env?: Record<string, string | undefined>;
   io?: DeployIo;
+  stdin?: Readable & { isTTY?: boolean };
   readFileImpl?: ReadFileImpl;
   /** Path-kind probe (for `validate`'s entry/assets checks); defaults to a statSync wrapper. */
   statPathImpl?: (p: string) => PathKind;
@@ -149,6 +152,7 @@ const USAGE = [
   '       yolo deploy set-parent --none [--json]',
   '       yolo deploy delete [--confirm <slug>] [--json]',
   '       yolo deploy clone [--name <name>] [--slug <slug>] [--json]',
+  '       yolo deploy secret set NAME < secret-file',
   '       yolo deploy db query "<sql>" [--json]',
 ].join('\n');
 
@@ -179,6 +183,7 @@ export async function runDeployCmd(args: string[], deps: DeployCliDeps = {}): Pr
   if (sub === 'set-parent') return runSetParentCmd(args.slice(1), deps, io);
   if (sub === 'delete') return runDeleteCmd(args.slice(1), deps, io);
   if (sub === 'clone') return runCloneCmd(args.slice(1), deps, io);
+  if (sub === 'secret') return runSecretCmd(args.slice(1), deps, io);
   if (sub === 'db') return runDbCmd(args.slice(1), deps, io);
   if (sub && !sub.startsWith('--')) {
     io.err(`yolo deploy: unknown subcommand '${sub}'\n${USAGE}\n`);
@@ -2118,15 +2123,74 @@ export function parseDbQueryArgs(args: string[]): ParsedDbQueryArgs | ParseError
   return { ok: true, sql, jsonOutput };
 }
 
+async function runSecretCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Promise<number> {
+  const [verb, name] = args;
+  if (args.length !== 2 || verb !== 'set' || !/^[A-Z][A-Z0-9_]{0,63}$/.test(name ?? '')) {
+    // Never repeat the arguments: an operator may have passed the secret by mistake.
+    io.err('Usage: yolo deploy secret set NAME < secret-file\n');
+    return 64;
+  }
+
+  const input = deps.stdin ?? process.stdin;
+  if (input.isTTY) {
+    io.err('Supply the secret through a pipe or redirect a file to stdin.\n');
+    return 64;
+  }
+  const linked = requireLink(deps, io);
+  if (!linked.ok) return linked.exitCode;
+  const auth = resolveAuth(deps);
+  if (!auth.ok) {
+    io.err(`${formatFail({ kind: 'auth', message: auth.message })}\n`);
+    return 78;
+  }
+
+  // Match the API's UTF-8 byte limit. Preserve whitespace, including a final newline.
+  const chunks: Buffer[] = [];
+  let size = 0;
+  let value: string;
+  try {
+    for await (const chunk of input) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += bytes.length;
+      if (size > 8192) {
+        io.err('Secret input exceeds 8192 bytes.\n');
+        return 64;
+      }
+      chunks.push(bytes);
+    }
+    if (size === 0) {
+      io.err('Secret input is empty.\n');
+      return 64;
+    }
+    value = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(Buffer.concat(chunks, size));
+  } catch {
+    io.err('Could not read secret input as UTF-8.\n');
+    return 1;
+  }
+
+  const result = await setProjectSecret(auth.context, linked.projectId, name, value);
+  if (!result.ok) {
+    if (result.kind === 'approval-required' || result.kind === 'approval-pending' || result.kind === 'awaiting-approval') {
+      io.err('PENDING [awaiting-approval]: Check Studio Approvals. After approval, rerun with the same input.\n');
+      return 3;
+    }
+    // An upstream failure may reflect request data. Report only the HTTP status.
+    io.err(`Secret was not set${typeof result.status === 'number' ? ` (HTTP ${result.status})` : ''}.\n`);
+    return exitCodeForFailure(result.kind);
+  }
+  io.out(`Secret ${name} set.\n`);
+  return 0;
+}
+
 async function runDbCmd(args: string[], deps: DeployCliDeps, io: DeployIo): Promise<number> {
   const verb = args[0];
-  // Only `db query` is a CLI verb. Provisioning/env/secret are MCP-only;
+  // Only `db query` is a CLI verb. Provisioning and env setting are MCP-only;
   // reject other db subcommands with usage + exit 64.
   if (verb !== 'query') {
     io.err(
       `yolo deploy db: unknown subcommand '${verb ?? ''}'\n` +
         'Usage: yolo deploy db query "<sql>" [--json]\n' +
-        'note: provisioning (db_provision/kv_create/bucket_create), env_set and set_secret are MCP-only (no CLI verb).\n',
+        'note: provisioning (db_provision/kv_create/bucket_create), env_set is MCP-only (no CLI verb).\n',
     );
     return 64;
   }

@@ -44,6 +44,7 @@ export type DeployFetchLike = (input: string, init?: {
   method?: string;
   headers?: Record<string, string>;
   body?: string | FormData;
+  redirect?: 'error';
 }) => Promise<{
   ok: boolean;
   status: number;
@@ -493,6 +494,25 @@ export async function republishProject(
   projectId: string,
 ): Promise<ClientResult<unknown>> {
   return jsonLeg(ctx, `/deploy/projects/${enc(projectId)}/republish`, { method: 'POST' });
+}
+
+export function setProjectSecret(
+  ctx: DeployContext,
+  projectId: string,
+  name: string,
+  value: string,
+): Promise<ClientResult<unknown>> {
+  const fetch = resolveFetch(ctx);
+  if (!fetch) return Promise.resolve(noFetchFailure());
+  // A 307/308 must never forward the secret body to a different URL.
+  const secretContext: DeployContext = {
+    ...ctx,
+    fetchImpl: (url, init) => fetch(url, { ...init, redirect: 'error' }),
+  };
+  return jsonLeg(secretContext, `/deploy/projects/${enc(projectId)}/secrets/${enc(name)}`, {
+    method: 'PUT',
+    jsonBody: { value },
+  });
 }
 
 export interface D1QueryRow {
