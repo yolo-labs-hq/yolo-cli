@@ -1029,6 +1029,10 @@ async function runValidateCmd(args: string[], deps: DeployCliDeps, io: DeployIo)
   if (config?.compatibilityFlags?.length) {
     io.out(`  compatibilityFlags: ${config.compatibilityFlags.join(', ')}\n`);
   }
+  if (config?.assets?.runWorkerFirst !== undefined) {
+    const rwf = config.assets.runWorkerFirst;
+    io.out(`  assets.runWorkerFirst: ${Array.isArray(rwf) ? rwf.join(', ') : String(rwf)}\n`);
+  }
   for (const n of notes) io.out(`  note: ${n}\n`);
   return 0;
 }

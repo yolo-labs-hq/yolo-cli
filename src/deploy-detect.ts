@@ -475,6 +475,76 @@ export function readWranglerCrons(cwd: string, readFileImpl?: ReadFileImpl): Wra
   return extractTomlCrons(toml);
 }
 
+/** Result of reading wrangler `assets.run_worker_first` (top level only). */
+export type WranglerRunWorkerFirstResult =
+  | { ok: true; value: boolean | string[]; sourceFile: string }
+  | { ok: true; value: undefined }
+  | { ok: false; message: string };
+
+/**
+ * Read top-level `assets.run_worker_first` from wrangler.jsonc / wrangler.json /
+ * wrangler.toml, so a project that already routes its API through the Worker
+ * keeps doing so on YOLO Host instead of having the setting silently dropped.
+ * Only the SHAPE is checked here (boolean or string array); the route-glob
+ * rules run in `validateRunWorkerFirst` at ship. deploy.json
+ * `assets.runWorkerFirst` wins when present.
+ */
+export function readWranglerRunWorkerFirst(cwd: string, readFileImpl?: ReadFileImpl): WranglerRunWorkerFirstResult {
+  const read = readFileImpl ?? defaultReadFile;
+  for (const name of ['wrangler.jsonc', 'wrangler.json']) {
+    const text = read(path.join(cwd, name));
+    if (text === undefined) continue;
+    const parsed = parseJsonc(text);
+    if (parsed === undefined) return { ok: true, value: undefined };
+    const assets = parsed.assets;
+    if (assets === null || typeof assets !== 'object' || Array.isArray(assets)) return { ok: true, value: undefined };
+    const value = (assets as Record<string, unknown>).run_worker_first;
+    if (value === undefined) return { ok: true, value: undefined };
+    if (typeof value === 'boolean') return { ok: true, value, sourceFile: name };
+    if (Array.isArray(value) && value.every((v) => typeof v === 'string')) {
+      return { ok: true, value: value as string[], sourceFile: name };
+    }
+    return { ok: false, message: `${name}: \`assets.run_worker_first\` must be true, false, or an array of route globs` };
+  }
+  const toml = read(path.join(cwd, 'wrangler.toml'));
+  if (toml === undefined) return { ok: true, value: undefined };
+  return extractTomlRunWorkerFirst(toml);
+}
+
+/** `[assets]` → `run_worker_first = true | false | ["/api/*", …]`, single- or multi-line. */
+function extractTomlRunWorkerFirst(text: string): WranglerRunWorkerFirstResult {
+  const lines = text.split('\n');
+  let section = '';
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!.trim();
+    const sectionMatch = /^\[([^\]]+)\]/.exec(line);
+    if (sectionMatch) {
+      section = sectionMatch[1]!.trim();
+      continue;
+    }
+    if (section !== 'assets') continue;
+    const m = /^run_worker_first\s*=\s*(.*)$/.exec(line);
+    if (!m) continue;
+    let value = m[1]!.replace(/\s+#.*$/, '').trim();
+    if (value === 'true' || value === 'false') return { ok: true, value: value === 'true', sourceFile: 'wrangler.toml' };
+    while (!value.includes(']') && i + 1 < lines.length) value += '\n' + lines[++i]!;
+    const body = /^\[([\s\S]*)\]\s*(#.*)?$/.exec(value.trim());
+    if (!body) {
+      return { ok: false, message: 'wrangler.toml: `[assets] run_worker_first` must be true, false, or an array of route globs' };
+    }
+    const rules: string[] = [];
+    const rest = body[1]!.replace(/#[^\n"']*$/gm, '').replace(/("[^"]*"|'[^']*')|\s+|,/g, (_tok, str: string | undefined) => {
+      if (str) rules.push(str.slice(1, -1));
+      return '';
+    });
+    if (rest.trim() !== '') {
+      return { ok: false, message: 'wrangler.toml: `[assets] run_worker_first` must be an array of quoted route globs' };
+    }
+    return { ok: true, value: rules, sourceFile: 'wrangler.toml' };
+  }
+  return { ok: true, value: undefined };
+}
+
 /**
  * `[triggers]` → `crons = ["…", '…']`, single- or multi-line. Line comments
  * outside strings are dropped. Anything else in the value is an error.

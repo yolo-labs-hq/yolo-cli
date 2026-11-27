@@ -305,3 +305,61 @@ describe('deploy-config — writeDeployConfig', () => {
     );
   });
 });
+
+describe('assets.runWorkerFirst', () => {
+  it('accepts booleans and route globs, and writes them canonically after worker', () => {
+    for (const runWorkerFirst of [true, false, ['/api/*', '!/api/docs/*']]) {
+      const r = validateDeployConfig({ $version: 1, type: 'worker', assets: { runWorkerFirst } });
+      assert.equal(r.ok, true, JSON.stringify(runWorkerFirst));
+      if (r.ok) assert.deepEqual(r.warnings, []);
+    }
+    const dir = makeTmpDir();
+    writeDeployConfig(dir, {
+      $version: 1,
+      type: 'worker',
+      compatibilityFlags: ['nodejs_compat'],
+      assets: { runWorkerFirst: ['/api/*'] },
+      worker: { entry: 'src/index.ts', assetsDir: 'dist' },
+    });
+    const text = readFileSync(deployConfigPath(dir), 'utf8');
+    assert.deepEqual(Object.keys(JSON.parse(text)), ['$version', 'type', 'worker', 'assets', 'compatibilityFlags']);
+  });
+
+  it('refuses invalid globs with one error per rule, path-indexed', () => {
+    const r = validateDeployConfig({
+      $version: 1,
+      type: 'worker',
+      assets: { runWorkerFirst: ['api/*', '/a?b=1', '/x/{a,b}', '/ok/*', '/ok/*'] },
+    });
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    const byPath = Object.fromEntries(r.errors.map((e) => [e.path, e.message]));
+    assert.match(byPath['assets.runWorkerFirst[0]']!, /must start with "\/"/);
+    assert.match(byPath['assets.runWorkerFirst[1]']!, /query string/);
+    assert.match(byPath['assets.runWorkerFirst[2]']!, /only "\*"/);
+    assert.match(byPath['assets.runWorkerFirst[4]']!, /duplicate/);
+    assert.equal(byPath['assets.runWorkerFirst[3]'], undefined);
+  });
+
+  it('refuses [], only-negative rules, wrong types, and a static type', () => {
+    const cases: Array<[unknown, string | undefined, RegExp]> = [
+      [[], 'worker', /empty array/],
+      [['!/api/*'], 'worker', /only negative/],
+      ['/api/*', 'worker', /must be true, false, or an array/],
+      [true, 'static', /needs type 'worker'/],
+    ];
+    for (const [runWorkerFirst, type, re] of cases) {
+      const r = validateDeployConfig({ $version: 1, type, assets: { runWorkerFirst } });
+      assert.equal(r.ok, false, JSON.stringify(runWorkerFirst));
+      if (!r.ok) assert.match(r.errors[0]!.message, re);
+    }
+    const notObject = validateDeployConfig({ $version: 1, assets: true });
+    assert.equal(notObject.ok, false);
+  });
+
+  it('warns on an unknown assets key (e.g. the wrangler spelling)', () => {
+    const r = validateDeployConfig({ $version: 1, type: 'worker', assets: { run_worker_first: true } });
+    assert.equal(r.ok, true);
+    if (r.ok) assert.equal(r.warnings[0]!.path, 'assets.run_worker_first');
+  });
+});

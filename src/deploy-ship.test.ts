@@ -317,6 +317,59 @@ describe('deploy-ship — happy path (static)', () => {
     assert.equal(recorded.startCalls.length, 0);
   });
 
+  describe('assets.runWorkerFirst', () => {
+    const module = { name: 'worker.js', contents: new TextEncoder().encode('export default {};') };
+    const workerBundle: BundleSuccess = { ...STATIC_BUNDLE, type: 'worker', module, workerModules: [module], moduleSource: 'esbuild' };
+    const workerDeps = (config: Partial<DeployConfig>, extra: Partial<DeployShipDeps> = {}) =>
+      makeDeps({
+        readDeployConfigImpl: () => linked({ ...CONFIG, type: 'worker', ...config }),
+        detectProjectShapeImpl: () => ({ ok: true, shape: { type: 'worker', entry: 'src/index.ts', assetsDir: 'dist' }, source: 'deploy-json' }),
+        bundleProjectImpl: async () => workerBundle,
+        ...extra,
+      });
+
+    it('sends deploy.json route globs on ship/start for a worker+assets ship', async () => {
+      const { deps, recorded } = workerDeps({ assets: { runWorkerFirst: ['/api/*', '!/api/docs/*'] } });
+      const { lines, promise } = runShip(deps);
+      assert.equal((await promise).ok, true);
+      assert.deepEqual(recorded.startCalls[0]!.request.runWorkerFirst, ['/api/*', '!/api/docs/*']);
+      assert.ok(lines.some((l) => l.includes('runWorkerFirst /api/* | !/api/docs/* (.yolo/deploy.json)')));
+    });
+
+    it('falls back to wrangler assets.run_worker_first; deploy.json wins when set', async () => {
+      const wrangler = () => ({ ok: true as const, value: true, sourceFile: 'wrangler.jsonc' });
+      const a = workerDeps({}, { readWranglerRunWorkerFirstImpl: wrangler });
+      assert.equal((await runShip(a.deps).promise).ok, true);
+      assert.equal(a.recorded.startCalls[0]!.request.runWorkerFirst, true);
+      const b = workerDeps({ assets: { runWorkerFirst: false } }, { readWranglerRunWorkerFirstImpl: wrangler });
+      assert.equal((await runShip(b.deps).promise).ok, true);
+      assert.equal(b.recorded.startCalls[0]!.request.runWorkerFirst, false);
+    });
+
+    it('an invalid wrangler glob fails before any network call, naming the rule', async () => {
+      const { deps, recorded } = workerDeps({}, {
+        readWranglerRunWorkerFirstImpl: () => ({ ok: true, value: ['api/*'], sourceFile: 'wrangler.toml' }),
+      });
+      const result = await runShip(deps).promise;
+      assert.equal(result.ok, false);
+      if (!result.ok) {
+        assert.equal(result.kind, 'run-worker-first-invalid');
+        assert.match(result.message, /wrangler\.toml: invalid assets\.runWorkerFirst: \[0\] 'api\/\*' must start with "\/"/);
+      }
+      assert.equal(recorded.startCalls.length, 0);
+    });
+
+    it('a static ship refuses runWorkerFirst: true', async () => {
+      const { deps, recorded } = makeDeps({
+        readWranglerRunWorkerFirstImpl: () => ({ ok: true, value: true, sourceFile: 'wrangler.json' }),
+      });
+      const result = await runShip(deps).promise;
+      assert.equal(result.ok, false);
+      if (!result.ok) assert.equal(result.kind, 'run-worker-first-invalid');
+      assert.equal(recorded.startCalls.length, 0);
+    });
+  });
+
   it('skips uploads entirely when the server already has every asset', async () => {
     const { deps, recorded } = makeDeps({
       startShipImpl: async () => ({ ok: true, value: { ...START_RESPONSE, missing: [] } }),

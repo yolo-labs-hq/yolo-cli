@@ -13,7 +13,7 @@
  *   - JSON, 2-space indent, single trailing `\n`.
  *   - Fixed key order per the spec example: $version, projectId, slug,
  *     type, build{command,outputDir}, worker{entry,assetsDir},
- *     compatibilityFlags, bindings. Absent optional fields are omitted.
+ *     assets{runWorkerFirst}, compatibilityFlags, crons, bindings. Absent optional fields are omitted.
  *   - Same input → byte-identical output (idempotent re-write).
  *
  * Validation is lenient on PRESENCE (only `$version` is required —
@@ -31,6 +31,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import type { ReadFileImpl } from './auth-context.js';
+import { validateRunWorkerFirst } from './run-worker-first.js';
 
 // ─── Public types ─────────────────────────────────────────────────────────
 
@@ -60,6 +61,17 @@ export interface DeployWorkerConfig {
   assetsDir?: string;
 }
 
+export interface DeployAssetsConfig {
+  /**
+   * Cloudflare `run_worker_first` for a Worker that ships static assets. By
+   * default a request matching an asset is served WITHOUT running the Worker.
+   * `true` runs the Worker first for every request; an array of route globs
+   * (`["/api/*", "!/api/docs/*"]`) runs it first only for matching paths, with
+   * `!` rules carving exceptions. `*` is the only wildcard. Worker ships only.
+   */
+  runWorkerFirst?: boolean | string[];
+}
+
 export interface DeployBinding {
   /** Resource kind (`d1`, `r2`, `kv`, …). */
   kind: string;
@@ -78,6 +90,8 @@ export interface DeployConfig {
   type?: 'static' | 'worker';
   build?: DeployBuildConfig;
   worker?: DeployWorkerConfig;
+  /** Static-assets routing for a Worker ship (`run_worker_first`). */
+  assets?: DeployAssetsConfig;
   /** Passed through ship/start → WfP upload metadata (Next.js needs `nodejs_compat`). */
   compatibilityFlags?: string[];
   /**
@@ -349,6 +363,30 @@ export function validateDeployConfig(value: unknown): ValidateDeployConfigResult
     }
   }
 
+  if (obj.assets !== undefined) {
+    if (!isPlainObject(obj.assets)) {
+      errors.push({ path: 'assets', message: `must be an object, got ${describe(obj.assets)}` });
+    } else if (obj.assets.runWorkerFirst !== undefined) {
+      const checked = validateRunWorkerFirst(obj.assets.runWorkerFirst);
+      if (!checked.ok) {
+        for (const message of checked.errors) {
+          // Rule-level messages start with `[i] …` — fold the index into the path.
+          const m = /^\[(\d+)\] ([\s\S]*)$/.exec(message);
+          errors.push(
+            m
+              ? { path: `assets.runWorkerFirst[${m[1]}]`, message: m[2]! }
+              : { path: 'assets.runWorkerFirst', message },
+          );
+        }
+      } else if (obj.type === 'static' && checked.value !== false) {
+        errors.push({
+          path: 'assets.runWorkerFirst',
+          message: "needs type 'worker' — a static site has no Worker of its own to run before its assets",
+        });
+      }
+    }
+  }
+
   if (obj.compatibilityFlags !== undefined) {
     if (!Array.isArray(obj.compatibilityFlags)) {
       errors.push({
@@ -403,9 +441,10 @@ export function validateDeployConfig(value: unknown): ValidateDeployConfigResult
 // surfaced as warnings so a silently-ignored field doesn't mislead the author.
 // `bindings[]` entries intentionally allow extra keys (provisioning hints), so
 // they're excluded here.
-const KNOWN_TOP_KEYS = new Set(['$version', 'projectId', 'slug', 'type', 'build', 'worker', 'compatibilityFlags', 'crons', 'bindings']);
+const KNOWN_TOP_KEYS = new Set(['$version', 'projectId', 'slug', 'type', 'build', 'worker', 'assets', 'compatibilityFlags', 'crons', 'bindings']);
 const KNOWN_BUILD_KEYS = new Set(['command', 'outputDir']);
 const KNOWN_WORKER_KEYS = new Set(['entry', 'prebuilt', 'assetsDir']);
+const KNOWN_ASSETS_KEYS = new Set(['runWorkerFirst']);
 
 function collectUnknownKeyWarnings(obj: Record<string, unknown>): DeployConfigValidationError[] {
   const warnings: DeployConfigValidationError[] = [];
@@ -422,6 +461,7 @@ function collectUnknownKeyWarnings(obj: Record<string, unknown>): DeployConfigVa
   for (const k of Object.keys(obj)) if (!KNOWN_TOP_KEYS.has(k)) note(k, k);
   if (isPlainObject(obj.build)) for (const k of Object.keys(obj.build)) if (!KNOWN_BUILD_KEYS.has(k)) note(`build.${k}`, k);
   if (isPlainObject(obj.worker)) for (const k of Object.keys(obj.worker)) if (!KNOWN_WORKER_KEYS.has(k)) note(`worker.${k}`, k);
+  if (isPlainObject(obj.assets)) for (const k of Object.keys(obj.assets)) if (!KNOWN_ASSETS_KEYS.has(k)) note(`assets.${k}`, k);
   return warnings;
 }
 
@@ -449,6 +489,15 @@ function canonicalize(config: DeployConfig): Record<string, unknown> {
     if (config.worker.prebuilt !== undefined) worker.prebuilt = config.worker.prebuilt;
     if (config.worker.assetsDir !== undefined) worker.assetsDir = config.worker.assetsDir;
     out.worker = worker;
+  }
+  if (config.assets !== undefined) {
+    const assets: Record<string, unknown> = {};
+    if (config.assets.runWorkerFirst !== undefined) {
+      assets.runWorkerFirst = Array.isArray(config.assets.runWorkerFirst)
+        ? [...config.assets.runWorkerFirst]
+        : config.assets.runWorkerFirst;
+    }
+    out.assets = assets;
   }
   if (config.compatibilityFlags !== undefined) out.compatibilityFlags = [...config.compatibilityFlags];
   if (config.crons !== undefined) out.crons = [...config.crons];

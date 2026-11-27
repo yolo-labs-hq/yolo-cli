@@ -13,7 +13,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-import { DETECT_INIT_HINT, adaptWrangler, detectProjectShape, readWranglerCrons } from './deploy-detect.js';
+import { DETECT_INIT_HINT, adaptWrangler, detectProjectShape, readWranglerCrons, readWranglerRunWorkerFirst } from './deploy-detect.js';
 import type { DeployConfig } from './deploy-config.js';
 
 function makeTmpDir(): string {
@@ -643,5 +643,41 @@ describe('readWranglerCrons — wrangler `triggers.crons` (no longer silently dr
     assert.equal(scoped.ok, false);
     const garbage = readWranglerCrons(cwd, fileStub(cwd, { 'wrangler.toml': '[triggers]\ncrons = [5]\n' }));
     assert.equal(garbage.ok, false);
+  });
+});
+
+describe('readWranglerRunWorkerFirst — wrangler `assets.run_worker_first`', () => {
+  const cwd = '/proj';
+
+  it('reads a boolean or a glob array from wrangler.jsonc', () => {
+    const t = fileStub(cwd, { 'wrangler.jsonc': '{ "assets": { "directory": "dist", "run_worker_first": true } }' });
+    assert.deepEqual(readWranglerRunWorkerFirst(cwd, t), { ok: true, value: true, sourceFile: 'wrangler.jsonc' });
+    const g = fileStub(cwd, { 'wrangler.json': '{ "assets": { "run_worker_first": ["/api/*", "!/api/docs/*"] } }' });
+    assert.deepEqual(readWranglerRunWorkerFirst(cwd, g), {
+      ok: true, value: ['/api/*', '!/api/docs/*'], sourceFile: 'wrangler.json',
+    });
+  });
+
+  it('absent → undefined; a wrong shape is an error', () => {
+    assert.deepEqual(readWranglerRunWorkerFirst(cwd, fileStub(cwd, { 'wrangler.json': '{ "assets": { "directory": "dist" } }' })), {
+      ok: true, value: undefined,
+    });
+    const bad = readWranglerRunWorkerFirst(cwd, fileStub(cwd, { 'wrangler.json': '{ "assets": { "run_worker_first": "/api/*" } }' }));
+    assert.equal(bad.ok, false);
+  });
+
+  it('reads [assets] run_worker_first from wrangler.toml (bool, single- and multi-line arrays)', () => {
+    assert.deepEqual(
+      readWranglerRunWorkerFirst(cwd, fileStub(cwd, { 'wrangler.toml': '[assets]\ndirectory = "dist"\nrun_worker_first = true # all\n' })),
+      { ok: true, value: true, sourceFile: 'wrangler.toml' },
+    );
+    assert.deepEqual(
+      readWranglerRunWorkerFirst(cwd, fileStub(cwd, { 'wrangler.toml': '[assets]\nrun_worker_first = [\n  "/api/*",\n  \'!/api/docs/*\',\n]\n' })),
+      { ok: true, value: ['/api/*', '!/api/docs/*'], sourceFile: 'wrangler.toml' },
+    );
+    assert.deepEqual(
+      readWranglerRunWorkerFirst(cwd, fileStub(cwd, { 'wrangler.toml': '[vars]\nrun_worker_first = true\n' })),
+      { ok: true, value: undefined },
+    );
   });
 });

@@ -167,6 +167,8 @@ export interface StartShipRequest {
   compatibilityFlags?: string[];
   /** Cron triggers (wrangler `triggers.crons` / deploy.json `crons`). */
   crons?: string[];
+  /** deploy.json `assets.runWorkerFirst` / wrangler `assets.run_worker_first` (Worker ships). */
+  runWorkerFirst?: boolean | string[];
   gitSha?: string;
   /**
    * True when the working tree differed from HEAD at ship time (tracked

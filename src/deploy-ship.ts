@@ -25,7 +25,8 @@ import * as os from 'node:os';
 import { spawn, execFileSync } from 'node:child_process';
 
 import { readDeployConfig, type DeployConfig } from './deploy-config.js';
-import { detectProjectShape, readWranglerCrons, type ProjectShape } from './deploy-detect.js';
+import { detectProjectShape, readWranglerCrons, readWranglerRunWorkerFirst, type ProjectShape } from './deploy-detect.js';
+import { validateRunWorkerFirst } from './run-worker-first.js';
 import { bundleProject, type BundleAsset } from './deploy-bundle.js';
 import {
   resolveDeployContext,
@@ -61,6 +62,8 @@ export interface DeployShipDeps {
   detectProjectShapeImpl?: typeof detectProjectShape;
   /** wrangler `triggers.crons` reader. Default: readWranglerCrons. */
   readWranglerCronsImpl?: typeof readWranglerCrons;
+  /** wrangler `assets.run_worker_first` reader. Default: readWranglerRunWorkerFirst. */
+  readWranglerRunWorkerFirstImpl?: typeof readWranglerRunWorkerFirst;
   bundleProjectImpl?: typeof bundleProject;
   startShipImpl?: typeof startShip;
   uploadAssetBucketImpl?: typeof uploadAssetBucket;
@@ -346,6 +349,44 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
     progress(`deploy: crons ${crons.length} declared in ${cronsSource} (UTC): ${crons.join(' | ')}`);
   }
 
+  // 2.6 assets.runWorkerFirst — deploy.json wins, else wrangler
+  // `assets.run_worker_first`. Validated here so a bad glob fails before the
+  // build; the server re-validates (it is the authority). Sent only on a Worker
+  // ship that carries assets — a Worker with no assets already runs first.
+  let runWorkerFirst: boolean | string[] | undefined = config.assets?.runWorkerFirst;
+  let runWorkerFirstSource = '.yolo/deploy.json';
+  if (runWorkerFirst === undefined) {
+    const fromWrangler = (deps.readWranglerRunWorkerFirstImpl ?? readWranglerRunWorkerFirst)(cwd);
+    if (!fromWrangler.ok) return fail('run-worker-first-invalid', fromWrangler.message);
+    if (fromWrangler.value !== undefined) {
+      runWorkerFirst = fromWrangler.value;
+      runWorkerFirstSource = fromWrangler.sourceFile;
+    }
+  }
+  if (runWorkerFirst !== undefined) {
+    const checked = validateRunWorkerFirst(runWorkerFirst);
+    if (!checked.ok) {
+      return fail(
+        'run-worker-first-invalid',
+        `${runWorkerFirstSource}: invalid assets.runWorkerFirst: ${checked.errors.join('; ')}`,
+        'Use true, false, or route globs like ["/api/*", "!/api/docs/*"] (paths only; "*" is the only wildcard).',
+      );
+    }
+    if (shape.type !== 'worker') {
+      if (runWorkerFirst !== false) {
+        return fail(
+          'run-worker-first-invalid',
+          `${runWorkerFirstSource}: assets.runWorkerFirst needs a Worker — a static site has no code of its own to run before its assets`,
+        );
+      }
+      runWorkerFirst = undefined;
+    } else {
+      progress(
+        `deploy: runWorkerFirst ${Array.isArray(runWorkerFirst) ? runWorkerFirst.join(' | ') : String(runWorkerFirst)} (${runWorkerFirstSource})`,
+      );
+    }
+  }
+
   // 3. Build (if the shape carries a build command).
   if (shape.buildCommand) {
     const startedAt = Date.now();
@@ -418,6 +459,7 @@ export async function runDeployShip(options: DeployShipOptions): Promise<DeployS
   // cron-aware client from a pre-cron CLI, whose Worker ships with scheduled() it refuses
   // (`cron-client-outdated`) rather than shipping without the crons that CLI could not read.
   if (crons.length > 0 || shape.type === 'worker') request.crons = crons;
+  if (runWorkerFirst !== undefined && Object.keys(manifest).length > 0) request.runWorkerFirst = runWorkerFirst;
   const gitSha = resolveGitSha(cwd);
   if (gitSha) request.gitSha = gitSha;
   // gitSha names HEAD, which is NOT what was built when the tree is dirty. Say
